@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
@@ -16,15 +16,26 @@ DEFAULT_SPLITS = REPO_ROOT / "configs" / "splits.yaml"
 DateRange = tuple[date, date]
 
 
-class PathsCfg(BaseModel):
+class _Cfg(BaseModel):
+    """Base for config models: unknown keys (typos) are errors."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class PathsCfg(_Cfg):
     data_dir: Path = Path("data")
     models_dir: Path = Path("models")
     app_db: Path = Path("data/app.duckdb")
     research_db: Path = Path("data/research.duckdb")
     report_json: Path = Path("data/report.json")
 
+    @field_serializer("*")
+    def _posix(self, v: Path) -> str:
+        # platform-independent serialization (keeps config_hash identical on Windows/Linux)
+        return v.as_posix()
 
-class FeatureCfg(BaseModel):
+
+class FeatureCfg(_Cfg):
     windows_s: list[int] = [10, 60, 300, 1800]
     stride_s: int = Field(default=10, gt=0)
     baseline_s: int = 86400
@@ -50,14 +61,14 @@ class FeatureCfg(BaseModel):
         return self
 
 
-class ChiefCfg(BaseModel):
+class ChiefCfg(_Cfg):
     budget_per_symbol_day: float = 2.0
     suppress_for_s: int = 300
     agreement_p: float = 0.01
     attribution_min: float = 3.0
 
 
-class EvalCfg(BaseModel):
+class EvalCfg(_Cfg):
     before_s: int = 120
     after_s: int = 300
     seeds: list[int] = [0, 1, 2, 3, 4]
@@ -68,7 +79,7 @@ class EvalCfg(BaseModel):
     hard_negative_k: int = 20
 
 
-class SplitsCfg(BaseModel):
+class SplitsCfg(_Cfg):
     train: DateRange
     accept: DateRange
     cal: DateRange
@@ -93,7 +104,7 @@ class SplitsCfg(BaseModel):
         return self
 
 
-class AECfg(BaseModel):
+class AECfg(_Cfg):
     hidden: int = 64
     bottleneck: int = 16
     epochs: int = 50
@@ -105,7 +116,7 @@ class AECfg(BaseModel):
     train_stride_s: int = 60
 
 
-class LiveCfg(BaseModel):
+class LiveCfg(_Cfg):
     symbols: list[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
     ws_url: str = "wss://data-stream.binance.vision/stream"
     budget_per_hour: float = 2.0
@@ -114,7 +125,7 @@ class LiveCfg(BaseModel):
     bar_grace_s: int = 2
 
 
-class Settings(BaseModel):
+class Settings(_Cfg):
     paths: PathsCfg = PathsCfg()
     features: FeatureCfg = FeatureCfg()
     chief: ChiefCfg = ChiefCfg()

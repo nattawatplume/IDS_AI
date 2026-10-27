@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from pathlib import Path
 
@@ -6,7 +7,6 @@ from pydantic import ValidationError
 
 from idsai.config import (
     FeatureCfg,
-    Settings,
     config_hash,
     file_sha,
     load_settings,
@@ -115,4 +115,25 @@ def test_quote_unit_for():
 
 def test_settings_rejects_bad_mode():
     with pytest.raises(ValidationError):
-        Settings.model_validate({"mode": "paper"})
+        load_settings(overrides={"mode": "paper"})
+
+
+def test_unknown_keys_rejected():
+    with pytest.raises(ValidationError):
+        load_settings(overrides={"chief": {"agrement_p": 0.05}})
+    with pytest.raises(ValidationError):
+        load_settings(overrides={"prot": 1})
+    with pytest.raises(ValidationError):
+        load_settings(overrides={"splits": {"tran": ["2018-01-01", "2018-02-01"]}})
+
+
+def test_config_hash_platform_independent_paths():
+    base = load_settings()
+    # os-native join (backslashes on Windows) must hash like the posix spelling
+    native = load_settings(overrides={"paths": {"app_db": Path("data") / "app.duckdb"}})
+    assert config_hash(native) == config_hash(base)
+    assert "\\" not in json.dumps(base.model_dump(mode="json")["paths"])
+    assert "\\" not in json.dumps(native.model_dump(mode="json")["paths"])
+    assert config_hash(load_settings(overrides={"paths": {"app_db": "data/other.duckdb"}})) != (
+        config_hash(base)
+    )
