@@ -3,6 +3,7 @@ from datetime import date
 import polars as pl
 import pytest
 
+from idsai.config import file_sha
 from idsai.contracts.alert import Alert, DetectorRef
 from idsai.contracts.frames import LABELS, TRADES
 from idsai.data.store import Store
@@ -99,6 +100,8 @@ def test_duplicate_ids_deduped(store):
     store.write_trades(trades([1, 2, 2, 3, 1], ts))
     out = store.read_trades("BTCUSDT", D1_US, D1_US + DAY_US)
     assert out["trade_id"].to_list() == [1, 2, 3]
+    # trades() gives row i the price 100 + i; keep-first means rows 0, 1, 3 survive (not 4, 2, 3)
+    assert out["price"].to_list() == [100.0, 101.0, 103.0]
 
 
 def test_out_of_order_read_back_sorted(store):
@@ -148,6 +151,34 @@ def test_partition_sha_changes_with_content(store):
     assert store.partition_sha("BTCUSDT", D1) == a  # same content, same sha
     store.write_trades(trades([1, 2, 3], [D1_US + 1, D1_US + 2, D1_US + 3]))
     assert store.partition_sha("BTCUSDT", D1) != a
+
+
+def test_partition_sha_recomputed_when_file_changed_behind_index(store):
+    store.write_trades(trades([1, 2], [D1_US + 1, D1_US + 2]))
+    stale = store.partition_sha("BTCUSDT", D1)
+    path = store._part_path("BTCUSDT", D1)
+    trades([1, 2, 3], [D1_US + 1, D1_US + 2, D1_US + 3]).write_parquet(path)  # bypass the store
+    fresh = store.partition_sha("BTCUSDT", D1)
+    assert fresh != stale and fresh == file_sha(path)
+    idx = pl.read_parquet(store._index_path).filter(pl.col("symbol") == "BTCUSDT")
+    assert idx["sha"].to_list() == [fresh]  # index entry refreshed too
+
+
+def test_partition_sha_without_index_entry(store):
+    store.write_trades(trades([1], [D1_US + 1]))
+    store._index_path.unlink()
+    assert store.partition_sha("BTCUSDT", D1) == file_sha(store._part_path("BTCUSDT", D1))
+
+
+def test_bad_symbol_writes_nothing(store, tmp_path):
+    good = trades([1, 2], [D1_US + 1, D1_US + 2], "BTCUSDT")
+    bad = trades([1], [D1_US + 3], "../evil")
+    with pytest.raises(ValueError):
+        store.write_trades(pl.concat([good, bad]))
+    assert not store.has_day("BTCUSDT", D1)
+    assert not store._index_path.exists()
+    assert not any((tmp_path / "data" / "trades").rglob("*.parquet"))
+    assert not (tmp_path / "data" / "evil").exists()
 
 
 def test_last_trade_before(store):

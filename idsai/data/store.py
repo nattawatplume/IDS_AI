@@ -115,11 +115,13 @@ class Store:
         """Write trades into per-(symbol, UTC day) partitions, replacing each touched partition.
 
         Within a partition rows are de-duplicated on trade_id (first occurrence wins) and sorted
-        by (ts_us, trade_id).
+        by (ts_us, trade_id). Every symbol is validated before anything is written.
         """
         df = conform(df, TRADES)
         if df.height == 0:
             return
+        for symbol in df["symbol"].unique().to_list():
+            _check_symbol(symbol)
         day_col = (pl.col("ts_us") // DAY_US).cast(pl.Int32).cast(pl.Date).alias("_day")
         groups = df.with_columns(day_col).partition_by(["symbol", "_day"], as_dict=True)
         entries = []
@@ -151,13 +153,22 @@ class Store:
         return self._part_path(symbol, day).exists()
 
     def partition_sha(self, symbol: str, day: date) -> str | None:
-        """12-hex sha256 of the partition file bytes (as recorded in the index), or None."""
+        """12-hex sha256 of the partition file's actual bytes, or None if there is no partition.
+
+        The index is only a cache: the sha is recomputed from the file, and if the index entry is
+        missing or stale it is refreshed. Callers use this as a cache key, so it must never lag
+        behind the file.
+        """
         path = self._part_path(symbol, day)
-        if not path.exists():
-            return None
         with self._lock:
+            if not path.exists():
+                return None
+            actual = file_sha(path)
             hit = self._read_index().filter((pl.col("symbol") == symbol) & (pl.col("date") == day))
-        return hit["sha"][0] if hit.height else file_sha(path)
+            if not hit.height or hit["sha"][0] != actual:
+                n_rows = pl.scan_parquet(path).select(pl.len()).collect().item()
+                self._update_index([(symbol, day, actual, n_rows)])
+            return actual
 
     def read_trades(self, symbol: str, start_us: int, end_us: int) -> pl.DataFrame:
         """Trades with start_us <= ts_us < end_us, sorted by (ts_us, trade_id)."""
