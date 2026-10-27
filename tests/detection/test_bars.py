@@ -119,6 +119,13 @@ def test_pingpong_needs_same_price_qty_and_opposite_side():
     assert trades_to_bars(tr, "ABCUSDT", T0, T0 + S)["pingpong"].to_list() == [0]
 
 
+def test_pingpong_overlapping_pairs_count():
+    tr = mk_trades(
+        [(T0 + 100, 10.0, 3.0, "buy"), (T0 + 200, 10.0, 3.0, "sell"), (T0 + 300, 10.0, 3.0, "buy")]
+    )
+    assert trades_to_bars(tr, "ABCUSDT", T0, T0 + S)["pingpong"].to_list() == [2]
+
+
 def test_pingpong_across_second_boundary_counted_at_second_trade():
     tr = mk_trades([(T0 + S - 10_000, 10.0, 3.0, "buy"), (T0 + S + 10_000, 10.0, 3.0, "sell")])
     assert trades_to_bars(tr, "ABCUSDT", T0, T0 + 2 * S)["pingpong"].to_list() == [0, 1]

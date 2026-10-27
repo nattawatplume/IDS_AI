@@ -151,6 +151,23 @@ def test_baseline_window_excludes_t_and_old_samples():
     assert strict.scale[0] == FLOOR_LOG and np.isnan(strict.z(np.array([1.0, 1.0]))[1])
 
 
+def test_baseline_tail_scale_for_zero_inflated_samples():
+    small = FeatureCfg(baseline_s=86_400, min_baseline_samples=100)
+    bl = Baseline(small, np.array([FLOOR_LOG, 0.05]), is_log=np.array([True, False]))
+    t = T0 + 86_400 * S
+    for k in range(200):
+        log_x = 1.0 if k % 20 == 0 else 0.0  # 5 % ones: median = IQR = 0
+        ratio_x = (1.0 if k % 100 == 0 else -1.0) if k % 50 == 0 else 0.0  # 1 % at +1, 1 % at -1
+        bl.add(t - (200 - k) * 60 * S, np.array([log_x, ratio_x]))
+    bl.refresh(t, np.array([0.01]))
+    X = np.array([[1.0 if k % 20 == 0 else 0.0] for k in range(200)])
+    assert bl.med.tolist() == [0.0, 0.0]
+    assert bl.scale[0] == max((np.quantile(X, 0.99) - 0.0) / 2.326, FLOOR_LOG)
+    assert bl.scale[0] > FLOOR_LOG  # the tail term, not the floor, sets the scale
+    assert bl.scale[1] == pytest.approx(2.0 / (2 * 2.576), rel=0.05)
+    assert bl.z(np.array([1.0, 1.0])).max() < 3  # one ordinary event is not extreme
+
+
 def test_cusum_step():
     assert cusum_step(0.0, 3.0) == 2.5
     assert cusum_step(1.0, float("nan")) == 0.5
@@ -213,21 +230,61 @@ def test_z_nan_until_6h_of_samples():
     assert w5.select(zc).to_numpy().size and np.isnan(w5.select(zc).to_numpy()).all()
     w7 = compute_windows(bars_const(hours=7), cfg, 1.0)
     assert np.isfinite(w7.select(zc).to_numpy()[-1]).all()
+    # samples every 60 s from the first row (T0 + 1800 s): the refresh at T0 + 6.5 h is the first
+    # with 360 samples; z uses the latest refresh, so the row before it (refresh with 355) is NaN
+    t_first = T0 + 1800 * S + 360 * 60 * S
+    assert (t_first - T0) % (300 * S) == 0
+    assert math.isnan(row(w7, t_first - 10 * S)["z_n_trades_10"])
+    assert math.isnan(row(w7, t_first - 300 * S)["z_n_trades_10"])
+    assert math.isfinite(row(w7, t_first)["z_n_trades_10"])
+    # validity is per feature: ret_1800 of the first row (a sample) is NaN -> 359 valid at 6.5 h
+    assert math.isnan(row(w7, t_first)["z_ret_1800"])
+    assert math.isfinite(row(w7, t_first + 300 * S)["z_ret_1800"])
+
+
+_SAT: dict = {}
+
+
+def satoshi_windows() -> pl.DataFrame:
+    """Clean sparse BTC pair: price in {100, 101} sat, 1 trade / 5 min, ~0.001 BTC, 30 h."""
+    if not _SAT:
+        rng = np.random.default_rng(7)
+        n = 30 * 12
+        ts = T0 + np.arange(n, dtype=np.int64) * 300 * S + rng.integers(0, 300 * S, n)
+        price = rng.choice([100e-8, 101e-8], n)
+        side = np.where(rng.random(n) < 0.5, "buy", "sell")
+        tr = mk_trades(ts, price, 0.001 / price, side, symbol="ABCBTC")
+        _SAT["w"] = compute_windows(bars_of(tr, T0, T0 + 30 * H, "ABCBTC"), cfg, 1e-4)
+    return _SAT["w"]
+
+
+def _hot_fraction(w: pl.DataFrame, side: str) -> float:
+    z = np.nan_to_num(w.select(pl.col("^z_.*$")).to_numpy())  # NaN z -> 0 (not hot)
+    scored = np.isfinite(w.select(pl.col("^z_.*$")).to_numpy()).any(axis=1)
+    assert scored.sum() > 1000
+    hot = {"high": z >= 6, "abs": np.abs(z) >= 6}[side].any(axis=1)
+    return float(hot[scored].mean())
 
 
 def test_satoshi_grid_sparse_pair():  # price in {100, 101} sat, 1 trade / 5 min, ~0.001 BTC
-    rng = np.random.default_rng(7)
-    n = 30 * 12
-    ts = T0 + np.arange(n, dtype=np.int64) * 300 * S + rng.integers(0, 300 * S, n)
-    price = rng.choice([100e-8, 101e-8], n)
-    tr = mk_trades(
-        ts, price, 0.001 / price, np.where(rng.random(n) < 0.5, "buy", "sell"), symbol="ABCBTC"
-    )
-    w = compute_windows(bars_of(tr, T0, T0 + 30 * H, "ABCBTC"), cfg, 1e-4)
+    w = satoshi_windows()
     z = w.select(pl.col("^z_(ret|jump)_.*$")).to_numpy()
     assert np.isfinite(z).sum() > 1000
     assert np.nanmax(np.abs(z)) < 50  # not pinned at clip by tick bounce
     assert np.nanmax(np.abs(w.select(pl.col("^z_ret_.*$")).to_numpy())) < 5
+    # zero-inflated baselines (median = IQR = 0): one ordinary trade must not look extreme
+    assert _hot_fraction(w, "high") < 0.01
+    assert w["cusum_imb"].max() < 8 and w["cusum_ret"].max() < 8  # stealth rule threshold
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="fix round 1: the prescribed one-sided upper tail for log features leaves EMPTY "
+    "windows of a regular sparse pair at z <= -6 (measured 18.5% of clean rows, mainly "
+    "z_quote_vol_300 / z_buy_quote_1800); needs a controller ruling on a lower-tail scale",
+)
+def test_satoshi_no_extreme_abs_z():
+    assert _hot_fraction(satoshi_windows(), "abs") < 0.01
 
 
 def bars_btc_burst():
@@ -401,6 +458,26 @@ def test_kk_ratio():
     assert last["kk_price_ratio"] == pytest.approx(1.1)
     early = w.filter(pl.col("t_end_us") < T0 + 1800 * S + 12 * H)
     assert early["kk_vol_ratio"].is_nan().all()  # 24 x 30 min of history not yet there
+
+
+def test_kk_zero_history_mean_is_nan():
+    # one trade at the start, silence, then trades in the last 30 min: 12 h history mean = 0
+    n = 14 * 3600
+    ts = np.concatenate([[T0 + S], T0 + np.arange(n - 1800, n, dtype=np.int64) * S])
+    w = compute_windows(bars_of(mk_trades(ts, 100.0, 1.0, "buy"), T0, T0 + n * S), cfg, 1.0)
+    last = w.row(-1, named=True)
+    assert last["quote_vol_1800"] > 0 and math.isnan(last["kk_vol_ratio"])
+    assert last["kk_price_ratio"] == pytest.approx(1.0)
+
+
+def test_kernel_rejects_bad_grid():
+    for bad in (
+        {"stride_s": 7},  # 1800 % 7 != 0
+        {"baseline_sample_s": 65},
+        {"baseline_refresh_s": 305},
+    ):
+        with pytest.raises(ValueError):
+            Kernel(FeatureCfg.model_construct(**{**FeatureCfg().model_dump(), **bad}), 1.0)
 
 
 @pytest.mark.slow

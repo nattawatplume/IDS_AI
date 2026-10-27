@@ -45,7 +45,10 @@ FLOOR_LOG = 0.25
 FLOOR_RATIO = 0.05
 FLOOR_RET_MIN = 1e-4
 IMB_EPS = 1e-12
-QUANTILES = np.array([0.25, 0.5, 0.75])
+# baseline quantiles, in this order: q0.5%, q25, median, q75, q99, q99.5%
+QUANTILES = np.array([0.005, 0.25, 0.5, 0.75, 0.99, 0.995])
+Z_ONE_SIDED_99 = 2.326  # standard-normal z of q99
+Z_TWO_SIDED_99 = 2.576  # standard-normal z of q99.5
 
 # raw_vector packs features in this base order; registry order must match
 _RAW_ORDER = (
@@ -163,6 +166,7 @@ def kk_row(
     idx = r - step * np.arange(1, KK_LAGS + 1)
     m_qv = float(hist_qv[idx].mean())
     m_c = float(hist_close[idx].mean())
+    # a zero history mean (pair silent for 12 h) has no ratio: NaN, not inf (NaN -> p = 1)
     vol = qv_now / m_qv if m_qv > 0 and not math.isnan(qv_now) else math.nan
     price = close_now / m_c if m_c > 0 and not math.isnan(close_now) else math.nan
     return vol, price
@@ -233,11 +237,18 @@ class BarArrays:
 
 # ---------------------------------------------------------------- baseline
 class Baseline:
-    """Robust per-feature baseline over the prior `baseline_s` of samples (median / IQR)."""
+    """Robust per-feature baseline over the prior `baseline_s` of samples.
 
-    def __init__(self, cfg: FeatureCfg, floors: np.ndarray):
+    `scale = max(IQR / 1.349, tail, floor)` with `tail = (q99 - med) / 2.326` for log-transformed
+    features and `(q99.5 - q0.5) / (2 * 2.576)` for ret / jump / ratio features.
+    """
+
+    def __init__(self, cfg: FeatureCfg, floors: np.ndarray, is_log: np.ndarray | None = None):
         self.cfg = cfg
         self._floors = floors  # NaN where the floor is the tick-based return floor
+        # log-transformed (count / quote) features get a one-sided upper tail term, the others a
+        # two-sided one; default: infer from the log floor
+        self._is_log = (floors == FLOOR_LOG) if is_log is None else np.asarray(is_log, bool)
         self._t = _Buf(np.int64)
         self._x = _Buf(np.float64, width=len(floors))
         self._start = 0
@@ -274,7 +285,7 @@ class Baseline:
         nf = X.shape[1]
         cnt = np.count_nonzero(~np.isnan(X), axis=0)
         valid = (cnt >= self.cfg.min_baseline_samples) & (cnt > 0)
-        q = np.full((3, nf), np.nan)
+        q = np.full((len(QUANTILES), nf), np.nan)
         dense = valid & (cnt == len(X))
         if dense.any():
             q[:, dense] = np.quantile(X[:, dense], QUANTILES, axis=0, method="linear")
@@ -283,8 +294,16 @@ class Baseline:
         pos = rel_recent[rel_recent > 0]
         self.tick_rel = float(np.median(pos)) if len(pos) else FLOOR_RET_MIN
         floors = np.where(np.isnan(self._floors), max(FLOOR_RET_MIN, self.tick_rel), self._floors)
-        self.med = q[1]
-        self.scale = np.maximum((q[2] - q[0]) / IQR_TO_SIGMA, floors)
+        q005, q25, med, q75, q99, q995 = q
+        # tail term: zero-inflated features (sparse pairs) have median = IQR = 0, so the IQR alone
+        # would turn one ordinary trade into z >> 6; the 99th-percentile spread keeps it ordinary
+        tail = np.where(
+            self._is_log,
+            (q99 - med) / Z_ONE_SIDED_99,
+            (q995 - q005) / (2 * Z_TWO_SIDED_99),
+        )
+        self.med = med
+        self.scale = np.maximum(np.maximum((q75 - q25) / IQR_TO_SIGMA, tail), floors)
         self.valid = valid
         self.refreshed_at = t_us
 
@@ -310,6 +329,13 @@ class Kernel:
     def __init__(self, cfg: FeatureCfg, quote_unit: float):
         if CUSUM_WINDOW_S not in cfg.windows_s or KK_WINDOW_S not in cfg.windows_s:
             raise ValueError(f"windows_s must contain {CUSUM_WINDOW_S} and {KK_WINDOW_S}")
+        st = cfg.stride_s
+        if st <= 0 or KK_WINDOW_S % st or any(w % st for w in cfg.windows_s):
+            raise ValueError(f"stride_s={st} must divide {KK_WINDOW_S} and every window")
+        if cfg.baseline_sample_s % st or cfg.baseline_refresh_s % st:
+            raise ValueError(
+                "baseline_sample_s and baseline_refresh_s must be multiples of stride_s"
+            )
         if not quote_unit > 0:
             raise ValueError("quote_unit must be > 0")
         self.cfg = cfg
@@ -327,7 +353,8 @@ class Kernel:
         floors = np.array(
             [{"log": FLOOR_LOG, "ratio": FLOOR_RATIO, "ret": np.nan}[s.floor] for s in kinds]
         )
-        self.baseline = Baseline(cfg, floors)
+        is_log = np.array([s.transform in ("log1p", "log1p_quote") for s in kinds])
+        self.baseline = Baseline(cfg, floors, is_log)
         self._i_ret = self.raw_cols.index(f"ret_{CUSUM_WINDOW_S}")
         self._i_imb = self.raw_cols.index(f"buy_imb_{CUSUM_WINDOW_S}")
         self._i_qv = self.raw_cols.index(f"quote_vol_{KK_WINDOW_S}")
