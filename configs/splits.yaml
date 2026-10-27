@@ -1,0 +1,9 @@
+train: [2018-01-01, 2019-06-30]
+cal: [2019-07-01, 2019-12-31]
+accept: [2020-01-01, 2020-06-30]
+test: [2020-07-01, 2022-01-31]
+normal_days_per_symbol: 4
+min_gap_days: 2
+label_offset_s:
+  sapienza: 0
+  hu: 0
