@@ -23,6 +23,7 @@ apart belong to the same episode.
 """
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -61,6 +62,10 @@ def _symbol_days(frame: pl.DataFrame) -> int:
     return (
         frame.select(pl.col("symbol"), (pl.col("t_end_us") // DAY_US).alias("_day")).unique().height
     )
+
+
+def _finite_or_none(x: float) -> float | None:
+    return x if math.isfinite(x) else None
 
 
 def _parent_technique(technique_id: str) -> str:
@@ -107,6 +112,7 @@ class Chief:
         self.config_hash = config_hash
         self.model_versions = dict(model_versions)
         self.tau: float | None = None
+        self.tau_saturated = False
         self.n_cal: int | None = None
         self.cal_symbol_days: int | None = None
         self._cal: list[np.ndarray] | None = None
@@ -135,7 +141,8 @@ class Chief:
     def calibrate(self, cal: pl.DataFrame) -> None:
         """Store sorted finite `score__<name>` values per detector (rules: fired or not).
 
-        Resets `tau`, since a threshold fitted under the old calibration no longer applies.
+        Resets `tau` and `tau_saturated`, since a threshold fitted under the old calibration no
+        longer applies.
         """
         arrays = []
         for d in self.detectors:
@@ -146,6 +153,7 @@ class Chief:
             arrays.append(np.sort(s[np.isfinite(s)]))
         self._set_calibration(arrays, _symbol_days(cal))
         self.tau = None
+        self.tau_saturated = False
 
     def _set_calibration(self, arrays: list[np.ndarray], cal_symbol_days: int) -> None:
         self._cal = [np.asarray(a, dtype=np.float64) for a in arrays]
@@ -308,7 +316,12 @@ class Chief:
         best = self.detectors[int(fu.best[i])]
         if all(c in row for c in best.requires):
             clean = {c: (math.nan if row[c] is None else row[c]) for c in best.requires}
-            evidence = [tuple(item) for item in best.evidence(clean).top]
+            # evidence is explanatory only; JSON cannot carry inf/NaN, so drop such items
+            evidence = [
+                (f, v, c)
+                for f, v, c in best.evidence(clean).top
+                if math.isfinite(v) and math.isfinite(c)
+            ]
         else:
             evidence = []
         rule_j = int(fu.rule[i])
@@ -329,7 +342,7 @@ class Chief:
                     name=self.detectors[j].name,
                     layer=self.detectors[j].layer,
                     p=float(fu.p[i, j]),
-                    score=float(fu.scores[i, j]),  # NaN allowed (p is 1.0 then)
+                    score=_finite_or_none(float(fu.scores[i, j])),  # non-finite -> None
                 )
                 for j in self._fused
             ],
@@ -372,10 +385,16 @@ class Chief:
     # ------------------------------------------------------------ threshold
 
     def fit_threshold(self, cal_fused: pl.DataFrame, budget_per_symbol_day: float) -> float:
-        """Smallest observed `F` whose episodes per symbol-day on `cal_fused` fit the budget.
+        """Lowest observed `F` reached from the top before the episode rate exceeds the budget.
 
-        Stores and returns `self.tau`. When no observed value fits (or every `F` is 0), `tau` is
-        the next float above `max(F)`, which gives no calibration episodes.
+        Searches the descending candidates for a within-budget / over-budget boundary (see the
+        comment below); this is a boundary near the top, not a guaranteed first crossing, since
+        galloping can step over a narrow over-budget region. Stores and returns `self.tau`.
+
+        When no observed value fits (or every `F` is 0), `tau` is the next float above `max(F)`,
+        which gives no calibration episodes. When no candidate exceeds the budget at all (the
+        budget is at or above the data's peak episode rate), `tau` is the smallest positive `F`,
+        `self.tau_saturated` is set and a `RuntimeWarning` is issued; eval reports the flag.
         """
         self._require_calibration()
         budget = float(budget_per_symbol_day)
@@ -409,13 +428,14 @@ class Chief:
         # The episode rate is not monotone in tau: it rises as tau falls, then drops again once
         # exceedances are dense enough to merge into a few long episodes (in the limit, one
         # episode per symbol-day). A plain binary search over all candidates can land in that
-        # merged tail, so bracket the first crossing from the top: gallop down (1, 2, 4, ...)
-        # to the first candidate over budget, binary-search inside that bracket (which always
-        # ends on an adjacent within/over pair), then verify and step up if needed.
+        # merged tail, so search from the top: gallop down (1, 2, 4, ...) to the first probed
+        # candidate over budget, then binary-search inside that bracket, which always ends on
+        # an adjacent within/over pair. `best` only ever holds indices whose rate was checked
+        # to be within budget, so no separate verify / step-up pass is needed.
         best, bad = -1, cand.size
         step = 1
-        while best + step < cand.size:
-            probe = best + step
+        while best < cand.size - 1:
+            probe = min(best + step, cand.size - 1)  # clamp so the last candidate is probed
             if rate(float(cand[probe])) <= budget:
                 best, step = probe, step * 2
             else:
@@ -428,8 +448,16 @@ class Chief:
                 best, lo = mid, mid + 1
             else:
                 hi = mid - 1
-        while best >= 0 and rate(float(cand[best])) > budget:
-            best -= 1
+        saturated = cand.size > 0 and bad == cand.size
+        if saturated:
+            warnings.warn(
+                f"alert budget {budget:g} per symbol-day is at or above the peak episode rate "
+                "of the calibration data: tau saturated at the smallest positive F "
+                "(near-continuous exceedances merged into few episodes); tau_saturated=True",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self.tau_saturated = bool(saturated)
         if best >= 0:
             tau = float(cand[best])
         else:
@@ -449,23 +477,35 @@ class Chief:
             "n_cal": self.n_cal,
             "cal_symbol_days": self.cal_symbol_days,
             "tau": self.tau,
+            "tau_saturated": self.tau_saturated,
             "config_hash": self.config_hash,
             "model_versions": dict(self.model_versions),
         }
 
     def load_state_dict(self, d: dict[str, Any]) -> None:
-        """Restore `state_dict` output; the detector names must match this Chief's, in order."""
+        """Restore `state_dict` output.
+
+        The detector names (in order), `config_hash` and `model_versions` must equal this
+        Chief's: a calibration is valid only for the exact config and models it was made with.
+        """
         if d.get("version") != STATE_VERSION:
             raise ValueError(f"unsupported Chief state version {d.get('version')!r}")
         names = [det.name for det in self.detectors]
         if list(d["detector_names"]) != names:
             raise ValueError(f"detector names {d['detector_names']} do not match Chief's {names}")
+        if d["config_hash"] != self.config_hash:
+            raise ValueError(
+                f"config_hash mismatch: state {d['config_hash']!r}, Chief {self.config_hash!r}"
+            )
+        if dict(d["model_versions"]) != self.model_versions:
+            raise ValueError(
+                f"model_versions mismatch: state {d['model_versions']}, Chief {self.model_versions}"
+            )
         self._set_calibration([d["cal"][n] for n in names], d["cal_symbol_days"])
         if self.n_cal != d["n_cal"]:
             raise ValueError(f"n_cal mismatch: state says {d['n_cal']}, arrays give {self.n_cal}")
         self.tau = None if d["tau"] is None else float(d["tau"])
-        self.config_hash = d["config_hash"]
-        self.model_versions = dict(d["model_versions"])
+        self.tau_saturated = bool(d["tau_saturated"])
 
 
 @dataclass
@@ -483,9 +523,13 @@ class ChiefStream:
     columns used for evidence) and returns 0-2 alerts: a `closed` alert for this symbol's open
     episode when the row lies more than `suppress_for_s` after its last exceedance, then `open`
     (first exceedance) or `updated` (the episode's peak `F` rose). `flush()` closes everything.
+
+    Closing is driven only by later rows of the same symbol or by `flush()`: an episode of a
+    symbol whose rows stop stays open. LIVE must call `flush()` on shutdown or when a symbol
+    leaves the universe, or feed heartbeat rows, so final `closed` alerts are emitted.
     """
 
-    def __init__(self, chief: Chief, provenance: Provenance = "live"):
+    def __init__(self, chief: Chief, provenance: Provenance):
         chief._resolve_tau(None)  # fail early without a threshold
         self.chief = chief
         self.provenance = provenance

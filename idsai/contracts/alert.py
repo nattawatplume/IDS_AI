@@ -9,7 +9,7 @@ class DetectorRef(BaseModel):
     name: str
     layer: str  # "rule" | "stat" | "ai" (fusion layers); baselines may use other names
     p: float = Field(ge=0.0, le=1.0)
-    score: float
+    score: float | None  # None when the detector's score is non-finite (e.g. NaN feature)
 
 
 class Alert(BaseModel):

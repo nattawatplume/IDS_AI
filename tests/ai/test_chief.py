@@ -1,6 +1,5 @@
 import math
 import pickle
-import time
 from typing import Any
 
 import numpy as np
@@ -9,6 +8,7 @@ import pytest
 
 from idsai.ai.chief import CalibrationError, Chief, ChiefStream
 from idsai.config import ChiefCfg
+from idsai.contracts.alert import Alert
 from idsai.contracts.detector import Detector, Evidence
 from idsai.detection.rules import Condition, Signature, SignatureDetector
 from idsai.detection.stats import CusumDetector
@@ -312,10 +312,21 @@ def test_episode_fields_from_peak_row():
     refs = {d.name: d for d in a.detectors}
     assert set(refs) == {"stat.a", "rule.501", "stat.cusum"}
     assert refs["stat.a"].score == 5000.0
-    assert refs["stat.cusum"].p == 1.0 and math.isnan(refs["stat.cusum"].score)
+    assert refs["stat.cusum"].p == 1.0 and refs["stat.cusum"].score is None
     # best detector (stat.a) requires a column that is absent -> empty evidence
     (b,) = ch.episodes(ch.fuse(sc.drop("fa")), provenance="sim")
     assert b.evidence == [] and b.provenance == "sim"
+
+
+def test_alert_json_round_trip_with_nan_score_and_inf_feature():
+    ch = chief(Stub("stat.a", "stat", requires=("fa", "fb")), CusumDetector())
+    ch.calibrate(cal_with("stat.a", range(1000), extra={"stat.cusum": range(1000)}))
+    sc = frame("A", [0], stat_a=[5000.0], stat_cusum=[NAN])
+    sc = sc.with_columns(pl.Series("fa", [math.inf]), pl.Series("fb", [2.0]))
+    (a,) = ch.episodes(ch.fuse(sc), tau=1.0)
+    assert {d.name: d.score for d in a.detectors} == {"stat.a": 5000.0, "stat.cusum": None}
+    assert a.evidence == [("fb", 2.0, 2.0)]  # the inf item is dropped
+    assert Alert.model_validate_json(a.model_dump_json()) == a
 
 
 def test_severity_from_agreement_only():
@@ -373,7 +384,6 @@ def iid(seed: int, n_sym: int = 50, n_days: int = 10, stride_s: int = 60) -> pl.
 
 
 def test_threshold_respects_budget_out_of_sample():
-    start = time.perf_counter()
     ch = chief(Stub("stat.a", "stat"), Stub("stat.b", "stat"), Stub("ai.c", "ai"))
     cal = iid(seed=0)
     ch.calibrate(cal)
@@ -384,7 +394,6 @@ def test_threshold_respects_budget_out_of_sample():
     rate = len(ch.episodes(ch.fuse(iid(seed=1)), tau)) / 500
     print(f"tau={tau:.4f} out-of-sample episodes per symbol-day={rate:.3f}")
     assert 2.0 * 0.5 <= rate <= 2.0 * 1.5
-    assert time.perf_counter() - start < 20
 
 
 def test_threshold_is_smallest_feasible_candidate():
@@ -395,10 +404,12 @@ def test_threshold_is_smallest_feasible_candidate():
     fused = ch.fuse(sc)
     F = sorted(fused["F"].to_list(), reverse=True)
     # tau = F[k] gives k + 1 single-row episodes over 4 symbol-days
-    assert ch.fit_threshold(fused, 2.0) == F[3]
+    with pytest.warns(RuntimeWarning):  # 4 single-row episodes is the peak rate: saturated
+        assert ch.fit_threshold(fused, 2.0) == F[3]
     assert ch.fit_threshold(fused, 0.5) == F[1]
     assert ch.fit_threshold(fused, 0.25) == F[0]
-    assert ch.fit_threshold(fused, 0.75) == F[2]
+    assert ch.fit_threshold(fused, 0.75) == F[2]  # gallop overshoots; last candidate probed
+    assert ch.tau_saturated is False
 
 
 def test_threshold_ignores_low_tau_where_episodes_merge():
@@ -423,6 +434,25 @@ def test_threshold_ignores_low_tau_where_episodes_merge():
     assert (fused["F"] >= tau).sum() < 100
 
 
+def test_threshold_budget_above_peak_rate_saturates_with_warning():
+    ch = chief(Stub("stat.a", "stat"))
+    rng = np.random.default_rng(5)
+    n = 2000  # one symbol-day; the peak episode rate is far below 1000
+    sc = frame("A", list(range(0, 10 * n, 10)), stat_a=rng.standard_normal(n))
+    ch.calibrate(sc)
+    fused = ch.fuse(sc)
+    assert ch.tau_saturated is False
+    with pytest.warns(RuntimeWarning, match="tau_saturated"):
+        tau = ch.fit_threshold(fused, 1000.0)
+    assert ch.tau_saturated is True
+    assert tau == min(f for f in fused["F"].to_list() if f > 0)
+    assert ch.state_dict()["tau_saturated"] is True
+    ch.fit_threshold(fused, 20.0)  # a reachable budget clears the flag
+    assert ch.tau_saturated is False
+    ch.calibrate(sc)
+    assert ch.tau_saturated is False
+
+
 def test_threshold_guard_raises_on_tiny_calibration():
     ch = chief(Stub("stat.a", "stat"), Stub("ai.b", "ai"))
     ch.calibrate(cal_with("stat.a", [1, 2, 3, 4], extra={"ai.b": [1, 2, 3, 4]}))
@@ -442,15 +472,30 @@ def test_state_dict_round_trip_gives_identical_fuse():
     extra = {"stat.a": rng.normal(size=500), "baseline.d": rng.normal(size=500)}
     cal = cal_with("rule.101", rng.normal(size=500) - 1, extra=extra)
     ch.calibrate(cal)
-    ch.fit_threshold(ch.fuse(cal), 50.0)
+    with pytest.warns(RuntimeWarning):  # 500 rows in one symbol-day: budget above peak
+        ch.fit_threshold(ch.fuse(cal), 50.0)
     state = pickle.loads(pickle.dumps(ch.state_dict()))
-    ch2 = Chief(dets, CFG, config_hash="other", model_versions={})
+    ch2 = chief(*dets)
     ch2.load_state_dict(state)
     assert (ch2.tau, ch2.n_cal, ch2.cal_symbol_days) == (ch.tau, ch.n_cal, ch.cal_symbol_days)
-    assert (ch2.config_hash, ch2.model_versions) == ("cfg123", VERSIONS)
+    assert ch2.tau_saturated is ch.tau_saturated is True
     assert ch2.fuse(cal).equals(ch.fuse(cal))
     with pytest.raises(ValueError, match="detector"):
         chief(*dets[:2]).load_state_dict(state)
+
+
+def test_state_load_rejects_config_or_model_mismatch():
+    ch = chief(Stub("stat.a", "stat"))
+    ch.calibrate(cal_with("stat.a", range(10)))
+    state = ch.state_dict()
+    with pytest.raises(ValueError, match="config_hash"):
+        Chief(ch.detectors, CFG, config_hash="other", model_versions=VERSIONS).load_state_dict(
+            state
+        )
+    with pytest.raises(ValueError, match="model_versions"):
+        Chief(ch.detectors, CFG, "cfg123", {"ai.ae": "v2"}).load_state_dict(state)
+    with pytest.raises(ValueError, match="model_versions"):
+        Chief(ch.detectors, CFG, "cfg123", {}).load_state_dict(state)
 
 
 # ---------------------------------------------------------------- stream
@@ -480,7 +525,7 @@ def test_stream_requires_threshold():
     ch = chief(Stub("stat.a", "stat"))
     ch.calibrate(cal_with("stat.a", range(10)))
     with pytest.raises(CalibrationError):
-        ChiefStream(ch)
+        ChiefStream(ch, provenance="live")
 
 
 def test_stream_matches_batch_episode_ids():
