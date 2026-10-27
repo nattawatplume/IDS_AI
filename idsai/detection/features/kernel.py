@@ -45,8 +45,8 @@ FLOOR_LOG = 0.25
 FLOOR_RATIO = 0.05
 FLOOR_RET_MIN = 1e-4
 IMB_EPS = 1e-12
-# baseline quantiles, in this order: q0.5%, q25, median, q75, q99, q99.5%
-QUANTILES = np.array([0.005, 0.25, 0.5, 0.75, 0.99, 0.995])
+# baseline quantiles, in this order: q0.5%, q1, q25, median, q75, q99, q99.5%
+QUANTILES = np.array([0.005, 0.01, 0.25, 0.5, 0.75, 0.99, 0.995])
 Z_ONE_SIDED_99 = 2.326  # standard-normal z of q99
 Z_TWO_SIDED_99 = 2.576  # standard-normal z of q99.5
 
@@ -239,21 +239,27 @@ class BarArrays:
 class Baseline:
     """Robust per-feature baseline over the prior `baseline_s` of samples.
 
-    `scale = max(IQR / 1.349, tail, floor)` with `tail = (q99 - med) / 2.326` for log-transformed
-    features and `(q99.5 - q0.5) / (2 * 2.576)` for ret / jump / ratio features.
+    `z = clip((x - med) / scale, -50, 50)` with a split scale for log-transformed (count / quote)
+    features:
+      x >= med: `scale = max(IQR / 1.349, (q99 - med) / 2.326, floor)`   (`self.scale`)
+      x <  med: `scale = max(IQR / 1.349, (med - q01) / 2.326, floor)`   (`self.scale_lo`)
+    and one symmetric scale `max(IQR / 1.349, (q99.5 - q0.5) / (2 * 2.576), floor)` for ret / jump /
+    ratio features (`scale_lo == scale`). Zero-inflated sparse-pair features have median = IQR = 0;
+    the tail terms keep one ordinary trade (or one empty window of a regular pair) ordinary.
     """
 
     def __init__(self, cfg: FeatureCfg, floors: np.ndarray, is_log: np.ndarray | None = None):
         self.cfg = cfg
         self._floors = floors  # NaN where the floor is the tick-based return floor
-        # log-transformed (count / quote) features get a one-sided upper tail term, the others a
-        # two-sided one; default: infer from the log floor
+        # log-transformed (count / quote) features get split upper / lower tail scales, the others
+        # one two-sided scale; default: infer from the log floor
         self._is_log = (floors == FLOOR_LOG) if is_log is None else np.asarray(is_log, bool)
         self._t = _Buf(np.int64)
         self._x = _Buf(np.float64, width=len(floors))
         self._start = 0
         self.med: np.ndarray | None = None
-        self.scale: np.ndarray | None = None
+        self.scale: np.ndarray | None = None  # used for x >= med
+        self.scale_lo: np.ndarray | None = None  # used for x < med
         self.valid: np.ndarray | None = None
         self.tick_rel = math.nan
         self.refreshed_at: int | None = None
@@ -294,25 +300,28 @@ class Baseline:
         pos = rel_recent[rel_recent > 0]
         self.tick_rel = float(np.median(pos)) if len(pos) else FLOOR_RET_MIN
         floors = np.where(np.isnan(self._floors), max(FLOOR_RET_MIN, self.tick_rel), self._floors)
-        q005, q25, med, q75, q99, q995 = q
-        # tail term: zero-inflated features (sparse pairs) have median = IQR = 0, so the IQR alone
-        # would turn one ordinary trade into z >> 6; the 99th-percentile spread keeps it ordinary
-        tail = np.where(
-            self._is_log,
-            (q99 - med) / Z_ONE_SIDED_99,
-            (q995 - q005) / (2 * Z_TWO_SIDED_99),
-        )
+        q005, q01, q25, med, q75, q99, q995 = q
+        # tail terms: zero-inflated features (sparse pairs) have median = IQR = 0, so the IQR alone
+        # would turn one ordinary trade into z >> 6; the 1st/99th-percentile spread keeps it
+        # ordinary. Log features are skewed, so each side of the median gets its own tail.
+        iqr_s = (q75 - q25) / IQR_TO_SIGMA
+        two_sided = (q995 - q005) / (2 * Z_TWO_SIDED_99)
+        tail_up = np.where(self._is_log, (q99 - med) / Z_ONE_SIDED_99, two_sided)
+        tail_lo = np.where(self._is_log, (med - q01) / Z_ONE_SIDED_99, two_sided)
         self.med = med
-        self.scale = np.maximum(np.maximum((q75 - q25) / IQR_TO_SIGMA, tail), floors)
+        self.scale = np.maximum(np.maximum(iqr_s, tail_up), floors)
+        self.scale_lo = np.maximum(np.maximum(iqr_s, tail_lo), floors)
         self.valid = valid
         self.refreshed_at = t_us
 
     def z(self, xt: np.ndarray) -> np.ndarray:
-        """`clip((x - med) / scale, -50, 50)`; NaN for invalid features, NaN x, or no refresh."""
+        """`clip((x - med) / scale, -50, 50)` with `scale_lo` below the median and `scale` at or
+        above it; NaN for invalid features, NaN x, or no refresh."""
         if self.med is None:
             return np.full(len(xt), np.nan)
+        d = xt - self.med
         with np.errstate(invalid="ignore"):
-            z = np.clip((xt - self.med) / self.scale, -Z_CLIP, Z_CLIP)
+            z = np.clip(d / np.where(d < 0, self.scale_lo, self.scale), -Z_CLIP, Z_CLIP)
         z[~self.valid] = np.nan
         return z
 

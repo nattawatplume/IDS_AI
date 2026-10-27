@@ -1,8 +1,12 @@
 """Feature registry: names, units, Thai descriptions, z-score transform and floor per feature.
 
 Window features are named `<base>_<W>` for every window `W` in `FeatureCfg.windows_s`; each one
-also gets a robust z-score column `z_<base>_<W>` (see `kernel.Baseline`). State features
-(`cusum_*`, `kk_*`) are sequential and are not z-scored.
+also gets a robust z-score column `z_<base>_<W>` (see `kernel.Baseline`): median-centred, with
+`scale = max(IQR / 1.349, tail, floor)`. For log-transformed features (`transform` log1p /
+log1p_quote) the scale is split: above the median `tail = (q99 - med) / 2.326`, below it
+`tail = (med - q01) / 2.326`; ret / jump / ratio features use one symmetric
+`tail = (q99.5 - q0.5) / (2 * 2.576)`. Floors: 0.25 (log), max(1e-4, tick size) (ret), 0.05 (ratio).
+State features (`cusum_*`, `kk_*`) are sequential and are not z-scored.
 """
 
 import re

@@ -168,6 +168,35 @@ def test_baseline_tail_scale_for_zero_inflated_samples():
     assert bl.z(np.array([1.0, 1.0])).max() < 3  # one ordinary event is not extreme
 
 
+def test_baseline_split_scale_for_log_features():
+    small = FeatureCfg(baseline_s=86_400, min_baseline_samples=100)
+    bl = Baseline(small, np.array([FLOOR_LOG, 0.05]), is_log=np.array([True, False]))
+    t = T0 + 86_400 * S
+    rng = np.random.default_rng(0)
+    # log feature: mostly 5.0, 5 % empty windows (0.0), a few busier ones; ratio: symmetric noise
+    log_x = np.where(np.arange(400) % 20 == 0, 0.0, 5.0 + 0.1 * rng.standard_normal(400))
+    ratio_x = 0.2 * rng.standard_normal(400)
+    for k in range(400):
+        bl.add(t - (400 - k) * 60 * S, np.array([log_x[k], ratio_x[k]]))
+    bl.refresh(t, np.array([0.01]))
+    q01, q25, med, q75, q99 = np.quantile(log_x, [0.01, 0.25, 0.5, 0.75, 0.99])
+    iqr_s = (q75 - q25) / 1.349
+    up = max(iqr_s, (q99 - med) / 2.326, FLOOR_LOG)
+    lo = max(iqr_s, (med - q01) / 2.326, FLOOR_LOG)
+    assert lo > 5 * up  # the empty windows widen only the downside
+    assert bl.med[0] == med and bl.scale[0] == up and bl.scale_lo[0] == lo
+    z = bl.z(np.array([0.0, 0.5]))
+    assert z[0] == pytest.approx((0.0 - med) / lo)  # below the median: low-side scale
+    assert z[0] > -3
+    z_hi = bl.z(np.array([med + 1.0, -0.5]))
+    assert z_hi[0] == pytest.approx(1.0 / up)  # above: high-side scale, not scale_lo
+    assert bl.z(np.array([med, 0.0]))[0] == 0.0
+    # ratio features keep one symmetric two-sided scale
+    assert bl.scale_lo[1] == bl.scale[1]
+    m1 = bl.med[1]
+    assert bl.z(np.array([0.0, m1 + 0.5]))[1] == pytest.approx(-bl.z(np.array([0.0, m1 - 0.5]))[1])
+
+
 def test_cusum_step():
     assert cusum_step(0.0, 3.0) == 2.5
     assert cusum_step(1.0, float("nan")) == 0.5
@@ -277,13 +306,7 @@ def test_satoshi_grid_sparse_pair():  # price in {100, 101} sat, 1 trade / 5 min
     assert w["cusum_imb"].max() < 8 and w["cusum_ret"].max() < 8  # stealth rule threshold
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="fix round 1: the prescribed one-sided upper tail for log features leaves EMPTY "
-    "windows of a regular sparse pair at z <= -6 (measured 18.5% of clean rows, mainly "
-    "z_quote_vol_300 / z_buy_quote_1800); needs a controller ruling on a lower-tail scale",
-)
-def test_satoshi_no_extreme_abs_z():
+def test_satoshi_no_extreme_abs_z():  # ruling 9: empty windows of a regular pair stay ordinary
     assert _hot_fraction(satoshi_windows(), "abs") < 0.01
 
 
