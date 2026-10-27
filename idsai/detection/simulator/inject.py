@@ -69,7 +69,9 @@ def inject(
         sim = _pump(rng, sc, t0, dur_us, expected_quote, med_quote, tick, real_price_at)
         out_real = _reprice_real(real, ts, price, sc, tick)
 
-    sim = _finish_sim(sim, symbol)
+    # ids below every id already present, so chained injections never collide
+    first_id = min(0, int(real["trade_id"].min())) - 1
+    sim = _finish_sim(sim, symbol, first_id)
     out = pl.concat([out_real, sim]).sort(["ts_us", "trade_id"])
     return out, _label(sc, symbol, t0, t_peak)
 
@@ -157,6 +159,7 @@ def _pump(
     offs = offs + np.arange(rush)
     ts = (ms[:, None] * 1000 + offs).ravel().astype(np.int64)
     quote = rng.lognormal(math.log(mean_quote) - QUOTE_SIGMA**2 / 2, QUOTE_SIGMA, len(ts))
+    quote *= expected_quote / quote.sum()  # exact injected volume, lognormal shape kept
     px = _snap(real_price_at(ts) * _multiplier(ts, sc), tick)
     qty = quote / px
     return {"ts_us": ts, "price": px, "qty": qty, "side": np.full(len(ts), "buy", dtype=object)}
@@ -179,6 +182,11 @@ def _nearest_round(q: float) -> float:
     return min(cands, key=lambda c: abs(math.log(c / q)))
 
 
+def _pair_count(expected_quote: float, qty: float, price: float) -> int:
+    """Pairs needed to reach `expected_quote` (round up: never inject less than expected)."""
+    return max(1, math.ceil(expected_quote / (2.0 * qty * price) - 1e-9))
+
+
 def _pingpong(
     rng: np.random.Generator,
     sc: Scenario,
@@ -199,10 +207,10 @@ def _pingpong(
     pre_price = float(price[pre] if pre >= 0 else price[0])
     capacity = dur_us // PAIR_SLOT_US
     qty = _nearest_round(med_qty)
-    n_pairs = max(1, round(expected_quote / (2.0 * qty * pre_price)))
+    n_pairs = _pair_count(expected_quote, qty, pre_price)
     while n_pairs > capacity:  # more pairs than fit: use a bigger round qty instead
         qty = _next_round(qty)
-        n_pairs = max(1, round(expected_quote / (2.0 * qty * pre_price)))
+        n_pairs = _pair_count(expected_quote, qty, pre_price)
     slot = dur_us // n_pairs
     start = t0 + np.arange(n_pairs, dtype=np.int64) * slot
     start = start + rng.integers(0, slot - PAIR_MAX_GAP_US, size=n_pairs)
@@ -215,8 +223,8 @@ def _pingpong(
     return {"ts_us": t, "price": px, "qty": np.full(2 * n_pairs, qty), "side": side}
 
 
-def _finish_sim(sim: dict[str, np.ndarray], symbol: str) -> pl.DataFrame:
-    """Time-order the synthetic fills, give them negative ids and build a TRADES frame."""
+def _finish_sim(sim: dict[str, np.ndarray], symbol: str, first_id: int) -> pl.DataFrame:
+    """Time-order the synthetic fills, give them ids `first_id, first_id - 1, ...` (TRADES)."""
     order = np.argsort(sim["ts_us"], kind="stable")
     ts = sim["ts_us"][order]
     price = sim["price"][order]
@@ -231,7 +239,7 @@ def _finish_sim(sim: dict[str, np.ndarray], symbol: str) -> pl.DataFrame:
             "qty": qty,
             "quote_qty": price * qty,
             "taker_side": sim["side"][order].tolist(),
-            "trade_id": -(np.arange(n, dtype=np.int64) + 1),
+            "trade_id": first_id - np.arange(n, dtype=np.int64),
             "n_fills": np.ones(n, dtype=np.int32),
             "source": ["sim"] * n,
         },

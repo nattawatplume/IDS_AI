@@ -301,14 +301,14 @@ def test_stealth_has_no_clusters_and_volume_matches():
     sim = sim_only(out)
     assert sim.group_by(pl.col("ts_us") // 1000).len()["len"].max() == 1
     expected = sc.vol_mult * base * sc.duration_s
-    assert 0.8 * expected <= sim["quote_qty"].sum() <= 1.2 * expected
+    assert sim["quote_qty"].sum() == pytest.approx(expected, rel=1e-9)
 
 
 def test_burst_volume_matches_expected():
     sc = scenario("pump_burst", vol_mult=10.0, duration_s=120.0, rush_size=5)
     out, _ = inject(steady(), sc, 2.0, "replay")
     expected = 10.0 * 2.0 * 120.0
-    assert 0.8 * expected <= sim_only(out)["quote_qty"].sum() <= 1.2 * expected
+    assert sim_only(out)["quote_qty"].sum() == pytest.approx(expected, rel=1e-9)
 
 
 def test_prices_snap_to_observed_tick():
@@ -374,12 +374,32 @@ def test_sparse_pair_injection_adds_quote_volume():
     tr = mk_trades(ts, 50.0, 0.37, np.where(np.arange(n) % 2 == 0, "buy", "sell"))
     base = base_quote_rate(tr.filter(pl.col("ts_us") < T0 + 24 * H))
     for family in FAMILIES:
-        sc = dataclasses.replace(scenario(family), t_start_us=T0 + 30 * H)
-        out, _ = inject(tr, sc, base, "replay")
-        expected = sc.vol_mult * base * sc.duration_s
-        added = sim_only(out)["quote_qty"].sum()
-        assert added >= 0.5 * expected, (family, added, expected)
-        assert added <= 2.5 * expected, (family, added, expected)
+        for seed in range(5):
+            sc = dataclasses.replace(scenario(family), t_start_us=T0 + 30 * H, seed=seed)
+            out, _ = inject(tr, sc, base, "replay")
+            expected = sc.vol_mult * base * sc.duration_s
+            added = sim_only(out)["quote_qty"].sum()
+            assert added >= 0.9 * expected, (family, seed, added, expected)
+            assert added <= 1.5 * expected, (family, seed, added, expected)
+
+
+def test_chained_injection_keeps_trade_ids_unique():
+    tr = steady()
+    first, lab1 = inject(tr, scenario("pump_burst"), 1.0, "replay")
+    sc2 = dataclasses.replace(scenario("wash_pingpong"), t_start_us=T_START + 1800 * S)
+    second, lab2 = inject(first, sc2, 1.0, "replay")
+    assert second.select(["symbol", "trade_id"]).is_unique().all()
+    n1 = sim_only(first).height
+    sim2 = sim_only(second)
+    assert sim2.height > n1  # both injections' synthetic trades are present
+    assert sim2["trade_id"].min() < sim_only(first)["trade_id"].min()
+    in_first = sim2.filter(pl.col("ts_us") < T_START + 60 * S)
+    assert in_first.height == n1 and (in_first["taker_side"] == "buy").all()
+    pp = sim2.filter(pl.col("ts_us") >= sc2.t_start_us)
+    assert pp.height > 0 and pp.height % 2 == 0
+    assert lab1["family"][0] == "pump_burst" and lab2["family"][0] == "wash_pingpong"
+    # earlier synthetic trades keep their ids
+    assert sim_only(first)["trade_id"].to_list() == in_first["trade_id"].to_list()
 
 
 # ------------------------------------------------------------------ end-to-end visibility
