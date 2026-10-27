@@ -1,8 +1,10 @@
 """Detector registry: name -> factory, plus `build_detectors`.
 
-Later tasks add detectors with `register(name, factory)` (e.g. `"ai.autoencoder_trade"`), so
-this table never needs editing. A factory takes `(cfg: Settings, seed: int)` and returns one
-`Detector` or a list of them (`"rules"` expands to every rule-layer signature).
+Later tasks may add detectors with `register(name, factory)`. A factory takes
+`(cfg: Settings, seed: int)` and returns one `Detector` or a list of them (`"rules"` expands to
+every rule-layer signature). `"ai.autoencoder_trade"` is registered here with a lazy factory
+(torch is imported only when it is built), so the default `Settings.detectors` always resolve
+and `idsai.ai.autoencoder` never has to import this module.
 """
 
 from collections.abc import Callable
@@ -60,6 +62,12 @@ def _pca(cfg: Settings, seed: int) -> Detector:
     return PCADetector(model_features(cfg.features))
 
 
+def _autoencoder(cfg: Settings, seed: int) -> Detector:
+    from idsai.ai.autoencoder import AutoencoderDetector  # lazy: keeps torch off import path
+
+    return AutoencoderDetector(model_features(cfg.features), cfg.ae, seed)
+
+
 register("rules", _rules)
 register("baseline.kk", _kk)
 register("stat.robust_z", _robust_z)
@@ -67,3 +75,4 @@ register("stat.cusum", lambda cfg, seed: CusumDetector())
 register("baseline.iforest", _iforest)
 register("baseline.pca", _pca)
 register("baseline.random", lambda cfg, seed: RandomDetector(seed))
+register("ai.autoencoder_trade", _autoencoder)

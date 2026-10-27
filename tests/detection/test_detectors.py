@@ -344,10 +344,11 @@ def test_unknown_name_raises_keyerror_listing_valid_names():
     assert "rules" in msg and "stat.cusum" in msg
 
 
-def test_default_detectors_fail_until_autoencoder_registered():
-    assert "ai.autoencoder_trade" not in valid_names()
-    with pytest.raises(KeyError):
-        build_detectors(CFG.detectors, CFG)
+def test_default_detectors_build_rule_stat_ai_layers():
+    assert "ai.autoencoder_trade" in valid_names()
+    settings = load_settings()
+    dets = build_detectors(settings.detectors, settings)
+    assert {d.layer for d in dets} == {"rule", "stat", "ai"}
 
 
 def test_register_adds_a_name():
