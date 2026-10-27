@@ -19,6 +19,7 @@ import polars as pl
 from idsai.contracts.detector import Detector
 
 REQUIRED_META = ("data_hash", "config_hash", "seed", "created_at", "train_range")
+MAX_SAVE_ATTEMPTS = 100
 _VERSION_RE = re.compile(r"^v([1-9]\d*)$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -78,7 +79,8 @@ class ModelRegistry:
         out = []
         for p in d.iterdir():
             m = _VERSION_RE.match(p.name)
-            if m and p.is_dir() and (not complete_only or (p / "meta.json").is_file()):
+            # any path named v{n} (even a stray file) reserves n; only complete dirs are versions
+            if m and (not complete_only or (p / "meta.json").is_file()):
                 out.append(int(m[1]))
         return sorted(out)
 
@@ -104,7 +106,7 @@ class ModelRegistry:
         try:
             with open(tmp / "state.pkl", "wb") as f:
                 pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
-            while True:
+            for _ in range(MAX_SAVE_ATTEMPTS):
                 existing = self._numbers(d, complete_only=False)
                 version = f"v{(existing[-1] if existing else 0) + 1}"
                 full = {**meta, "name": det.name, "version": version}
@@ -120,6 +122,9 @@ class ModelRegistry:
                     if (d / version).exists():
                         continue
                     raise
+            raise RuntimeError(
+                f"could not claim a new version of {det.name!r} after {MAX_SAVE_ATTEMPTS} tries"
+            )
         finally:
             if tmp.exists():
                 for p in tmp.iterdir():

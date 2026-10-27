@@ -76,6 +76,43 @@ def test_roc_auc_on_shifted_rows():
     assert auc > 0.9
 
 
+@pytest.fixture(scope="module")
+def wide_fit() -> AutoencoderDetector:
+    # model-feature width (46) with the default architecture
+    det = AutoencoderDetector(feats(46), AECfg(epochs=3), seed=0)
+    det.fit(windows(correlated(3000, 46, seed=1)))
+    return det
+
+
+def batch_probe(d: int) -> pl.DataFrame:
+    x = correlated(300, d, seed=7, shift=0.3)
+    x[::17, 1] = np.inf  # clipped values take part too
+    x[::23, 0] = NAN
+    return windows(x)
+
+
+@pytest.mark.parametrize("which", ["small", "wide"])
+def test_score_is_batch_invariant(which, small_fit, wide_fit):
+    # stream (one row) == batch, bit for bit: Chief p-values are rank comparisons
+    det = small_fit[0] if which == "small" else wide_fit
+    probe = batch_probe(len(det.requires))
+    full = det.score(probe)
+    single = np.array([det.score(probe[i : i + 1])[0] for i in range(probe.height)])
+    assert np.array_equal(full, single, equal_nan=True)
+    for k in (7, 13):
+        chunked = np.concatenate([det.score(probe[i : i + k]) for i in range(0, probe.height, k)])
+        assert np.array_equal(full, chunked, equal_nan=True)
+
+
+def test_score_does_not_depend_on_internal_chunk_size(wide_fit, monkeypatch):
+    from idsai.ai import autoencoder
+
+    probe = batch_probe(46)
+    full = wide_fit.score(probe)
+    monkeypatch.setattr(autoencoder, "SCORE_CHUNK", 5)
+    assert np.array_equal(full, wide_fit.score(probe), equal_nan=True)
+
+
 def test_same_seed_same_scores_and_other_seed_differs():
     w = windows(correlated(1500, 8, seed=1))
     probe = windows(correlated(300, 8, seed=2, shift=0.5))
@@ -261,14 +298,23 @@ def test_registry_never_overwrites(tmp_path, small_fit):
     assert (tmp_path / det.name / "v1" / "meta.json").read_bytes() == before
 
 
+def test_registry_skips_a_stray_file_named_like_a_version(tmp_path, small_fit):
+    det, _ = small_fit
+    reg = ModelRegistry(tmp_path)
+    (tmp_path / det.name).mkdir()
+    (tmp_path / det.name / "v1").write_text("not a model", encoding="utf-8")
+    assert reg.save(det, meta()) == "v2"  # terminates, never touches the file
+    assert reg.versions(det.name) == ["v2"]
+    assert (tmp_path / det.name / "v1").read_text(encoding="utf-8") == "not a model"
+
+
 # --------------------------------------------------------- detector registry
 
 
-def test_default_detectors_build_with_autoencoder():
+def test_registry_factory_builds_configured_autoencoder():
+    # the default-detectors layer check lives in tests/detection/test_detectors.py
     settings = load_settings()
-    dets = build_detectors(settings.detectors, settings, seed=3)
-    assert {d.layer for d in dets} == {"rule", "stat", "ai"}
-    (ae,) = [d for d in dets if d.name == "ai.autoencoder_trade"]
+    (ae,) = build_detectors(["ai.autoencoder_trade"], settings, seed=3)
     assert isinstance(ae, AutoencoderDetector)
     assert ae.requires == model_features(settings.features)
     assert ae.cfg == settings.ae and ae.seed == 3

@@ -10,14 +10,20 @@ rows with any non-finite feature, sort by `(t_end_us, symbol)`, hold out the las
 order) for early stopping and restore the best-validation weights. A `RobustScaler` is fit on
 the training part only; scaled inputs are clipped to `±clip` at fit and score time.
 
+Torch is used for training only. `fit` runs single-threaded with deterministic algorithms and a
+seeded RNG (same seed and data give the same weights); torch's global thread count,
+deterministic flag and CPU RNG state are saved and restored under a module lock. The trained
+weights are exported to float64 NumPy and scoring is a pure-NumPy forward pass that uses only
+elementwise ops in a fixed order (no BLAS matmul, whose reduction order depends on the batch
+shape), so a row's score is bit-identical whether it is scored alone (stream) or in any batch.
+
 Scoring masks NaN only: a NaN (or null) feature gives a NaN score, while ±inf is a value that
-scales to ±inf and is clipped to `±clip`. Fit and score run single-threaded with deterministic
-algorithms, so the same seed and data give bit-identical scores; torch's global thread count,
-deterministic flag and CPU RNG state are restored afterwards.
+scales to ±inf and is clipped to `±clip`.
 """
 
 import contextlib
 import math
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -31,25 +37,27 @@ from idsai.config import AECfg
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
 
 VAL_FRACTION = 0.1
-SCORE_CHUNK = 65_536  # rows per forward pass at score time (bounds memory)
+SCORE_CHUNK = 4096  # rows per score-time forward pass (bounds memory; results independent of it)
+
+_TORCH_STATE_LOCK = threading.Lock()  # concurrent fits must not interleave torch global state
 
 
 @contextlib.contextmanager
-def _torch_determinism(seed: int | None = None) -> Iterator[None]:
-    """Single thread + deterministic algorithms (+ seeded CPU RNG); restores global state."""
-    threads = torch.get_num_threads()
-    det = torch.are_deterministic_algorithms_enabled()
-    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    try:
-        torch.set_num_threads(1)
-        torch.use_deterministic_algorithms(True)
-        with torch.random.fork_rng(devices=[]):
-            if seed is not None:
+def _torch_determinism(seed: int) -> Iterator[None]:
+    """Single thread + deterministic algorithms + seeded CPU RNG; restores global state."""
+    with _TORCH_STATE_LOCK:
+        threads = torch.get_num_threads()
+        det = torch.are_deterministic_algorithms_enabled()
+        warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+        try:
+            torch.set_num_threads(1)
+            torch.use_deterministic_algorithms(True)
+            with torch.random.fork_rng(devices=[]):
                 torch.manual_seed(seed)
-            yield
-    finally:
-        torch.use_deterministic_algorithms(det, warn_only=warn_only)
-        torch.set_num_threads(threads)
+                yield
+        finally:
+            torch.use_deterministic_algorithms(det, warn_only=warn_only)
+            torch.set_num_threads(threads)
 
 
 def _build_net(d: int, hidden: int, bottleneck: int) -> nn.Sequential:
@@ -61,6 +69,57 @@ def _build_net(d: int, hidden: int, bottleneck: int) -> nn.Sequential:
         nn.ReLU(),
         nn.Linear(hidden, d),
     )
+
+
+def _layer_plan() -> list[tuple[str, bool]]:
+    """`(state-dict key prefix, ReLU follows)` for each Linear of `_build_net`, in order."""
+    plan: list[tuple[str, bool]] = []
+    for i, m in enumerate(_build_net(1, 1, 1)):
+        if isinstance(m, nn.Linear):
+            plan.append((str(i), False))
+        elif isinstance(m, nn.ReLU):
+            plan[-1] = (plan[-1][0], True)
+    return plan
+
+
+_PLAN = _layer_plan()
+
+Layer = tuple[np.ndarray, np.ndarray, bool]  # (W^T as (in, out) float64, bias float64, relu)
+
+
+def _export(weights: dict[str, np.ndarray]) -> list[Layer]:
+    """Torch-layout weights (`k.weight` is (out, in)) -> float64 NumPy layers."""
+    return [
+        (
+            np.ascontiguousarray(np.asarray(weights[f"{k}.weight"], dtype=np.float64).T),
+            np.asarray(weights[f"{k}.bias"], dtype=np.float64).copy(),
+            relu,
+        )
+        for k, relu in _PLAN
+    ]
+
+
+def _affine(x: np.ndarray, wt: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """`b + sum_i x[:, i] * wt[i]`, accumulated over inputs in a fixed sequential order.
+
+    Only elementwise multiply/add (no BLAS), so each row's result is independent of how many
+    rows are passed in.
+    """
+    out = np.repeat(b[None, :], x.shape[0], axis=0)
+    tmp = np.empty_like(out)
+    for i in range(wt.shape[0]):
+        np.multiply(x[:, i : i + 1], wt[i], out=tmp)
+        out += tmp
+    return out
+
+
+def _forward(z: np.ndarray, layers: list[Layer]) -> np.ndarray:
+    h = z
+    for wt, b, relu in layers:
+        h = _affine(h, wt, b)
+        if relu:
+            np.maximum(h, 0.0, out=h)
+    return h
 
 
 class AutoencoderDetector(Detector):
@@ -75,19 +134,20 @@ class AutoencoderDetector(Detector):
         self.requires = list(features)
         self.cfg = cfg
         self.seed = seed
-        self._net: nn.Sequential | None = None
+        self._weights: dict[str, np.ndarray] | None = None  # trained, torch layout, float32
+        self._layers: list[Layer] | None = None  # the same weights as float64 for scoring
         self._center: np.ndarray | None = None
         self._scale: np.ndarray | None = None
         self.fit_info: dict[str, Any] = {}
 
     def _need_fit(self) -> None:
-        if self._net is None:
+        if self._layers is None:
             raise RuntimeError(f"{self.name} is not fitted; call fit() first")
 
     def _prep(self, x: np.ndarray) -> np.ndarray:
-        """Robust-scale and clip to `±clip`; float32 network input."""
+        """Robust-scale and clip to `±clip` (elementwise, float64)."""
         z = (x - self._center) / self._scale
-        return np.clip(z, -self.cfg.clip, self.cfg.clip).astype(np.float32)
+        return np.clip(z, -self.cfg.clip, self.cfg.clip)
 
     def _training_rows(self, normal: pl.DataFrame) -> np.ndarray:
         step_us = self.cfg.train_stride_s * 1_000_000
@@ -148,9 +208,10 @@ class AutoencoderDetector(Detector):
                         break
             if best_state is not None:  # epochs == 0 keeps the initial weights
                 net.load_state_dict(best_state)
-            net.eval()
+            weights = {k: v.detach().cpu().numpy().copy() for k, v in net.state_dict().items()}
         # set last: a failed fit leaves the detector unfitted
-        self._net, self._center, self._scale = net, center, scale
+        self._set_weights(weights)
+        self._center, self._scale = center, scale
         self.fit_info = {
             "n_rows": n,
             "n_train": n - n_val,
@@ -160,15 +221,25 @@ class AutoencoderDetector(Detector):
             "best_loss": best_loss,
         }
 
+    def _set_weights(self, weights: dict[str, np.ndarray]) -> None:
+        self._weights = {k: np.asarray(v).copy() for k, v in weights.items()}
+        self._layers = _export(self._weights)
+
     def _sq_err(self, z: np.ndarray) -> np.ndarray:
-        """Per-feature squared reconstruction error (float64) of prepared rows."""
+        """Per-feature squared reconstruction error (float64) of prepared rows (batch-invariant)."""
         out = np.empty(z.shape, dtype=np.float64)
-        with _torch_determinism(), torch.no_grad():
-            for i in range(0, z.shape[0], SCORE_CHUNK):
-                zb = torch.from_numpy(z[i : i + SCORE_CHUNK])
-                recon = self._net(zb).numpy().astype(np.float64)
-                out[i : i + SCORE_CHUNK] = (recon - zb.numpy().astype(np.float64)) ** 2
+        for i in range(0, z.shape[0], SCORE_CHUNK):
+            zb = z[i : i + SCORE_CHUNK]
+            out[i : i + SCORE_CHUNK] = (_forward(zb, self._layers) - zb) ** 2
         return out
+
+    @staticmethod
+    def _row_mean(err: np.ndarray) -> np.ndarray:
+        """Mean over features, summed in a fixed sequential order (no pairwise reduction)."""
+        acc = np.zeros(err.shape[0], dtype=np.float64)
+        for j in range(err.shape[1]):
+            acc += err[:, j]
+        return acc / err.shape[1]
 
     def score(self, windows: pl.DataFrame) -> np.ndarray:
         self._need_fit()
@@ -176,7 +247,7 @@ class AutoencoderDetector(Detector):
         out = np.full(x.shape[0], np.nan)
         ok = ~np.isnan(x).any(axis=1)
         if ok.any():
-            out[ok] = self._sq_err(self._prep(x[ok])).mean(axis=1)
+            out[ok] = self._row_mean(self._sq_err(self._prep(x[ok])))
         return out
 
     def evidence(self, row: dict[str, Any]) -> Evidence:
@@ -199,7 +270,7 @@ class AutoencoderDetector(Detector):
             "seed": self.seed,
             "center": self._center.copy(),
             "scale": self._scale.copy(),
-            "net": {k: v.detach().cpu().numpy().copy() for k, v in self._net.state_dict().items()},
+            "net": {k: v.copy() for k, v in self._weights.items()},
             "fit_info": dict(self.fit_info),
         }
 
@@ -207,10 +278,7 @@ class AutoencoderDetector(Detector):
         self.requires = list(d["features"])
         self.cfg = AECfg.model_validate(d["cfg"])
         self.seed = d["seed"]
-        net = _build_net(len(self.requires), self.cfg.hidden, self.cfg.bottleneck)
-        net.load_state_dict({k: torch.from_numpy(np.array(v)) for k, v in d["net"].items()})
-        net.eval()
-        self._net = net
+        self._set_weights(d["net"])
         self._center = np.asarray(d["center"], dtype=np.float64)
         self._scale = np.asarray(d["scale"], dtype=np.float64)
         self.fit_info = dict(d.get("fit_info", {}))
