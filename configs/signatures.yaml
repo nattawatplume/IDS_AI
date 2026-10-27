@@ -1,0 +1,40 @@
+# Signature rules for the rule layer (and the Kamps-Kleinberg baseline).
+# Frozen before any test-period run; thresholds may only be tuned on train-period data.
+# Bump `rev` whenever a threshold or condition changes. Its sha256 is recorded in every run.
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100101
+    technique: MM-T001.001
+    layer: rule
+    rev: 1
+    name: pump-and-dump แบบพุ่งเร็ว (burst)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 6}
+      - {feature: ret_60, op: ">=", thr: 0.02}
+      - {feature: z_rush_60, op: ">=", thr: 4}
+  - sid: 100102
+    technique: MM-T001.002
+    layer: rule
+    rev: 1
+    name: pump-and-dump แบบค่อยเป็นค่อยไป (stealth)
+    conditions:
+      - {feature: cusum_imb, op: ">=", thr: 8}
+      - {feature: ret_1800, op: ">=", thr: 0.03}
+      - {feature: buy_imb_1800, op: ">=", thr: 0.2}
+  - sid: 100103
+    technique: MM-T001
+    layer: baseline
+    rev: 1
+    name: Kamps-Kleinberg ปรับเป็นแท่งเทียน 30 นาที
+    conditions:
+      - {feature: kk_vol_ratio, op: ">=", thr: 4.0}
+      - {feature: kk_price_ratio, op: ">=", thr: 1.05}
+  - sid: 100501
+    technique: MM-T005.001
+    layer: rule
+    rev: 1
+    name: ซื้อขายลักษณะ wash-like (ping-pong)
+    conditions:
+      - {feature: z_pingpong_300, op: ">=", thr: 5}
+      - {feature: ret_300, op: "abs<=", thr: 0.002}
+      - {feature: z_quote_vol_300, op: ">=", thr: 3}

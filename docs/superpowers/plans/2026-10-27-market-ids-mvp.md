@@ -21,6 +21,7 @@
 - Red-Team injection takes the real current `mode` and raises `EthicsError` when it is `"live"`.
 - 1 s bars indexed by bar start `t_us`. A window row at `t_end_us` covers bars `t_us ∈ [t_end − W, t_end)`; `close_t` = close of bar `t_end − 1 s`; `close_{t−W}` = close of bar `t_end − W − 1 s`. Nothing at or after `t_end` is used.
 - Windows `[10, 60, 300, 1800]` s, stride `10` s. Baseline: prior 24 h, sampled every `60` s, refreshed every `300` s, valid when ≥ `360` non-NaN samples (= 6 h).
+- Robust z scale = `max(IQR/1.349, tail, floor)` where for log-transformed features the scale is split: `tail = (q99 − med)/2.326` when `x ≥ med`, `(med − q01)/2.326` when `x < med`; and `(q99.5 − q0.5)/(2·2.576)` for ret/jump/ratio features (zero-inflated sparse pairs; rev 2.1 ruling). KK ratios are NaN when the 12 h mean is 0.
 - Quote-volume transform `log1p(x / quote_unit)`, `quote_unit = {"BTC": 1e-4, "USDT": 1.0}` by quote asset suffix.
 - No hour-of-day / minute-of-day features.
 - Fusion uses only layers `{rule, stat, ai}`; `agreement` counts only those layers (max 3). Baselines run only alone (baselines experiment).

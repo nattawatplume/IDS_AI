@@ -1,0 +1,81 @@
+# Taxonomy of market-manipulation techniques used by the IDS (MM = market manipulation).
+# Track T = detectable from public trade data. Track B = needs L2 order-book data; synthetic only.
+MM-T000:
+  name_th: ความผิดปกติที่ยังจัดประเภทไม่ได้
+  definition_th: >-
+    ความผิดปกติทางสถิติที่เกิดขึ้นในตลาดแต่ยังไม่ตรงกับเทคนิคที่รู้จัก
+    ระบบแจ้งเตือนเพื่อให้มนุษย์ตรวจสอบต่อ และไม่ได้ระบุว่าเป็นการปั่นราคา
+  reference: "Internal catch-all class for anomalies without a matching signature."
+  observability_th: สังเกตได้จากข้อมูลการซื้อขายสาธารณะ (Track T)
+  sub_techniques: []
+MM-T001:
+  name_th: ปั่นราคาแล้วเทขาย (pump-and-dump)
+  definition_th: >-
+    รูปแบบที่ราคาและมูลค่าซื้อขายพุ่งขึ้นผิดปกติในช่วงเวลาสั้นจากแรงซื้อที่รวมตัวกัน
+    แล้วราคากลับลงมาอย่างรวดเร็ว พบมากในเหรียญขนาดเล็กที่สภาพคล่องต่ำ
+  reference: >-
+    Kamps & Kleinberg (2018), "To the moon: defining and detecting cryptocurrency
+    pump-and-dumps", Crime Science 7(18); La Morgia et al. (2023), "The doge of Wall Street:
+    analysis and detection of pump and dump cryptocurrency manipulations", ACM TOIT 23(1).
+  observability_th: สังเกตได้จากข้อมูลการซื้อขายสาธารณะ (Track T)
+  sub_techniques:
+    - id: MM-T001.001
+      name_th: แบบพุ่งเร็ว (burst)
+      definition_th: >-
+        มูลค่าซื้อขายและคำสั่งซื้อต่อเนื่อง (rush order) พุ่งสูงมากภายในไม่กี่สิบวินาที
+        พร้อมราคาที่ขยับขึ้นชัดเจน
+    - id: MM-T001.002
+      name_th: แบบค่อยเป็นค่อยไป (stealth)
+      definition_th: >-
+        แรงซื้อฝั่ง taker สะสมต่อเนื่องหลายสิบนาทีโดยไม่กระชากเป็นช่วงสั้น ๆ
+        ราคาไต่ขึ้นทีละน้อยจนผิดปกติเมื่อเทียบกับตลาดปกติ
+MM-T002:
+  name_th: การวางคำสั่งหลอก (spoofing)
+  definition_th: >-
+    การวางคำสั่งขนาดใหญ่ในสมุดคำสั่งโดยไม่ตั้งใจให้ถูกจับคู่ เพื่อชักนำราคา
+    แล้วยกเลิกก่อนถูกจับคู่
+  reference: >-
+    US Commodity Exchange Act s.4c(a)(5)(C) (CFTC, "disruptive practices", spoofing); ESMA
+    MAR (EU 596/2014) Annex I, order-book manipulation indicators.
+  observability_th: >-
+    ต้องใช้ข้อมูลสมุดคำสั่ง (L2) จึงอยู่ใน Track B และทดสอบด้วยข้อมูลสังเคราะห์เท่านั้น
+  sub_techniques: []
+MM-T003:
+  name_th: การวางคำสั่งซ้อนหลายชั้น (layering)
+  definition_th: >-
+    การวางคำสั่งหลายระดับราคาฝั่งเดียวกันเพื่อสร้างภาพแรงซื้อหรือแรงขายปลอม
+    แล้วยกเลิกเมื่อราคาขยับตามต้องการ
+  reference: >-
+    US SEC and CFTC enforcement descriptions of layering as a form of spoofing; ESMA MAR
+    (EU 596/2014) Annex I, order-book manipulation indicators.
+  observability_th: >-
+    ต้องใช้ข้อมูลสมุดคำสั่ง (L2) จึงอยู่ใน Track B และทดสอบด้วยข้อมูลสังเคราะห์เท่านั้น
+  sub_techniques: []
+MM-T004:
+  name_th: การส่งคำสั่งถี่เกินปกติ (quote stuffing)
+  definition_th: >-
+    การส่งและยกเลิกคำสั่งจำนวนมากในเวลาสั้นมากเพื่อหน่วงระบบหรือบดบังกิจกรรมจริง
+  reference: >-
+    SEC Concept Release on Equity Market Structure (2010) and ESMA MAR (EU 596/2014)
+    Annex I, on excessive order submission and cancellation.
+  observability_th: >-
+    ต้องใช้ข้อมูลสมุดคำสั่ง (L2) จึงอยู่ใน Track B และทดสอบด้วยข้อมูลสังเคราะห์เท่านั้น
+  sub_techniques: []
+MM-T005:
+  name_th: การซื้อขายลักษณะ wash trading (wash-like)
+  definition_th: >-
+    การซื้อและขายสลับกันซ้ำ ๆ ในราคาและขนาดเท่ากันเพื่อสร้างมูลค่าซื้อขายที่ดูเหมือนจริง
+    โดยไม่มีการเปลี่ยนมือความเสี่ยงที่แท้จริง ระบบตรวจได้เพียงรูปแบบที่คล้ายกันเท่านั้น
+  reference: >-
+    SEC definition of wash sales (Exchange Act s.9(a)(1)); ESMA MAR (EU 596/2014) Annex I,
+    indicators of fictitious transactions; Cong et al. (2023), "Crypto wash trading",
+    Management Science 69(11).
+  observability_th: >-
+    สังเกตรูปแบบที่คล้ายได้จากข้อมูลการซื้อขายสาธารณะ แต่แยกผู้ซื้อ-ผู้ขายรายเดียวกันไม่ได้
+    จึงเรียกว่า wash-like (Track T)
+  sub_techniques:
+    - id: MM-T005.001
+      name_th: คู่ซื้อ-ขายสลับกันแบบ ping-pong
+      definition_th: >-
+        รายการซื้อและขายติดกันภายในไม่กี่มิลลิวินาที ราคาและขนาดเท่ากัน
+        ซ้ำถี่ผิดปกติโดยราคาไม่ขยับ

@@ -1,0 +1,56 @@
+paths:
+  data_dir: data
+  models_dir: models
+  app_db: data/app.duckdb
+  research_db: data/research.duckdb
+  report_json: data/report.json
+
+features:
+  windows_s: [10, 60, 300, 1800]
+  stride_s: 10
+  baseline_s: 86400
+  baseline_sample_s: 60
+  baseline_refresh_s: 300
+  min_baseline_samples: 360
+  quote_unit:
+    BTC: 0.0001
+    USDT: 1.0
+
+chief:
+  budget_per_symbol_day: 2.0
+  suppress_for_s: 300
+  agreement_p: 0.01
+  attribution_min: 3.0
+
+eval:
+  before_s: 120
+  after_s: 300
+  seeds: [0, 1, 2, 3, 4]
+  split_seed: 0
+  n_boot: 1000
+  min_effect: 0.02
+  budgets_per_symbol_day: [0.1, 0.5, 2, 10]
+  hard_negative_k: 20
+
+ae:
+  hidden: 64
+  bottleneck: 16
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.00001
+  batch_size: 512
+  patience: 5
+  clip: 10.0
+  train_stride_s: 60
+
+live:
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT, DOGEUSDT, PEPEUSDT]
+  ws_url: wss://data-stream.binance.vision/stream
+  budget_per_hour: 2.0
+  universe_size: 5
+  train_days: 7
+  bar_grace_s: 2
+
+detectors: [rules, stat.robust_z, stat.cusum, ai.autoencoder_trade]
+mode: replay
+port: 8800
