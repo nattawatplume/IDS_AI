@@ -4,7 +4,10 @@ import pickle
 import numpy as np
 import polars as pl
 import pytest
+from pydantic import ValidationError
+from sklearn.ensemble import IsolationForest
 
+from idsai.ai import baselines
 from idsai.ai.baselines import IsolationForestDetector, PCADetector, RandomDetector
 from idsai.config import file_sha, load_settings
 from idsai.contracts.detector import Detector, Evidence
@@ -96,6 +99,11 @@ def test_signature_metadata_from_yaml():
     assert kk.name == "baseline.kk" and kk.layer == "baseline"
     assert kk.technique_ids == ["MM-T001"]
     assert by_sid[100501].technique_ids == ["MM-T005"]
+
+
+def test_signature_needs_at_least_one_condition():
+    with pytest.raises(ValidationError):
+        sig([])
 
 
 def test_signature_features_are_real_columns():
@@ -255,6 +263,55 @@ def test_random_state_round_trip_and_empty_evidence():
     assert d.evidence({}).top == []
 
 
+@pytest.mark.parametrize("make", FIT_MAKERS)
+def test_inf_is_a_value_not_missing(make):
+    # NaN-only masking (same as rules/stats): +inf is an extreme value and scores finite and high
+    det = make()
+    normal = gaussian_frame(500, 6, seed=2)
+    det.fit(normal)
+    probe = pl.concat([normal.head(1), normal.head(1).with_columns(pl.lit(math.inf).alias("f1"))])
+    s = det.score(probe)
+    assert not np.isnan(s).any()
+    assert s[1] > s[0]
+    assert det.evidence(probe.row(1, named=True)).top[0][0] == "f1"
+
+
+@pytest.mark.parametrize(
+    "make, break_fit",
+    [
+        (lambda: IsolationForestDetector(FEATS, seed=0), "iforest"),
+        (lambda: PCADetector(FEATS, n_components=10), None),  # 10 > 6 features: PCA.fit raises
+    ],
+)
+def test_failed_fit_leaves_detector_unfitted(make, break_fit, monkeypatch):
+    if break_fit == "iforest":
+
+        def boom(self, *a, **k):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(IsolationForest, "fit", boom)
+    det = make()
+    with pytest.raises(ValueError):
+        det.fit(gaussian_frame(200, 6, seed=1))
+    with pytest.raises(RuntimeError):
+        det.score(gaussian_frame(5, 6, seed=1))
+    with pytest.raises(RuntimeError):
+        det.evidence({f: 0.0 for f in FEATS})
+
+
+def test_random_is_strictly_below_one_for_max_hash(monkeypatch):
+    class MaxHash:
+        def __init__(self, *a, **k):
+            pass
+
+        def digest(self):
+            return bytes([255]) * 8
+
+    monkeypatch.setattr(baselines.hashlib, "blake2b", MaxHash)
+    s = RandomDetector(seed=0).score(pl.DataFrame({"symbol": ["A"], "t_end_us": [1]}))
+    assert 0.0 <= s[0] < 1.0
+
+
 # ------------------------------------------------------------------ registry
 
 
@@ -312,6 +369,14 @@ def test_evidence_validator_rejects_unsorted_or_oversized():
         Evidence(top=[("a", 1.0, 1.0), ("b", 1.0, 2.0)])
     with pytest.raises(ValueError):
         Evidence(top=[("a", 1.0, 1.0)] * 6)
+
+
+def test_evidence_validator_rejects_nan_contribution():
+    with pytest.raises(ValueError):
+        Evidence(top=[("a", 1.0, NAN)])
+    with pytest.raises(ValueError):
+        Evidence(top=[("a", 1.0, 2.0), ("b", 1.0, NAN)])
+    Evidence(top=[("a", math.inf, math.inf), ("b", 1.0, 1.0)])  # inf is a value
 
 
 def test_evidence_from_items_sorts_truncates_and_drops_nan():
