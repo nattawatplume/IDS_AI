@@ -1,5 +1,5 @@
-data/
-models/
+/data/
+/models/
 *.duckdb
 *.duckdb.wal
 .venv/
