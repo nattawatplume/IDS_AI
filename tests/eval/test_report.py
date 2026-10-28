@@ -285,10 +285,11 @@ def test_paired_block_uses_only_the_latest_config_hash(research, tmp_path):
     assert set(rows) == {"baseline.kk"}  # pca only exists under the old config
     assert rows["baseline.kk"]["diff_mean"] == pytest.approx(0.5)
     assert rows["baseline.kk"]["n_seeds"] == 2
-    assert any("6" in n and "config_hash" in n for n in paired["notes"])
+    ignored = "ไม่นับ 6 run ของ config_hash เก่า (ใช้เฉพาะ config_hash ล่าสุด cfg)"
+    assert ignored in paired["notes"]
     assert any("baseline.pca" in n for n in paired["notes"])
     text = (tmp_path / "r.md").read_text(encoding="utf-8")
-    assert any("6" in ln and "config_hash" in ln for ln in text.splitlines() if ln.startswith("- "))
+    assert f"- {ignored}" in text.splitlines()
 
 
 def test_paired_block_without_older_configs_has_no_config_note(research, tmp_path):

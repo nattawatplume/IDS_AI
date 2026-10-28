@@ -112,7 +112,7 @@ def test_reason_never_claims_a_probability():
         "zero_events": (np.zeros((5, 0)), np.zeros((5, 0))),
     }
     expected = {
-        "accept": "ยอมรับ challenger",
+        "accept": "ถึงเกณฑ์ขั้นต่ำ",
         "ci_below_0": "ต่ำกว่า 0 ทั้งช่วง",
         "ci_straddles_0": "คร่อม 0",
         "below_min_effect": "ต่ำกว่าเกณฑ์ขั้นต่ำ",
@@ -120,7 +120,11 @@ def test_reason_never_claims_a_probability():
     }
     banned = ("ความน่าจะเป็น", "probability", "โอกาส", "แน่นอน")
     for name, (champ, chall) in branches.items():
-        reason = compare(champ, chall, N_BOOT, SEED).reason_th
+        d = compare(champ, chall, N_BOOT, SEED)
+        reason = d.reason_th
+        # "ยอมรับ" is a substring of "ไม่ยอมรับ": the accept branch is identified by the prefix
+        assert d.accept is (name == "accept"), (name, reason)
+        assert reason.startswith("ยอมรับ" if name == "accept" else "ไม่ยอมรับ"), (name, reason)
         assert expected[name] in reason, (name, reason)
         assert not any(b in reason.lower() for b in banned), (name, reason)
 
@@ -313,8 +317,25 @@ def test_report_retrain_uses_only_the_latest_config_hash(research, tmp_path):
     rd = raw["retrain_decision"]
     assert rd["n_seeds"] == 2 and rd["seeds"] == [0, 1]
     assert rd["diff_mean"] == pytest.approx(0.5) and rd["accept"] is True
-    assert any("6" in n and "config_hash" in n for n in rd["notes"])
-    # the AE-only pair only exists under the old config: its block uses those records alone
+    ignored = "ไม่นับ 6 run ของ config_hash เก่า (ใช้เฉพาะ config_hash ล่าสุด cfg)"
+    assert ignored in rd["notes"]
+    # the AE-only pair only exists under the old config: its block uses those records alone,
+    # and both blocks say that they come from different configs
     ai = rd["ai_only"]
-    assert ai["n_seeds"] == 3 and not any("config_hash" in n for n in ai["notes"])
-    assert any("6" in ln and "config_hash" in ln for ln in text.splitlines())
+    assert ai["n_seeds"] == 3 and ai["config_hash"] == "old" and rd["config_hash"] == "cfg"
+    assert not any(n.startswith("ไม่นับ") and "config_hash" in n for n in ai["notes"])
+    mismatch = (
+        "config_hash ไม่ตรงกัน: full stack ใช้ cfg แต่ AE alone (diagnostic) ใช้ old "
+        "จึงเทียบสองบล็อกนี้กันตรง ๆ ไม่ได้"
+    )
+    assert mismatch in rd["notes"] and mismatch in ai["notes"]
+    assert f"  - {ignored}" in text.splitlines() and f"  - {mismatch}" in text.splitlines()
+
+
+def test_report_retrain_same_config_has_no_mismatch_note(research, tmp_path):
+    for seed in range(2):
+        for variant, det in (("v1", V1), ("v2", V2), ("v1:ai", V1), ("v2:ai", V2)):
+            research.insert_run(_rec(variant, seed, det))
+    rd = _build(research, tmp_path)[2]["retrain_decision"]
+    assert rd["config_hash"] == rd["ai_only"]["config_hash"] == "cfg"
+    assert not any("config_hash" in n for n in rd["notes"] + rd["ai_only"]["notes"])

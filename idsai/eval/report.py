@@ -272,6 +272,7 @@ def _retrain_shell(champion: str, challenger: str, provenance: str | None) -> di
         "accept": None,
         "reason_th": "",
         "provenance": provenance,
+        "config_hash": None,
         "notes": [],
     }
 
@@ -300,6 +301,7 @@ def _retrain_block(
     if not recs:
         return None
     block = _retrain_shell(champion, challenger, "/".join(sorted({r["provenance"] for r in recs})))
+    block["config_hash"] = recs[-1].get("config_hash")
     notes = block["notes"]
     if config_note:
         notes.append(config_note)
@@ -362,10 +364,18 @@ def _retrain_decision(runs: list[dict], n_boot: int, min_effect: float) -> dict[
         return None
     pairs = RETRAIN_PAIRS
     primary = _retrain_block(runs, *pairs["primary"], n_boot, min_effect)
+    ai_only = _retrain_block(runs, *pairs["ai_only"], n_boot, min_effect)
     if primary is None:
         primary = _retrain_shell(*pairs["primary"], None)
         primary["reason_th"] = f"{NO_RETRAIN_TH} ของ full stack ที่งบ {PAIRED_BUDGET:g}"
-    return {**primary, "ai_only": _retrain_block(runs, *pairs["ai_only"], n_boot, min_effect)}
+    elif ai_only is not None and ai_only["config_hash"] != primary["config_hash"]:
+        note = (
+            f"config_hash ไม่ตรงกัน: full stack ใช้ {primary['config_hash']} แต่ "
+            f"{AI_ONLY_LABEL} ใช้ {ai_only['config_hash']} จึงเทียบสองบล็อกนี้กันตรง ๆ ไม่ได้"
+        )
+        primary["notes"].append(note)
+        ai_only["notes"].append(note)
+    return {**primary, "ai_only": ai_only}
 
 
 def _retrain_row_md(label: str, b: dict[str, Any]) -> str:
