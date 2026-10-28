@@ -87,13 +87,23 @@ class SplitsCfg(_Cfg):
     normal_days_per_symbol: int = 4
     min_gap_days: int = 2
     label_offset_s: dict[str, int] = {"sapienza": 0, "hu": 0}
+    # retrain_drift training ranges (inside train); None = first / last two thirds of train
+    drift_v1: DateRange | None = None
+    drift_v2: DateRange | None = None
 
     @model_validator(mode="after")
     def _check_order(self) -> "SplitsCfg":
-        for name in ("train", "cal", "accept", "test"):
-            lo, hi = getattr(self, name)
+        for name in ("train", "cal", "accept", "test", "drift_v1", "drift_v2"):
+            rng = getattr(self, name)
+            if rng is None:
+                continue
+            lo, hi = rng
             if lo > hi:
                 raise ValueError(f"{name} start {lo} is after its end {hi}")
+        for name in ("drift_v1", "drift_v2"):
+            rng = getattr(self, name)
+            if rng is not None and not (self.train[0] <= rng[0] and rng[1] <= self.train[1]):
+                raise ValueError(f"{name} {rng} must lie inside train {self.train}")
         ordered = (
             self.train[1] < self.cal[0]
             and self.cal[1] < self.accept[0]
