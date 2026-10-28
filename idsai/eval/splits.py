@@ -12,12 +12,13 @@ Periods come from `cfg.splits` and are strictly ordered `train < cal < accept < 
 - Hard negatives: the `hard_negative_k` test-normal days with the highest realized 1-minute
   volatility move out of `test_normal` into `test_hard_negative`.
 
-Every list is sorted by `(symbol, day)`.
+Every list is sorted by `(symbol, day)`. Labels that give no event day are counted per period and
+reason in `Split.labels_dropped` (out of every period, in the cal period, day or D-1 missing).
 """
 
 import hashlib
 import json
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import date, timedelta
 from typing import Any
 
@@ -31,6 +32,17 @@ from idsai.data.store import DAY_US, Store
 NEXT_MINUTES = 10
 MIN_VOL_MINUTES = 30
 PERIODS = ("train", "cal", "accept", "test")
+LIST_NAMES = (
+    "train_normal",
+    "train_events",
+    "cal_normal",
+    "accept_events",
+    "accept_normal",
+    "test_events",
+    "test_normal",
+    "test_hard_negative",
+)
+DROP_REASONS = ("out_of_period", "cal_period", "missing_day", "no_baseline")
 NORMAL_LISTS = ("train_normal", "cal_normal", "accept_normal", "test_normal", "test_hard_negative")
 _EPOCH = date(1970, 1, 1)
 _MINUTE_US = 60_000_000
@@ -53,9 +65,13 @@ class Split:
     test_events: list[SymDay]
     test_normal: list[SymDay]
     test_hard_negative: list[SymDay]
+    # REAL labels considered, and those not usable as events:
+    # {period or "none": {reason in DROP_REASONS: n}}
+    n_labels: int = 0
+    labels_dropped: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def lists(self) -> dict[str, list[SymDay]]:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name in LIST_NAMES}
 
     def counts(self) -> dict[str, int]:
         return {k: len(v) for k, v in self.lists().items()}
@@ -113,6 +129,8 @@ def split_def(split: Split, cfg: Settings) -> dict[str, Any]:
         "split_seed": cfg.eval.split_seed,
         "counts": split.counts(),
         "sha12": split.sha12(),
+        "n_labels": split.n_labels,
+        "labels_dropped": split.labels_dropped,
     }
 
 
@@ -153,6 +171,7 @@ def make_split(labels: pl.DataFrame, store: Store, cfg: Settings, seed: int | No
     label_days: dict[str, list[date]] = {}
     events: dict[str, dict[tuple[str, date], int]] = {p: {} for p in PERIODS}
     days_cache: dict[str, set[date]] = {}
+    dropped: dict[str, dict[str, int]] = {}
 
     def store_days(symbol: str) -> set[date]:
         if symbol not in days_cache:
@@ -164,7 +183,18 @@ def make_split(labels: pl.DataFrame, store: Store, cfg: Settings, seed: int | No
         label_days.setdefault(sym, []).append(d)
         period = period_of(d, sp)
         have = store_days(sym)
-        if period is None or d not in have or d - timedelta(days=1) not in have:
+        reason = None
+        if period is None:
+            reason = "out_of_period"
+        elif period == "cal":  # the cal period has no event set
+            reason = "cal_period"
+        elif d not in have:
+            reason = "missing_day"
+        elif d - timedelta(days=1) not in have:
+            reason = "no_baseline"
+        if reason is not None:
+            by = dropped.setdefault(period or "none", {})
+            by[reason] = by.get(reason, 0) + 1
             continue
         near_midnight = day_start_us(d) + DAY_US - t0 <= NEXT_MINUTES * _MINUTE_US
         n_next = NEXT_MINUTES if near_midnight else 0
@@ -215,6 +245,8 @@ def make_split(labels: pl.DataFrame, store: Store, cfg: Settings, seed: int | No
         test_events=ev("test"),
         test_normal=test_normal,
         test_hard_negative=hard,
+        n_labels=labels.height,
+        labels_dropped={k: dict(sorted(v.items())) for k, v in sorted(dropped.items())},
     )
     for name in NORMAL_LISTS:
         for s in getattr(split, name):

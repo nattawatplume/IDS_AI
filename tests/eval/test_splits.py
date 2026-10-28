@@ -189,3 +189,22 @@ def test_drift_ranges_default_and_validation():
     )
     with pytest.raises(ValueError, match="inside train"):
         cfg_with(drift_v1=["2025-01-01", "2025-01-05"])
+
+
+def test_dropped_labels_are_counted(split, tmp_path, cfg):
+    assert split.n_labels == len(LABELS_ROWS)
+    assert split.labels_dropped == {"cal": {"cal_period": 1}, "none": {"out_of_period": 2}}
+    d = split_def(split, cfg)
+    assert d["n_labels"] == 7 and d["labels_dropped"] == split.labels_dropped
+    with Store(tmp_path / "data", tmp_path / "data" / "app.duckdb") as s:
+        s.write_trades(make_trades(date(2025, 1, 14), 2, symbol="EEEBTC", rate=0.003))
+        rows = [
+            ("EEEBTC", at(date(2025, 1, 14), 9)),  # no D-1 partition
+            ("EEEBTC", at(date(2025, 1, 15), 9)),  # usable
+            ("EEEBTC", at(date(2025, 1, 16), 9)),  # no partition for the day
+        ]
+        sp = make_split(label_frame(rows), s, cfg)
+    assert sp.accept_events == [SymDay("EEEBTC", date(2025, 1, 15))]
+    assert sp.labels_dropped == {"accept": {"missing_day": 1, "no_baseline": 1}}
+    assert sp.n_labels == 3
+    assert set(sp.lists()) == set(PERIOD_OF_LIST)  # metadata fields are not day lists
