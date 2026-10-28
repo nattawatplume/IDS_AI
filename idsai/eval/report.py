@@ -13,6 +13,12 @@ shown recall and its CI come from the same estimator. REAL events are their own 
 the same test-normal days, so they are clustered by `(symbol, day)` (`symbol-day`); treating
 `(seed, event)` pairs as independent would make the CI too narrow. Older SEMI-SYN records
 without a `day` fall back to `event (legacy, optimistic)`.
+
+Retrain decision: `retrain_drift` records at budget 2 on the accept split give the
+champion/challenger verdict (`idsai.ai.learning.compare`, a paired event bootstrap): full stack
+`v1` vs `v2` (what would be deployed), and the AE alone `v1:ai` vs `v2:ai` as a diagnostic.
+Its `series` block (recall_any per version, same ratio estimator as the tables) feeds the
+dashboard's before/after chart.
 """
 
 import json
@@ -24,6 +30,7 @@ from typing import Any
 import duckdb
 import numpy as np
 
+from idsai.ai.learning import compare
 from idsai.config import Settings, load_settings
 from idsai.data.store import Store
 from idsai.eval.experiments import AE, BASELINES, EXPERIMENTS
@@ -220,6 +227,169 @@ def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
     return {"budget": PAIRED_BUDGET, "metric": "recall_any", "rows": rows, "notes": notes}
 
 
+RETRAIN = "retrain_drift"
+RETRAIN_PAIRS = {"primary": ("v1", "v2"), "ai_only": ("v1:ai", "v2:ai")}
+AI_ONLY_LABEL = "AE alone (diagnostic)"
+NO_RETRAIN_TH = "ยังไม่มีผล retrain_drift"
+
+
+def _retrain_shell(champion: str, challenger: str, provenance: str | None) -> dict[str, Any]:
+    """A retrain decision block with nothing decided yet (filled by `_retrain_block`)."""
+    return {
+        "champion": champion,
+        "challenger": challenger,
+        "budget": PAIRED_BUDGET,
+        "metric": "recall_any",
+        "split": "accept",
+        "n_seeds": 0,
+        "seeds": [],
+        "n_events": 0,
+        "series": None,
+        "diff_mean": None,
+        "ci": None,
+        "accept": None,
+        "reason_th": "",
+        "provenance": provenance,
+        "notes": [],
+    }
+
+
+def _retrain_block(
+    runs: list[dict], champion: str, challenger: str, n_boot: int, min_effect: float
+) -> dict[str, Any] | None:
+    """Champion vs challenger on the accept split (recall_any, budget 2); None without records.
+
+    Arrays `(n_seeds, n_events)` of per-event `detected_any` over the seeds where both arms have
+    an OK record (`metrics` not null) and the events every such record shares. The decision is
+    `compare` (paired event bootstrap); the series uses the cluster ratio estimator of the
+    report tables (unit = event) on the same records and events, so it equals the table cell
+    whenever no seed or event is dropped.
+    """
+    recs = [
+        r
+        for r in runs
+        if r["experiment"] == RETRAIN
+        and r["variant"] in (champion, challenger)
+        and float(r["budget"]) == PAIRED_BUDGET
+    ]
+    if not recs:
+        return None
+    block = _retrain_shell(champion, challenger, "/".join(sorted({r["provenance"] for r in recs})))
+    notes = block["notes"]
+    arms: dict[str, dict[int, dict]] = {champion: {}, challenger: {}}
+    for r in recs:
+        if r.get("metrics") is not None:
+            arms[r["variant"]][r["seed"]] = r
+    n_null = sum(r.get("metrics") is None for r in recs)
+    seeds = sorted(set(arms[champion]) & set(arms[challenger]))
+    dropped = sorted((set(arms[champion]) | set(arms[challenger])) - set(seeds))
+    if n_null:
+        notes.append(f"ไม่นับ {n_null} run ที่ metrics เป็น null (เช่น CalibrationError)")
+    if dropped:
+        notes.append(
+            f"ตัด seed {', '.join(map(str, dropped))}: ไม่มีผลครบทั้ง {champion} และ {challenger}"
+        )
+    if not seeds:
+        block["reason_th"] = f"ยังตัดสินไม่ได้: ไม่มี seed ที่มีผล {champion} และ {challenger} ครบทั้งสองฝั่ง"
+        return block
+    ok = [arms[k][s] for k in (champion, challenger) for s in seeds]
+    events = sorted(set.intersection(*[set(r["per_event"]) for r in ok]))
+    n_union = len(set().union(*[set(r["per_event"]) for r in ok]))
+    if n_union > len(events):
+        notes.append(f"ใช้เฉพาะ {len(events)} จาก {n_union} เหตุการณ์ที่ทุก run มีร่วมกัน")
+
+    def mat(k: str) -> np.ndarray:
+        return np.array(
+            [[arms[k][s]["per_event"][e]["detected_any"] for e in events] for s in seeds],
+            dtype=bool,
+        ).reshape(len(seeds), len(events))
+
+    d = compare(mat(champion), mat(challenger), n_boot, CI_SEED, min_effect)
+    series = {}
+    for k in (champion, challenger):
+        aligned = [{"per_event": {e: arms[k][s]["per_event"][e] for e in events}} for s in seeds]
+        hits, n = cluster_counts(aligned, "detected_any", UNIT_EVENT)
+        mean, (lo, hi) = ratio_bootstrap_ci(hits, n, n_boot, CI_SEED)
+        finite = math.isfinite(mean)
+        series[k] = {"mean": mean if finite else None, "ci": [lo, hi] if finite else None}
+    block.update(
+        seeds=seeds,
+        n_seeds=len(seeds),
+        n_events=len(events),
+        series=series,
+        diff_mean=d.diff_mean,
+        ci=list(d.ci),
+        accept=d.accept,
+        reason_th=d.reason_th,
+    )
+    return block
+
+
+def _retrain_decision(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """Primary decision (full stack v1 vs v2) plus the AE-only diagnostic under `ai_only`.
+
+    None without any retrain_drift record; a missing pair is None (`ai_only`) or an undecided
+    block with a Thai reason (primary, so the JSON shape stays stable).
+    """
+    if not any(r["experiment"] == RETRAIN for r in runs):
+        return None
+    pairs = RETRAIN_PAIRS
+    primary = _retrain_block(runs, *pairs["primary"], n_boot, min_effect)
+    if primary is None:
+        primary = _retrain_shell(*pairs["primary"], None)
+        primary["reason_th"] = f"{NO_RETRAIN_TH} ของ full stack ที่งบ {PAIRED_BUDGET:g}"
+    return {**primary, "ai_only": _retrain_block(runs, *pairs["ai_only"], n_boot, min_effect)}
+
+
+def _retrain_row_md(label: str, b: dict[str, Any]) -> str:
+    series = b["series"] or {}
+
+    def recall(k: str) -> str:
+        s = series.get(k)
+        return _fmt_ci(s["mean"], s["ci"]) if s else "–"
+
+    ci = f"[{_fmt(b['ci'][0])}, {_fmt(b['ci'][1])}]" if b["ci"] else "–"
+    verdict = {True: "ยอมรับ", False: "ไม่ยอมรับ", None: "ยังตัดสินไม่ได้"}[b["accept"]]
+    return (
+        f"| {label} | {b['champion']} → {b['challenger']} | {b['provenance'] or '–'} | "
+        f"{b['n_seeds']} | {b['n_events']} | {recall(b['champion'])} | "
+        f"{recall(b['challenger'])} | {_fmt(b['diff_mean'])} | {ci} | {verdict} |"
+    )
+
+
+def _retrain_md(rd: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = [
+        "",
+        f"## retrain_drift: champion v1 vs challenger v2 (paired bootstrap, budget "
+        f"{PAIRED_BUDGET:g}, accept split)",
+        "",
+    ]
+    if rd is None:
+        return [*lines, NO_RETRAIN_TH]
+    lines += [
+        "| comparison | champion → challenger | provenance | seeds | events | "
+        "recall_any champion [95% CI] | recall_any challenger [95% CI] | "
+        "diff (challenger − champion) | 95% CI | ผล |",
+        "|" + "---|" * 10,
+    ]
+    blocks = [("full stack (deployed)", rd)]
+    if rd["ai_only"] is not None:
+        blocks.append((AI_ONLY_LABEL, rd["ai_only"]))
+    lines += [_retrain_row_md(label, b) for label, b in blocks]
+    lines.append("")
+    for label, b in blocks:
+        lines.append(f"- {label}: {b['reason_th']}")
+        lines += [f"  - {n}" for n in b["notes"]]
+    if rd["ai_only"] is None:
+        lines.append(f"- {AI_ONLY_LABEL}: {NO_RETRAIN_TH}")
+    lines += [
+        "",
+        f"challenger แทน champion เมื่อ CI ล่างของผลต่าง > 0 และผลต่าง ≥ {min_effect:g} "
+        "(bootstrap แบบจับคู่ข้ามเหตุการณ์ ใช้ดัชนีสุ่มซ้ำเดียวกันทั้งสองฝั่ง)",
+    ]
+    return lines
+
+
 def _fmt(x: float | None, nd: int = 3) -> str:
     return "–" if x is None else f"{x:.{nd}f}"
 
@@ -309,6 +479,7 @@ def build_report(
             for v, by_b in sorted(grouped[exp].items())
         }
     paired = _paired(runs, n_boot, cfg.eval.min_effect)
+    retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
     data = {
         "header": header,
         "runs": len(runs),
@@ -317,6 +488,7 @@ def build_report(
         "config_hash": _uniq(runs, "config_hash"),
         "experiments": experiments,
         "paired_bootstrap": paired,
+        "retrain_decision": retrain,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
     }
@@ -369,9 +541,9 @@ def build_report(
         )
     if paired["notes"]:
         lines += ["", *[f"- {n}" for n in paired["notes"]]]
+    lines += ["", f"เกณฑ์: CI ล่าง > 0 และผลต่าง ≥ {cfg.eval.min_effect:g}"]
+    lines += _retrain_md(retrain, cfg.eval.min_effect)
     lines += [
-        "",
-        f"เกณฑ์: CI ล่าง > 0 และผลต่าง ≥ {cfg.eval.min_effect:g}",
         "",
         "## หมายเหตุ",
         "",

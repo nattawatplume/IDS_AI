@@ -1,4 +1,5 @@
-"""Model lifecycle: label-only training mask and the versioned on-disk model registry.
+"""Model lifecycle: label-only training mask, the versioned on-disk model registry, and the
+champion/challenger decision.
 
 This is the one `ai/` module allowed to read labels: it uses them only to keep labeled periods
 (± a margin) out of the normal training data, never as training targets. Alerts are never used
@@ -10,6 +11,7 @@ import os
 import pickle
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ import numpy as np
 import polars as pl
 
 from idsai.contracts.detector import Detector
+from idsai.eval.metrics import paired_bootstrap, significant
 
 REQUIRED_META = ("data_hash", "config_hash", "seed", "created_at", "train_range")
 MAX_SAVE_ATTEMPTS = 100
@@ -144,3 +147,58 @@ class ModelRegistry:
             state = pickle.load(f)
         meta = json.loads((vdir / "meta.json").read_text(encoding="utf-8"))
         return state, meta
+
+
+@dataclass(frozen=True)
+class Decision:
+    """Champion/challenger verdict: `diff_mean` and `ci` are challenger - champion recall."""
+
+    accept: bool
+    diff_mean: float
+    ci: tuple[float, float]
+    reason_th: str
+
+
+def _detections(x: np.ndarray, name: str) -> np.ndarray:
+    a = np.asarray(x)
+    if a.ndim != 2 or a.shape[0] == 0:
+        raise ValueError(f"{name} must be (n_seeds, n_events) with n_seeds >= 1, got {a.shape}")
+    a = a.astype(np.float64)
+    if not np.isin(a, (0.0, 1.0)).all():
+        raise ValueError(f"{name} must hold 0/1 detections only")
+    return a
+
+
+def compare(
+    champion: np.ndarray,
+    challenger: np.ndarray,
+    n_boot: int,
+    seed: int,
+    min_effect: float = 0.02,
+) -> Decision:
+    """Accept the challenger iff it detects more events, by a paired event bootstrap.
+
+    `champion`, `challenger`: `(n_seeds, n_events)` 0/1 (or bool) detections on the same events
+    and seeds. Each arm is averaged over seeds per event, then events are resampled with the
+    same indices for both arms (`paired_bootstrap`). Accept iff the 95 % CI lower bound of
+    `challenger - champion` is > 0 and the mean difference is >= `min_effect` (`significant`).
+    No events gives a reject with diff 0 and CI (0, 0).
+    """
+    a = _detections(champion, "champion")
+    b = _detections(challenger, "challenger")
+    if a.shape != b.shape:
+        raise ValueError(f"champion and challenger shapes differ: {a.shape} {b.shape}")
+    if a.shape[1] == 0:
+        return Decision(False, 0.0, (0.0, 0.0), "ไม่ยอมรับ challenger: ไม่มีเหตุการณ์ให้เปรียบเทียบ")
+    diff, ci = paired_bootstrap(b, a, n_boot, seed)
+    accept = significant(diff, ci, min_effect)
+    nums = f"{diff:+.3f} (95% CI {ci[0]:.3f} ถึง {ci[1]:.3f})"
+    if accept:
+        reason = f"ยอมรับ challenger: recall ดีขึ้น {nums} เกินเกณฑ์ขั้นต่ำ {min_effect:g}"
+    elif ci[1] < 0:
+        reason = f"ไม่ยอมรับ challenger: recall ลดลง {nums} CI ต่ำกว่า 0 ทั้งช่วง"
+    elif ci[0] <= 0:
+        reason = f"ไม่ยอมรับ challenger: ผลต่าง recall {nums} CI คร่อม 0"
+    else:
+        reason = f"ไม่ยอมรับ challenger: recall ดีขึ้น {nums} แต่ต่ำกว่าเกณฑ์ขั้นต่ำ {min_effect:g}"
+    return Decision(accept, diff, ci, reason)
