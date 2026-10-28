@@ -215,6 +215,13 @@ def paired_bootstrap(
     return float(ma.mean() - mb.mean()), _ci(diffs)
 
 
+EFFECT_TOL = 1e-12
+
+
 def significant(diff_mean: float, ci: tuple[float, float], min_effect: float) -> bool:
-    """Accept rule: 95 % CI lower bound > 0 and mean difference >= `min_effect`."""
-    return bool(ci[0] > 0 and diff_mean >= min_effect)
+    """Accept rule: 95 % CI lower bound > 0 and mean difference >= `min_effect`.
+
+    The effect comparison allows `EFFECT_TOL` of float rounding, so a true difference equal to
+    `min_effect` (e.g. a mean that evaluates to 0.019999999999999997) is not rejected.
+    """
+    return bool(ci[0] > 0 and diff_mean >= min_effect - EFFECT_TOL)

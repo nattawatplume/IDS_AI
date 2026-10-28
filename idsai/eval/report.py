@@ -17,6 +17,8 @@ without a `day` fall back to `event (legacy, optimistic)`.
 Retrain decision: `retrain_drift` records at budget 2 on the accept split give the
 champion/challenger verdict (`idsai.ai.learning.compare`, a paired event bootstrap): full stack
 `v1` vs `v2` (what would be deployed), and the AE alone `v1:ai` vs `v2:ai` as a diagnostic.
+The retrain and AE-vs-baselines blocks each use only the records of the most recent
+`config_hash` feeding them, with a note counting the older-config records ignored.
 Its `series` block (recall_any per version, same ratio estimator as the tables) feeds the
 dashboard's before/after chart.
 """
@@ -184,17 +186,37 @@ def _labels_summary(runs: list[dict]) -> list[dict[str, Any]]:
     return [seen[k] for k in sorted(seen)]
 
 
+def _latest_config(recs: list[dict]) -> tuple[list[dict], str | None]:
+    """Keep only the records of the most recent `config_hash` among `recs`.
+
+    `recs` arrive in created order (`Store.list_runs`: `ORDER BY created_us, run_id`), so the
+    last record's config is the most recent. Returns the kept records and a Thai note naming
+    how many older-config records were ignored (None when nothing was ignored).
+    """
+    if not recs:
+        return recs, None
+    latest = recs[-1].get("config_hash")
+    kept = [r for r in recs if r.get("config_hash") == latest]
+    n_old = len(recs) - len(kept)
+    if not n_old:
+        return kept, None
+    return kept, f"ไม่นับ {n_old} run ของ config_hash เก่า (ใช้เฉพาะ config_hash ล่าสุด {latest})"
+
+
 def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
-    """AE vs each baseline on the real_t001 events (baselines experiment, budget 2)."""
+    """AE vs each baseline on the real_t001 events (baselines experiment, budget 2).
+
+    Only records of the most recent `config_hash` feeding this block are used.
+    """
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == "baselines" and float(r["budget"]) == PAIRED_BUDGET]
+    )
     arms: dict[str, dict[int, dict]] = defaultdict(dict)
-    for r in runs:
-        if (
-            r["experiment"] == "baselines"
-            and r.get("metrics") is not None
-            and float(r["budget"]) == PAIRED_BUDGET
-        ):
+    for r in recs:
+        if r.get("metrics") is not None:
             arms[r["variant"]][r["seed"]] = r["per_event"]
-    rows, notes = [], []
+    rows: list[dict[str, Any]] = []
+    notes = [config_note] if config_note else []
     if AE not in arms:
         notes.append("ข้าม: ไม่มีผล baselines ของ ai.autoencoder_trade ที่งบ 2")
     for base in (b for b in BASELINES if b != AE):
@@ -263,19 +285,24 @@ def _retrain_block(
     an OK record (`metrics` not null) and the events every such record shares. The decision is
     `compare` (paired event bootstrap); the series uses the cluster ratio estimator of the
     report tables (unit = event) on the same records and events, so it equals the table cell
-    whenever no seed or event is dropped.
+    whenever no seed or event is dropped. Only records of the most recent `config_hash`
+    feeding this block are used.
     """
-    recs = [
-        r
-        for r in runs
-        if r["experiment"] == RETRAIN
-        and r["variant"] in (champion, challenger)
-        and float(r["budget"]) == PAIRED_BUDGET
-    ]
+    recs, config_note = _latest_config(
+        [
+            r
+            for r in runs
+            if r["experiment"] == RETRAIN
+            and r["variant"] in (champion, challenger)
+            and float(r["budget"]) == PAIRED_BUDGET
+        ]
+    )
     if not recs:
         return None
     block = _retrain_shell(champion, challenger, "/".join(sorted({r["provenance"] for r in recs})))
     notes = block["notes"]
+    if config_note:
+        notes.append(config_note)
     arms: dict[str, dict[int, dict]] = {champion: {}, challenger: {}}
     for r in recs:
         if r.get("metrics") is not None:

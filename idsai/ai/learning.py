@@ -194,7 +194,7 @@ def compare(
     accept = significant(diff, ci, min_effect)
     nums = f"{diff:+.3f} (95% CI {ci[0]:.3f} ถึง {ci[1]:.3f})"
     if accept:
-        reason = f"ยอมรับ challenger: recall ดีขึ้น {nums} เกินเกณฑ์ขั้นต่ำ {min_effect:g}"
+        reason = f"ยอมรับ challenger: recall ดีขึ้น {nums} ถึงเกณฑ์ขั้นต่ำ {min_effect:g}"
     elif ci[1] < 0:
         reason = f"ไม่ยอมรับ challenger: recall ลดลง {nums} CI ต่ำกว่า 0 ทั้งช่วง"
     elif ci[0] <= 0:

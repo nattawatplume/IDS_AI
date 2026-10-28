@@ -82,10 +82,47 @@ def test_compare_is_deterministic():
     assert compare(champ, chall, 500, 11) == compare(champ, chall, 500, 11)
 
 
+def _two_per_event(n: int = 100, k: int = 2):
+    """`n` seeds x `n` events; the challenger detects each event in exactly `k` seeds."""
+    champ = np.zeros((n, n), dtype=bool)
+    chall = np.zeros((n, n), dtype=bool)
+    for j in range(n):
+        chall[(j + np.arange(k)) % n, j] = True
+    return champ, chall
+
+
+def test_exact_min_effect_is_accepted_despite_float_rounding():
+    # diff is a true 0.02 that the float mean rounds to 0.019999999999999997
+    champ, chall = _two_per_event()
+    d = compare(champ, chall, N_BOOT, SEED, min_effect=0.02)
+    assert d.diff_mean == pytest.approx(0.02) and d.diff_mean < 0.02
+    assert d.ci[0] > 0
+    assert d.accept is True
+    assert "ถึงเกณฑ์ขั้นต่ำ" in d.reason_th and "เกิน" not in d.reason_th
+
+
 def test_reason_never_claims_a_probability():
-    champ, chall = _arrays(5, 100, 50, 80)
-    for d in (compare(champ, chall, N_BOOT, SEED), compare(chall, champ, N_BOOT, SEED)):
-        assert "ความน่าจะเป็น" not in d.reason_th and "probability" not in d.reason_th.lower()
+    rng = np.random.default_rng(7)
+    small = (np.zeros((100, 100), dtype=bool), np.eye(100, dtype=bool))
+    branches = {
+        "accept": _arrays(5, 100, 50, 80),
+        "ci_below_0": _arrays(5, 100, 80, 40),
+        "ci_straddles_0": (rng.integers(0, 2, size=(5, 60)), rng.integers(0, 2, size=(5, 60))),
+        "below_min_effect": small,
+        "zero_events": (np.zeros((5, 0)), np.zeros((5, 0))),
+    }
+    expected = {
+        "accept": "ยอมรับ challenger",
+        "ci_below_0": "ต่ำกว่า 0 ทั้งช่วง",
+        "ci_straddles_0": "คร่อม 0",
+        "below_min_effect": "ต่ำกว่าเกณฑ์ขั้นต่ำ",
+        "zero_events": "ไม่มีเหตุการณ์",
+    }
+    banned = ("ความน่าจะเป็น", "probability", "โอกาส", "แน่นอน")
+    for name, (champ, chall) in branches.items():
+        reason = compare(champ, chall, N_BOOT, SEED).reason_th
+        assert expected[name] in reason, (name, reason)
+        assert not any(b in reason.lower() for b in banned), (name, reason)
 
 
 @pytest.mark.parametrize(
@@ -251,3 +288,33 @@ def test_report_retrain_without_shared_events(research, tmp_path):
     assert any("0 จาก 80" in n for n in rd["notes"])
     (row,) = [ln for ln in text.splitlines() if ln.startswith("| full stack (deployed) |")]
     assert not re.search(r"\bnan\b", row), row
+
+
+def test_report_retrain_uses_only_the_latest_config_hash(research, tmp_path):
+    t = 1_000
+    for seed in range(3):  # an older config where the challenger looked worse
+        for variant, det in (("v1", V2), ("v2", V1), ("v1:ai", V1), ("v2:ai", V1)):
+            t += 1
+            research.insert_run(
+                _rec(
+                    variant,
+                    seed,
+                    det,
+                    config_hash="old",
+                    created_us=t,
+                    run_id=f"retrain_drift|{variant}|b2|s{seed}|old",
+                )
+            )
+    for seed in range(2):
+        for variant, det in (("v1", V1), ("v2", V2)):
+            t += 1
+            research.insert_run(_rec(variant, seed, det, created_us=t))
+    _, text, raw = _build(research, tmp_path)
+    rd = raw["retrain_decision"]
+    assert rd["n_seeds"] == 2 and rd["seeds"] == [0, 1]
+    assert rd["diff_mean"] == pytest.approx(0.5) and rd["accept"] is True
+    assert any("6" in n and "config_hash" in n for n in rd["notes"])
+    # the AE-only pair only exists under the old config: its block uses those records alone
+    ai = rd["ai_only"]
+    assert ai["n_seeds"] == 3 and not any("config_hash" in n for n in ai["notes"])
+    assert any("6" in ln and "config_hash" in ln for ln in text.splitlines())

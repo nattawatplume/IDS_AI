@@ -230,3 +230,12 @@ def test_ratio_bootstrap_ci():
     assert math.isnan(m) and math.isnan(a) and math.isnan(z)
     with pytest.raises(ValueError):
         ratio_bootstrap_ci(np.zeros(2), np.ones(3), 10, 0)
+
+
+def test_significant_accepts_the_exact_min_effect_despite_float_rounding():
+    assert 0.12 - 0.1 < 0.02  # a "true" 0.02 that rounds just below it
+    assert significant(0.12 - 0.1, (0.01, 0.03), 0.02)
+    assert significant(0.02, (0.02, 0.02), 0.02)
+    assert not significant(0.0199, (0.01, 0.03), 0.02)  # a real shortfall is still rejected
+    assert not significant(0.02, (0.0, 0.04), 0.02)  # CI lower bound must be strictly > 0
+    assert not significant(0.02, (-1e-13, 0.04), 0.02)
