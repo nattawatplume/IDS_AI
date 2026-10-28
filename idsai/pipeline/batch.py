@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,15 +37,24 @@ FEATURE_SET_V = "fs1"
 
 _EPOCH = date(1970, 1, 1)
 Skipped = Literal["missing_day", "no_baseline", "no_trades"]
+MAX_NEXT_MINUTES = 1440
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)  # frames are neither hashable nor comparable
 class DayResult:
+    """Windows of one symbol-day.
+
+    `next_day_present` is False only when `include_next_minutes > 0` and the `D+1` partition is
+    absent: the extension rows past `D+1` were then built from empty bars (no trades) and
+    callers that need real data must drop rows with `t_end_us >= D+1`.
+    """
+
     symbol: str
     day: date
     windows: pl.DataFrame
     labels: pl.DataFrame
     skipped: Skipped | None = None
+    next_day_present: bool = True
 
 
 def _day_start_us(day: date) -> int:
@@ -92,7 +102,7 @@ def _read_cache(path: Path, cfg: FeatureCfg) -> pl.DataFrame | None:
 def _write_cache(path: Path, windows: pl.DataFrame, cfg: FeatureCfg) -> None:
     """Atomic write (temp file, then rename) of float32 Parquet."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         windows.with_columns(
             pl.col(c).cast(pl.Float32) for c in feature_columns(cfg)
@@ -126,28 +136,45 @@ def load_day_windows(
     Returned windows have `t_end_us` in `[day, day + 1 d + include_next_minutes)` and are rounded
     through float32. `labels` are the store's labels for `symbol` overlapping that range (clean
     run) or just the injected label (scenario run).
+
+    Raises ValueError when `include_next_minutes` is outside `[0, 1440]` or the scenario's label
+    `[t_start, t_start + duration]` does not overlap the kept range, and KeyError when no
+    `quote_unit` matches the symbol (all before any trade is read).
     """
     fcfg = cfg.features
-    prev = day - timedelta(days=1)
+    if not 0 <= include_next_minutes <= MAX_NEXT_MINUTES:
+        raise ValueError(
+            f"include_next_minutes must be in [0, {MAX_NEXT_MINUTES}], got {include_next_minutes}"
+        )
+    d0 = _day_start_us(day)
+    lo, hi = d0, d0 + DAY_US + include_next_minutes * 60 * S_US
+    start_us = d0 - DAY_US
+    if scenario is not None:
+        sc_end = scenario.t_start_us + int(round(scenario.duration_s * S_US))
+        if not (sc_end >= lo and scenario.t_start_us < hi):
+            raise ValueError(
+                f"scenario [{scenario.t_start_us}, {sc_end}] does not overlap the kept range "
+                f"[{lo}, {hi}) of {symbol} {day}"
+            )
+    unit = quote_unit_for(symbol, fcfg)
+
+    prev, nxt = day - timedelta(days=1), day + timedelta(days=1)
     if not store.has_day(symbol, day):
         return _skip(symbol, day, fcfg, "missing_day")
     if not store.has_day(symbol, prev):
         return _skip(symbol, day, fcfg, "no_baseline")
-
-    d0 = _day_start_us(day)
-    lo, hi = d0, d0 + DAY_US + include_next_minutes * 60 * S_US
-    start_us = d0 - DAY_US
+    next_present = include_next_minutes == 0 or store.has_day(symbol, nxt)
 
     path = None
     if scenario is None:
-        nxt = day + timedelta(days=1)
         shas = (store.partition_sha(symbol, prev), store.partition_sha(symbol, day))
         if include_next_minutes:
             shas += (store.partition_sha(symbol, nxt),)
         path = _cache_path(cfg, symbol, day, include_next_minutes, shas)
         cached = _read_cache(path, fcfg)
         if cached is not None:
-            return DayResult(symbol, day, cached, _clean_labels(store, symbol, lo, hi))
+            labels = _clean_labels(store, symbol, lo, hi)
+            return DayResult(symbol, day, cached, labels, next_day_present=next_present)
 
     trades = store.read_trades(symbol, start_us, hi)
     if scenario is None:
@@ -161,12 +188,12 @@ def load_day_windows(
         trades, labels = inject(trades, scenario, base, mode="replay")
 
     bars = trades_to_bars(trades, symbol, start_us, hi)
-    windows = compute_windows(bars, fcfg, quote_unit_for(symbol, fcfg))
+    windows = compute_windows(bars, fcfg, unit)
     windows = windows.filter((pl.col("t_end_us") >= lo) & (pl.col("t_end_us") < hi))
     windows = _round_f32(windows, fcfg)
     if path is not None:
         _write_cache(path, windows, fcfg)
-    return DayResult(symbol, day, windows, labels)
+    return DayResult(symbol, day, windows, labels, next_day_present=next_present)
 
 
 def _clean_labels(store: Store, symbol: str, lo: int, hi: int) -> pl.DataFrame:

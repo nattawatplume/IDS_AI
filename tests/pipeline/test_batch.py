@@ -315,3 +315,105 @@ def test_score_windows_length_mismatch_raises():
 
     with pytest.raises(ValueError, match="rows"):
         score_windows(pl.DataFrame({"t_end_us": [1]}), [Bad("bad", 0)])
+
+
+# ---------------------------------------------------------------- argument checks (Ruling 16)
+def test_next_day_present_flag(store, cfg):
+    assert load_day_windows(store, SYM, D, cfg).next_day_present
+    assert load_day_windows(store, SYM, D, cfg, include_next_minutes=10).next_day_present
+
+
+def test_next_day_absent_is_flagged(tmp_path, cfg):
+    with make_store(tmp_path, make_trades(D - timedelta(days=1), 2)) as s:
+        assert load_day_windows(s, SYM, D, cfg).next_day_present  # n = 0 never needs D+1
+        r = load_day_windows(s, SYM, D, cfg, include_next_minutes=10)
+        cached = load_day_windows(s, SYM, D, cfg, include_next_minutes=10)
+    assert not r.next_day_present and not cached.next_day_present
+
+
+@pytest.mark.parametrize("n", [-1, 1441])
+def test_include_next_minutes_out_of_range_raises(store, cfg, n):
+    with pytest.raises(ValueError, match="include_next_minutes"):
+        load_day_windows(store, SYM, D, cfg, include_next_minutes=n)
+
+
+def _no_trade_reads(monkeypatch, s):
+    def boom(*a, **k):
+        raise AssertionError("must fail before reading trades")
+
+    monkeypatch.setattr(s, "read_trades", boom)
+
+
+def test_scenario_outside_kept_range_raises_before_io(store, cfg, monkeypatch):
+    from dataclasses import replace
+
+    _no_trade_reads(monkeypatch, store)
+    late = replace(burst(), t_start_us=D_US + DAY_US)  # starts at the end of the kept range
+    with pytest.raises(ValueError, match="does not overlap"):
+        load_day_windows(store, SYM, D, cfg, scenario=late)
+    early = replace(burst(), t_start_us=D_US - 3 * H)  # ends 3 h - 60 s before the day
+    with pytest.raises(ValueError, match="does not overlap"):
+        load_day_windows(store, SYM, D, cfg, scenario=early)
+
+
+def test_unknown_quote_unit_fails_before_reading_trades(tmp_path, cfg, monkeypatch):
+    with make_store(tmp_path, make_trades(D - timedelta(days=1), 2, symbol="TESTXYZ")) as s:
+        _no_trade_reads(monkeypatch, s)
+        with pytest.raises(KeyError, match="quote_unit"):
+            load_day_windows(s, "TESTXYZ", D, cfg)
+
+
+def test_day_result_compares_by_identity(store, cfg):
+    r = load_day_windows(store, SYM, D + timedelta(days=5), cfg)  # a cheap skipped result
+    twin = DayResult(r.symbol, r.day, r.windows, r.labels, r.skipped, r.next_day_present)
+    assert r == r and r != twin  # no frame comparison (which would raise)
+    assert len({r, twin}) == 2  # hashable
+
+
+def test_cache_tmp_file_uses_uuid(store, cfg, monkeypatch):
+    seen = []
+    real = os.replace
+
+    def spy(src, dst):
+        seen.append(Path(src).name)
+        return real(src, dst)
+
+    monkeypatch.setattr(batch.os, "replace", spy)
+    load_day_windows(store, SYM, D, cfg)
+    (name,) = [n for n in seen if n.startswith(f"{D.isoformat()}-")]
+    stem, uid, ext = name.rsplit(".", 2)
+    assert stem.endswith("parquet") and ext == "tmp"
+    assert len(uid) == 32 and int(uid, 16) >= 0
+
+
+def test_cache_path_depends_on_feature_config(cfg):
+    shas = ("a" * 12, "b" * 12)
+    base = batch._cache_path(cfg, SYM, D, 0, shas)
+    unit = load_settings(
+        overrides={
+            "paths": {"data_dir": str(cfg.paths.data_dir)},
+            "features": {"quote_unit": {"BTC": 1e-3, "USDT": 1.0}},
+        }
+    )
+    wins = load_settings(
+        overrides={
+            "paths": {"data_dir": str(cfg.paths.data_dir)},
+            "features": {"windows_s": [10, 300, 1800]},
+        }
+    )
+    paths = {
+        base,
+        batch._cache_path(unit, SYM, D, 0, shas),
+        batch._cache_path(wins, SYM, D, 0, shas),
+    }
+    assert len(paths) == 3
+
+
+def test_partition_rewrite_changes_cache_path(store, cfg):
+    first = load_day_windows(store, SYM, D, cfg)
+    (old,) = cache_files(cfg)
+    store.write_trades(make_trades(D, 1, seed=11))  # different bytes for day D
+    second = load_day_windows(store, SYM, D, cfg)
+    new = [p for p in cache_files(cfg) if p != old]
+    assert len(new) == 1 and new[0].name != old.name
+    assert not second.windows.equals(first.windows)
