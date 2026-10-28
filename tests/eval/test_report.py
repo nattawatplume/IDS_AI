@@ -247,3 +247,61 @@ def test_semisyn_records_without_day_are_labelled_legacy(research, tmp_path):
     assert cell["ci_unit"] == UNIT_LEGACY == "event (legacy, optimistic)"
     (row,) = [ln for ln in md.read_text(encoding="utf-8").splitlines() if ln.startswith("| pump")]
     assert "| event (legacy, optimistic) |" in row
+
+
+def test_paired_block_uses_only_the_latest_config_hash(research, tmp_path):
+    ae = [1] * 15 + [0] * 5
+    kk = [1] * 5 + [0] * 15
+    t = 1_000
+    records = []
+    for seed in (0, 1):  # an older config where kk looked better and pca existed
+        for variant, det in (
+            ("ai.autoencoder_trade", kk),
+            ("baseline.kk", ae),
+            ("baseline.pca", ae),
+        ):
+            t += 1
+            records.append(
+                rec(
+                    "baselines",
+                    variant,
+                    2,
+                    seed,
+                    det,
+                    config_hash="old",
+                    created_us=t,
+                    run_id=f"baselines|{variant}|b2|s{seed}|old",
+                )
+            )
+    for seed in (0, 1):
+        for variant, det in (("ai.autoencoder_trade", ae), ("baseline.kk", kk)):
+            t += 1
+            records.append(rec("baselines", variant, 2, seed, det, created_us=t))
+    write(research, records)
+    cfg = load_settings(overrides={"eval": {"n_boot": 300}})
+    data = build_report(research, tmp_path / "r.md", tmp_path / "r.json", cfg=cfg)
+    paired = data["paired_bootstrap"]
+    rows = {r["baseline"]: r for r in paired["rows"]}
+    assert set(rows) == {"baseline.kk"}  # pca only exists under the old config
+    assert rows["baseline.kk"]["diff_mean"] == pytest.approx(0.5)
+    assert rows["baseline.kk"]["n_seeds"] == 2
+    ignored = "ไม่นับ 6 run ของ config_hash เก่า (ใช้เฉพาะ config_hash ล่าสุด cfg)"
+    assert ignored in paired["notes"]
+    assert any("baseline.pca" in n for n in paired["notes"])
+    text = (tmp_path / "r.md").read_text(encoding="utf-8")
+    assert f"- {ignored}" in text.splitlines()
+
+
+def test_paired_block_without_older_configs_has_no_config_note(research, tmp_path):
+    write(research, [rec("baselines", "ai.autoencoder_trade", 2, 0, [1, 0])])
+    data = build_report(research, tmp_path / "r.md", tmp_path / "r.json", cfg=load_settings())
+    assert not any("config_hash" in n for n in data["paired_bootstrap"]["notes"])
+
+
+def test_error_text_keeps_the_whole_thai_sentence():
+    from idsai.eval.report import _error_th
+
+    th = "ชุดข้อมูลสอบเทียบเล็กเกินไป (6/(n_cal+1) = 0.000231, n_cal = 25920) — ต้องเพิ่มข้อมูล."
+    assert _error_th(th + " Calibration set too small; calibrate on more rows.") == th
+    assert _error_th("x" * 400).endswith("…") and len(_error_th("x" * 400)) == 300
+    assert _error_th("only english error") == "only english error"

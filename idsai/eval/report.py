@@ -13,10 +13,19 @@ shown recall and its CI come from the same estimator. REAL events are their own 
 the same test-normal days, so they are clustered by `(symbol, day)` (`symbol-day`); treating
 `(seed, event)` pairs as independent would make the CI too narrow. Older SEMI-SYN records
 without a `day` fall back to `event (legacy, optimistic)`.
+
+Retrain decision: `retrain_drift` records at budget 2 on the accept split give the
+champion/challenger verdict (`idsai.ai.learning.compare`, a paired event bootstrap): full stack
+`v1` vs `v2` (what would be deployed), and the AE alone `v1:ai` vs `v2:ai` as a diagnostic.
+The retrain and AE-vs-baselines blocks each use only the records of the most recent
+`config_hash` feeding them, with a note counting the older-config records ignored.
+Its `series` block (recall_any per version, same ratio estimator as the tables) feeds the
+dashboard's before/after chart.
 """
 
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -24,6 +33,7 @@ from typing import Any
 import duckdb
 import numpy as np
 
+from idsai.ai.learning import compare
 from idsai.config import Settings, load_settings
 from idsai.data.store import Store
 from idsai.eval.experiments import AE, BASELINES, EXPERIMENTS
@@ -51,6 +61,10 @@ AGNOSTIC_NOTE = "technique-agnostic: recall_correct n/a"
 UNIT_EVENT, UNIT_SYMBOL_DAY = "event", "symbol-day"
 UNIT_LEGACY = "event (legacy, optimistic)"
 DROP_REASONS = ("out_of_period", "cal_period", "missing_day", "no_baseline")
+MIXED_CONFIG_NOTE = (
+    "ตาราง runs รวมผลจากหลาย config_hash แต่การตัดสิน champion/challenger ใช้เฉพาะ "
+    "config_hash ล่าสุด ค่าในตาราง retrain_drift จึงอาจไม่ตรงกับกราฟและบล็อกการตัดสิน"
+)
 NOTES_TH = [
     "หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value "
     "อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้",
@@ -177,17 +191,37 @@ def _labels_summary(runs: list[dict]) -> list[dict[str, Any]]:
     return [seen[k] for k in sorted(seen)]
 
 
+def _latest_config(recs: list[dict]) -> tuple[list[dict], str | None]:
+    """Keep only the records of the most recent `config_hash` among `recs`.
+
+    `recs` arrive in created order (`Store.list_runs`: `ORDER BY created_us, run_id`), so the
+    last record's config is the most recent. Returns the kept records and a Thai note naming
+    how many older-config records were ignored (None when nothing was ignored).
+    """
+    if not recs:
+        return recs, None
+    latest = recs[-1].get("config_hash")
+    kept = [r for r in recs if r.get("config_hash") == latest]
+    n_old = len(recs) - len(kept)
+    if not n_old:
+        return kept, None
+    return kept, f"ไม่นับ {n_old} run ของ config_hash เก่า (ใช้เฉพาะ config_hash ล่าสุด {latest})"
+
+
 def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
-    """AE vs each baseline on the real_t001 events (baselines experiment, budget 2)."""
+    """AE vs each baseline on the real_t001 events (baselines experiment, budget 2).
+
+    Only records of the most recent `config_hash` feeding this block are used.
+    """
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == "baselines" and float(r["budget"]) == PAIRED_BUDGET]
+    )
     arms: dict[str, dict[int, dict]] = defaultdict(dict)
-    for r in runs:
-        if (
-            r["experiment"] == "baselines"
-            and r.get("metrics") is not None
-            and float(r["budget"]) == PAIRED_BUDGET
-        ):
+    for r in recs:
+        if r.get("metrics") is not None:
             arms[r["variant"]][r["seed"]] = r["per_event"]
-    rows, notes = [], []
+    rows: list[dict[str, Any]] = []
+    notes = [config_note] if config_note else []
     if AE not in arms:
         notes.append("ข้าม: ไม่มีผล baselines ของ ai.autoencoder_trade ที่งบ 2")
     for base in (b for b in BASELINES if b != AE):
@@ -220,6 +254,193 @@ def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
     return {"budget": PAIRED_BUDGET, "metric": "recall_any", "rows": rows, "notes": notes}
 
 
+RETRAIN = "retrain_drift"
+RETRAIN_PAIRS = {"primary": ("v1", "v2"), "ai_only": ("v1:ai", "v2:ai")}
+AI_ONLY_LABEL = "AE alone (diagnostic)"
+NO_RETRAIN_TH = "ยังไม่มีผล retrain_drift"
+
+
+def _retrain_shell(champion: str, challenger: str, provenance: str | None) -> dict[str, Any]:
+    """A retrain decision block with nothing decided yet (filled by `_retrain_block`)."""
+    return {
+        "champion": champion,
+        "challenger": challenger,
+        "budget": PAIRED_BUDGET,
+        "metric": "recall_any",
+        "split": "accept",
+        "n_seeds": 0,
+        "seeds": [],
+        "n_events": 0,
+        "series": None,
+        "diff_mean": None,
+        "ci": None,
+        "accept": None,
+        "reason_th": "",
+        "provenance": provenance,
+        "config_hash": None,
+        "notes": [],
+    }
+
+
+def _retrain_block(
+    runs: list[dict], champion: str, challenger: str, n_boot: int, min_effect: float
+) -> dict[str, Any] | None:
+    """Champion vs challenger on the accept split (recall_any, budget 2); None without records.
+
+    Arrays `(n_seeds, n_events)` of per-event `detected_any` over the seeds where both arms have
+    an OK record (`metrics` not null) and the events every such record shares. The decision is
+    `compare` (paired event bootstrap); the series uses the cluster ratio estimator of the
+    report tables (unit = event) on the same records and events. Only records of the most
+    recent `config_hash` feeding this block are used, while the tables pool every config_hash,
+    so the series equals the table cell only when no seed or event is dropped and the runs
+    share one config_hash (the report says so when they do not: `MIXED_CONFIG_NOTE`).
+    """
+    recs, config_note = _latest_config(
+        [
+            r
+            for r in runs
+            if r["experiment"] == RETRAIN
+            and r["variant"] in (champion, challenger)
+            and float(r["budget"]) == PAIRED_BUDGET
+        ]
+    )
+    if not recs:
+        return None
+    block = _retrain_shell(champion, challenger, "/".join(sorted({r["provenance"] for r in recs})))
+    block["config_hash"] = recs[-1].get("config_hash")
+    notes = block["notes"]
+    if config_note:
+        notes.append(config_note)
+    arms: dict[str, dict[int, dict]] = {champion: {}, challenger: {}}
+    for r in recs:
+        if r.get("metrics") is not None:
+            arms[r["variant"]][r["seed"]] = r
+    n_null = sum(r.get("metrics") is None for r in recs)
+    seeds = sorted(set(arms[champion]) & set(arms[challenger]))
+    dropped = sorted((set(arms[champion]) | set(arms[challenger])) - set(seeds))
+    if n_null:
+        notes.append(f"ไม่นับ {n_null} run ที่ metrics เป็น null (เช่น CalibrationError)")
+    if dropped:
+        notes.append(
+            f"ตัด seed {', '.join(map(str, dropped))}: ไม่มีผลครบทั้ง {champion} และ {challenger}"
+        )
+    if not seeds:
+        block["reason_th"] = f"ยังตัดสินไม่ได้: ไม่มี seed ที่มีผล {champion} และ {challenger} ครบทั้งสองฝั่ง"
+        return block
+    ok = [arms[k][s] for k in (champion, challenger) for s in seeds]
+    events = sorted(set.intersection(*[set(r["per_event"]) for r in ok]))
+    n_union = len(set().union(*[set(r["per_event"]) for r in ok]))
+    if n_union > len(events):
+        notes.append(f"ใช้เฉพาะ {len(events)} จาก {n_union} เหตุการณ์ที่ทุก run มีร่วมกัน")
+
+    def mat(k: str) -> np.ndarray:
+        return np.array(
+            [[arms[k][s]["per_event"][e]["detected_any"] for e in events] for s in seeds],
+            dtype=bool,
+        ).reshape(len(seeds), len(events))
+
+    d = compare(mat(champion), mat(challenger), n_boot, CI_SEED, min_effect)
+    series = {}
+    for k in (champion, challenger):
+        aligned = [{"per_event": {e: arms[k][s]["per_event"][e] for e in events}} for s in seeds]
+        hits, n = cluster_counts(aligned, "detected_any", UNIT_EVENT)
+        mean, (lo, hi) = ratio_bootstrap_ci(hits, n, n_boot, CI_SEED)
+        finite = math.isfinite(mean)
+        series[k] = {"mean": mean if finite else None, "ci": [lo, hi] if finite else None}
+    block.update(
+        seeds=seeds,
+        n_seeds=len(seeds),
+        n_events=len(events),
+        series=series,
+        diff_mean=d.diff_mean,
+        ci=list(d.ci),
+        accept=d.accept,
+        reason_th=d.reason_th,
+    )
+    return block
+
+
+def _retrain_decision(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """Primary decision (full stack v1 vs v2) plus the AE-only diagnostic under `ai_only`.
+
+    None without any retrain_drift record; a missing pair is None (`ai_only`) or an undecided
+    block with a Thai reason (primary, so the JSON shape stays stable).
+    """
+    if not any(r["experiment"] == RETRAIN for r in runs):
+        return None
+    pairs = RETRAIN_PAIRS
+    primary = _retrain_block(runs, *pairs["primary"], n_boot, min_effect)
+    ai_only = _retrain_block(runs, *pairs["ai_only"], n_boot, min_effect)
+    if primary is None:
+        primary = _retrain_shell(*pairs["primary"], None)
+        primary["reason_th"] = f"{NO_RETRAIN_TH} ของ full stack ที่งบ {PAIRED_BUDGET:g}"
+    elif ai_only is not None and ai_only["config_hash"] != primary["config_hash"]:
+        note = (
+            f"config_hash ไม่ตรงกัน: full stack ใช้ {primary['config_hash']} แต่ "
+            f"{AI_ONLY_LABEL} ใช้ {ai_only['config_hash']} จึงเทียบสองบล็อกนี้กันตรง ๆ ไม่ได้"
+        )
+        primary["notes"].append(note)
+        ai_only["notes"].append(note)
+    return {**primary, "ai_only": ai_only}
+
+
+def _retrain_row_md(label: str, b: dict[str, Any]) -> str:
+    series = b["series"] or {}
+
+    def recall(k: str) -> str:
+        s = series.get(k)
+        return _fmt_ci(s["mean"], s["ci"]) if s else "–"
+
+    ci = f"[{_fmt(b['ci'][0])}, {_fmt(b['ci'][1])}]" if b["ci"] else "–"
+    verdict = {True: "ยอมรับ", False: "ไม่ยอมรับ", None: "ยังตัดสินไม่ได้"}[b["accept"]]
+    return (
+        f"| {label} | {b['champion']} → {b['challenger']} | {b['provenance'] or '–'} | "
+        f"{b['n_seeds']} | {b['n_events']} | {recall(b['champion'])} | "
+        f"{recall(b['challenger'])} | {_fmt(b['diff_mean'])} | {ci} | {verdict} |"
+    )
+
+
+def _retrain_md(rd: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = [
+        "",
+        f"## retrain_drift: champion v1 vs challenger v2 (paired bootstrap, budget "
+        f"{PAIRED_BUDGET:g}, accept split)",
+        "",
+    ]
+    if rd is None:
+        return [*lines, NO_RETRAIN_TH]
+    lines += [
+        "| comparison | champion → challenger | provenance | seeds | events | "
+        "recall_any champion [95% CI] | recall_any challenger [95% CI] | "
+        "diff (challenger − champion) | 95% CI | ผล |",
+        "|" + "---|" * 10,
+    ]
+    blocks = [("full stack (deployed)", rd)]
+    if rd["ai_only"] is not None:
+        blocks.append((AI_ONLY_LABEL, rd["ai_only"]))
+    lines += [_retrain_row_md(label, b) for label, b in blocks]
+    lines.append("")
+    for label, b in blocks:
+        lines.append(f"- {label}: {b['reason_th']}")
+        lines += [f"  - {n}" for n in b["notes"]]
+    if rd["ai_only"] is None:
+        lines.append(f"- {AI_ONLY_LABEL}: {NO_RETRAIN_TH}")
+    lines += [
+        "",
+        f"challenger แทน champion เมื่อ CI ล่างของผลต่าง > 0 และผลต่าง ≥ {min_effect:g} "
+        "(bootstrap แบบจับคู่ข้ามเหตุการณ์ ใช้ดัชนีสุ่มซ้ำเดียวกันทั้งสองฝั่ง)",
+    ]
+    return lines
+
+
+def _error_th(error: str, limit: int = 300) -> str:
+    """The Thai sentence of a bilingual error (before its English part), whole when it fits;
+    a cut is marked with "…" (the JSON keeps the full text)."""
+    text = error.splitlines()[0] if error else ""
+    thai = re.split(r"(?<=\.) (?=[A-Z])", text, maxsplit=1)[0]
+    return thai if len(thai) <= limit else thai[: limit - 1] + "…"
+
+
 def _fmt(x: float | None, nd: int = 3) -> str:
     return "–" if x is None else f"{x:.{nd}f}"
 
@@ -239,7 +460,7 @@ def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
         flags.append(c["note"])
     if not c["classifies"]:
         flags.append(AGNOSTIC_NOTE)
-    flags += [f"error: {e.splitlines()[0][:160]}" for e in c["errors"]]
+    flags += [f"error: {_error_th(e)}" for e in c["errors"]]
     m, ci = c["mean"], c["ci"] or {}
     if m is None:
         cells = ["–"] * 8
@@ -309,6 +530,7 @@ def build_report(
             for v, by_b in sorted(grouped[exp].items())
         }
     paired = _paired(runs, n_boot, cfg.eval.min_effect)
+    retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
     data = {
         "header": header,
         "runs": len(runs),
@@ -317,9 +539,12 @@ def build_report(
         "config_hash": _uniq(runs, "config_hash"),
         "experiments": experiments,
         "paired_bootstrap": paired,
+        "retrain_decision": retrain,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
     }
+    if len(data["config_hash"]) > 1:
+        data["notes"] = [MIXED_CONFIG_NOTE, *NOTES_TH]
 
     lines = [
         "# รายงานผลการประเมิน Market IDS (เพื่อการศึกษา)",
@@ -342,6 +567,7 @@ def build_report(
         "",
         "ทุกตัวเลขมาจากตาราง runs ทั้งหมด; ค่าเฉลี่ยข้าม seed และช่วงความเชื่อมั่น 95 % "
         "จากการ bootstrap (หน่วยตามคอลัมน์ bootstrap unit)",
+        *(["", f"**คำเตือน:** {MIXED_CONFIG_NOTE}"] if len(data["config_hash"]) > 1 else []),
     ]
     cols = (
         "| variant | budget | provenance | seeds | events | recall_any [95% CI] | "
@@ -369,9 +595,9 @@ def build_report(
         )
     if paired["notes"]:
         lines += ["", *[f"- {n}" for n in paired["notes"]]]
+    lines += ["", f"เกณฑ์: CI ล่าง > 0 และผลต่าง ≥ {cfg.eval.min_effect:g}"]
+    lines += _retrain_md(retrain, cfg.eval.min_effect)
     lines += [
-        "",
-        f"เกณฑ์: CI ล่าง > 0 และผลต่าง ≥ {cfg.eval.min_effect:g}",
         "",
         "## หมายเหตุ",
         "",
