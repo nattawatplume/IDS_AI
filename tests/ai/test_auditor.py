@@ -84,7 +84,7 @@ def test_alert_rate_zero_alerts_and_default_budget(aud):
     assert c.value["expected"] == pytest.approx(2.0 * 10)  # cfg.chief.budget_per_symbol_day
 
 
-@pytest.mark.parametrize("symbol_days", [0, -1, 0.0])
+@pytest.mark.parametrize("symbol_days", [0, 0.0])  # negative => unreadable (see below)
 def test_alert_rate_without_symbol_days_is_ok_with_note(aud, symbol_days):
     c = aud.alert_rate(50, symbol_days, 2.0)
     assert c.status == "ok" and "ข้อมูลไม่พอ" in c.detail_th
@@ -507,3 +507,11 @@ def test_trade_gaps_float_nan_ids_are_warn(aud):
     c = aud.trade_gaps(df)
     assert c.status == "warn" and c.detail_th.startswith("อ่านค่าไม่ได้")
     assert _json(c)["value"]["n_unreadable"] == 1
+
+
+def test_negative_exposure_is_warn_not_no_data(aud):
+    _assert_unreadable(aud.alert_rate(5, -3, 2.0), "symbol_days")
+    _assert_unreadable(aud.calibration_resolution(999, 5, -5.0), "rows_per_symbol_day")
+    assert aud.alert_rate(5, 0, 2.0).status == "ok"  # zero = no data yet, not unreadable
+    c = aud.latency([-INF, NAN])
+    assert c.status == "warn" and "-inf" in c.detail_th

@@ -147,7 +147,7 @@ class Auditor:
             "budget_per_symbol_day": budget,
         }
         if bad := _unreadable_inputs(
-            inputs, counts=("n_alerts",), nonneg=("budget_per_symbol_day",)
+            inputs, counts=("n_alerts",), nonneg=("budget_per_symbol_day", "symbol_days")
         ):
             return _unreadable("alert_rate", inputs, bad)
         budget = float(budget)
@@ -236,7 +236,7 @@ class Auditor:
             "rows_per_symbol_day": rows_per_symbol_day,
             "budget": b,
         }
-        if bad := _unreadable_inputs(inputs, nonneg=("budget",)):
+        if bad := _unreadable_inputs(inputs, nonneg=("budget", "rows_per_symbol_day")):
             return _unreadable("calibration_resolution", inputs, bad)
         if n_cal < 0 or n_detectors < 1:
             raise ValueError(f"need n_cal >= 0 and n_detectors >= 1, got {n_cal}, {n_detectors}")
@@ -278,7 +278,9 @@ class Auditor:
         if not x.size:
             value = {"n": 0, "n_inf": 0, "p50_ms": None, "p99_ms": None}
             if raw.size:
-                detail = f"อ่านค่าไม่ได้: ตัวอย่างเวลาแฝง (latency) {raw.size} ค่าเป็น NaN ทั้งหมด"
+                detail = (
+                    f"อ่านค่าไม่ได้: ตัวอย่างเวลาแฝง (latency) {raw.size} ค่าอ่านไม่ได้ทั้งหมด (NaN หรือ -inf)"
+                )
                 return Check(name="latency", status="warn", value=value, detail_th=detail)
             detail = f"{NO_DATA_TH}: ยังไม่มีตัวอย่างเวลาแฝง (latency)"
             return Check(name="latency", status="ok", value=value, detail_th=detail)
