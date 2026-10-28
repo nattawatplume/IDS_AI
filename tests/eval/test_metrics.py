@@ -10,6 +10,7 @@ from idsai.eval.metrics import (
     bootstrap_ci,
     match_events,
     paired_bootstrap,
+    ratio_bootstrap_ci,
     significant,
     summarize,
     window_positive,
@@ -213,3 +214,19 @@ def test_bootstrap_ci_mean_over_seeds_and_determinism():
     assert bootstrap_ci(np.ones(10), 100, 0) == (1.0, (1.0, 1.0))
     m, (lo, hi) = bootstrap_ci(np.array([]), 100, 0)
     assert math.isnan(m) and math.isnan(lo) and math.isnan(hi)
+
+
+def test_ratio_bootstrap_ci():
+    hits, n = np.array([3.0, 0.0, 1.0]), np.array([3.0, 5.0, 2.0])
+    mean, (lo, hi) = ratio_bootstrap_ci(hits, n, 500, 0)
+    assert mean == pytest.approx(0.4) and lo <= mean <= hi
+    assert ratio_bootstrap_ci(hits, n, 500, 0) == (mean, (lo, hi))
+    # equal cluster sizes: identical to the event bootstrap of cluster means
+    per = np.array([[1, 0, 1, 1], [1, 0, 0, 1]], dtype=float)
+    r = ratio_bootstrap_ci(per.sum(axis=0), np.full(4, 2.0), 200, 3)
+    b = bootstrap_ci(per, 200, 3)
+    assert r[0] == pytest.approx(b[0]) and r[1] == pytest.approx(b[1])
+    m, (a, z) = ratio_bootstrap_ci(np.array([]), np.array([]), 10, 0)
+    assert math.isnan(m) and math.isnan(a) and math.isnan(z)
+    with pytest.raises(ValueError):
+        ratio_bootstrap_ci(np.zeros(2), np.ones(3), 10, 0)

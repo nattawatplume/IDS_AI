@@ -174,6 +174,26 @@ def bootstrap_ci(
     return float(m.mean()), _ci(m[idx].mean(axis=1))
 
 
+def ratio_bootstrap_ci(
+    hits: np.ndarray, n: np.ndarray, n_boot: int, seed: int
+) -> tuple[float, tuple[float, float]]:
+    """`(sum(hits) / sum(n), 95 % CI)` resampling clusters with replacement.
+
+    `hits[i]`, `n[i]`: detections and values in cluster `i`. Each resample recomputes the ratio,
+    so the point estimate and the CI come from one estimator even with unequal cluster sizes.
+    No clusters gives NaNs.
+    """
+    hits = np.asarray(hits, dtype=np.float64)
+    n = np.asarray(n, dtype=np.float64)
+    if hits.shape != n.shape or hits.ndim != 1:
+        raise ValueError(f"hits and n must be equal-length 1-D arrays: {hits.shape} {n.shape}")
+    if n.size == 0 or n.sum() <= 0:
+        return NAN, (NAN, NAN)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n.size, size=(n_boot, n.size))
+    return float(hits.sum() / n.sum()), _ci(hits[idx].sum(axis=1) / n[idx].sum(axis=1))
+
+
 def paired_bootstrap(
     a: np.ndarray, b: np.ndarray, n_boot: int, seed: int
 ) -> tuple[float, tuple[float, float]]:

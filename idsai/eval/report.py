@@ -1,15 +1,18 @@
 """Evaluation report built only from the `runs` table (every run is counted, none hand-picked).
 
 `build_report` groups run records by experiment x variant x budget and writes a Markdown report
-plus the same content as JSON (read by `serve`). Per cell: the mean over seeds of each metric,
-a 95 % bootstrap CI of recall, the provenance, the seed count and a "tau saturated" flag. Recall
-and false alerts per symbol-day are the headline; precision is always printed with prevalence.
+plus the same content as JSON (read by `serve`). Per cell: the mean over seeds of each metric
+(recall: the cluster ratio estimator below), a 95 % bootstrap CI of recall, the provenance,
+the seed count and a "tau saturated" flag. Recall and false alerts per symbol-day are the
+headline; precision is always printed with prevalence.
 
-Bootstrap unit: detections are first averaged over seeds within a cluster, then clusters are
-resampled. REAL events are their own clusters (`event`, keyed by label_id). SEMI-SYN scenarios of
-every seed and family are injected into the same test-normal days, so they are clustered by
-`(symbol, day)` (`symbol-day`); treating `(seed, event)` pairs as independent would make the CI
-too narrow.
+Bootstrap unit: recall is a cluster ratio estimator, `sum(hits) / sum(n)` over every
+`(seed, event)` value, and each bootstrap resample of clusters recomputes that ratio, so the
+shown recall and its CI come from the same estimator. REAL events are their own clusters
+(`event`, keyed by label_id). SEMI-SYN scenarios of every seed and family are injected into
+the same test-normal days, so they are clustered by `(symbol, day)` (`symbol-day`); treating
+`(seed, event)` pairs as independent would make the CI too narrow. Older SEMI-SYN records
+without a `day` fall back to `event (legacy, optimistic)`.
 """
 
 import json
@@ -24,7 +27,7 @@ import numpy as np
 from idsai.config import Settings, load_settings
 from idsai.data.store import Store
 from idsai.eval.experiments import AE, BASELINES, EXPERIMENTS
-from idsai.eval.metrics import bootstrap_ci, paired_bootstrap, significant
+from idsai.eval.metrics import paired_bootstrap, ratio_bootstrap_ci, significant
 
 CI_SEED = 0
 PAIRED_BUDGET = 2.0
@@ -46,6 +49,7 @@ DETERMINISTIC_NOTE = "deterministic: CI from event bootstrap"
 SATURATED_MARK = "τ saturated"
 AGNOSTIC_NOTE = "technique-agnostic: recall_correct n/a"
 UNIT_EVENT, UNIT_SYMBOL_DAY = "event", "symbol-day"
+UNIT_LEGACY = "event (legacy, optimistic)"
 DROP_REASONS = ("out_of_period", "cal_period", "missing_day", "no_baseline")
 NOTES_TH = [
     "หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value "
@@ -61,7 +65,10 @@ NOTES_TH = [
     f"{AGNOSTIC_NOTE}: ชุดตัวตรวจจับที่ไม่มี rule หรือ stat.cusum ระบุเทคนิคไม่ได้ (ได้ MM-T000 "
     "เสมอ) จึงไม่แสดง recall_correct",
     "bootstrap unit: event = สุ่มซ้ำทีละเหตุการณ์จริง; symbol-day = สุ่มซ้ำทีละวันของสัญลักษณ์ "
-    "เพราะเหตุการณ์ SEMI-SYN ทุก seed และทุก family ถูกฉีดลงในวันเดียวกัน",
+    "เพราะเหตุการณ์ SEMI-SYN ทุก seed และทุก family ถูกฉีดลงในวันเดียวกัน; "
+    f"{UNIT_LEGACY} = ผล SEMI-SYN รุ่นเก่าที่ไม่มีวันกำกับ ช่วงความเชื่อมั่นจึงแคบเกินจริง",
+    "recall และช่วงความเชื่อมั่นใช้ตัวประมาณแบบอัตราส่วนเดียวกัน: รวมจำนวนที่ตรวจพบ / จำนวนทั้งหมด "
+    "ของทุก (seed, เหตุการณ์) และสุ่มซ้ำทีละกลุ่ม (cluster)",
 ]
 
 
@@ -75,22 +82,32 @@ def _finite_mean(values: list[Any]) -> float | None:
 
 
 def _bootstrap_unit(records: list[dict]) -> str:
-    return UNIT_SYMBOL_DAY if any(r["provenance"] == "SEMI-SYN" for r in records) else UNIT_EVENT
+    if not any(r["provenance"] == "SEMI-SYN" for r in records):
+        return UNIT_EVENT
+    if all("day" in pe for r in records for pe in r["per_event"].values()):
+        return UNIT_SYMBOL_DAY
+    # older SEMI-SYN records without `day`: events can only be resampled one by one
+    return UNIT_LEGACY
 
 
-def cluster_values(records: list[dict], key: str, unit: str) -> np.ndarray:
-    """Per-cluster mean of `per_event[...][key]` over every record (seed) of a cell.
+def cluster_counts(records: list[dict], key: str, unit: str) -> tuple[np.ndarray, np.ndarray]:
+    """`(hits, n)` per cluster, summed over every `(seed, event)` value of a cell.
 
-    `unit == "event"` clusters by label_id; `"symbol-day"` by `(symbol, day)` of the event.
+    `unit == "symbol-day"` clusters by `(symbol, day)` of the event; otherwise by label_id.
     Clusters are returned in sorted key order.
     """
-    acc: dict[tuple, list[float]] = defaultdict(list)
+    hits: dict[tuple, float] = defaultdict(float)
+    n: dict[tuple, int] = defaultdict(int)
     for r in records:
         for lid, pe in r["per_event"].items():
-            clustered = unit == UNIT_SYMBOL_DAY and "day" in pe
-            k = (pe["symbol"], pe["day"]) if clustered else (lid,)
-            acc[k].append(float(pe[key]))
-    return np.array([np.mean(acc[k]) for k in sorted(acc)], dtype=np.float64)
+            k = (pe["symbol"], pe["day"]) if unit == UNIT_SYMBOL_DAY else (lid,)
+            hits[k] += float(pe[key])
+            n[k] += 1
+    keys = sorted(n)
+    return (
+        np.array([hits[k] for k in keys], dtype=np.float64),
+        np.array([n[k] for k in keys], dtype=np.float64),
+    )
 
 
 def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
@@ -115,8 +132,10 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
         out["mean"] = {m: _finite_mean([r["metrics"].get(m) for r in ok]) for m in MEAN_METRICS}
         ci = {}
         for metric, key in CI_METRICS.items():
-            values = cluster_values(ok, key, out["ci_unit"])
-            _, (lo, hi) = bootstrap_ci(values, n_boot, CI_SEED)
+            # point estimate and CI from the same cluster ratio estimator
+            hits, n = cluster_counts(ok, key, out["ci_unit"])
+            mean, (lo, hi) = ratio_bootstrap_ci(hits, n, n_boot, CI_SEED)
+            out["mean"][metric] = mean if math.isfinite(mean) else None
             ci[metric] = [lo, hi] if math.isfinite(lo) else None
         out["ci"] = ci
         if not out["classifies"]:  # always MM-T000: recall_correct (and F1) carry no information
@@ -127,22 +146,34 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
 
 
 def _labels_summary(runs: list[dict]) -> list[dict[str, Any]]:
-    """Labels considered / used / dropped by reason, once per distinct split."""
+    """Per distinct split: labels considered / eligible as events / dropped by reason, plus the
+    symbol-days lost at window loading (`n_skipped`, max per set and reason over its runs, so a
+    set loaded by many variants and budgets is counted once)."""
     seen: dict[str, dict[str, Any]] = {}
     for r in runs:
         sd = r.get("split_def") or {}
-        if "n_labels" not in sd or sd.get("sha12") in seen:
+        if "n_labels" not in sd:
             continue
-        by_period = sd.get("labels_dropped") or {}
-        reasons = {k: sum(v.get(k, 0) for v in by_period.values()) for k in DROP_REASONS}
-        n = int(sd["n_labels"])
-        seen[sd["sha12"]] = {
-            "split_sha12": sd["sha12"],
-            "n_labels": n,
-            "used": n - sum(reasons.values()),
-            "dropped": reasons,
-            "dropped_by_period": by_period,
-        }
+        sha = sd.get("sha12")
+        if sha not in seen:
+            by_period = sd.get("labels_dropped") or {}
+            reasons = {k: sum(v.get(k, 0) for v in by_period.values()) for k in DROP_REASONS}
+            n = int(sd["n_labels"])
+            seen[sha] = {
+                "split_sha12": sha,
+                "n_labels": n,
+                "eligible": n - sum(reasons.values()),
+                "dropped": reasons,
+                "dropped_by_period": by_period,
+                "skipped_symbol_days": {},
+            }
+        skipped = seen[sha]["skipped_symbol_days"]
+        for set_name, by_reason in (r.get("n_skipped") or {}).items():
+            for reason, k in by_reason.items():
+                key = f"{set_name}:{reason}"
+                skipped[key] = max(skipped.get(key, 0), int(k))
+    for v in seen.values():
+        v["skipped_symbol_days"] = {k: n for k, n in sorted(v["skipped_symbol_days"].items()) if n}
     return [seen[k] for k in sorted(seen)]
 
 
@@ -301,8 +332,11 @@ def build_report(
         f"config_hash: {', '.join(data['config_hash']) or '–'}",
         "",
         *[
-            f"labels (split {lab['split_sha12']}): used {lab['used']} of {lab['n_labels']}; "
-            "dropped: " + ", ".join(f"{k} {v}" for k, v in lab["dropped"].items())
+            f"labels (split {lab['split_sha12']}): eligible {lab['eligible']} of "
+            f"{lab['n_labels']}; dropped: "
+            + ", ".join(f"{k} {v}" for k, v in lab["dropped"].items())
+            + "; symbol-days skipped at window loading: "
+            + (", ".join(f"{k} {v}" for k, v in lab["skipped_symbol_days"].items()) or "none")
             for lab in data["labels"]
         ],
         "",
