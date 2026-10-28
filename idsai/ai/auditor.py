@@ -78,14 +78,22 @@ def _num(x: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
-def _unreadable_inputs(**inputs: Any) -> list[str]:
-    """Names of the inputs that are not a finite number (NaN, inf, None, bool, non-numeric)."""
+def _unreadable_inputs(
+    inputs: dict[str, Any], *, counts: tuple[str, ...] = (), nonneg: tuple[str, ...] = ()
+) -> list[str]:
+    """Names of the inputs that are not a usable number: NaN, inf, None, bool, str or
+    non-numeric; for `counts` also a negative or non-integral value; for `nonneg` a negative."""
     bad = []
     for k, v in inputs.items():
         try:
-            ok = not isinstance(v, bool) and math.isfinite(float(v))
+            f = float(v) if not isinstance(v, bool | str) else math.nan
         except (TypeError, ValueError):
-            ok = False
+            f = math.nan
+        ok = math.isfinite(f)
+        if ok and k in counts:
+            ok = f >= 0 and f == int(f)
+        elif ok and k in nonneg:
+            ok = f >= 0
         if not ok:
             bad.append(k)
     return bad
@@ -98,7 +106,10 @@ def _unreadable(name: str, inputs: dict[str, Any], bad: list[str]) -> Check:
         for k, v in inputs.items()
     }
     value["unreadable"] = bad
-    detail = f"อ่านค่าไม่ได้: {', '.join(bad)} ไม่ใช่ตัวเลขที่ใช้ได้ (NaN, inf หรือว่าง) จึงประเมิน {name} ไม่ได้"
+    detail = (
+        f"อ่านค่าไม่ได้: {', '.join(bad)} ไม่ใช่ตัวเลขที่ใช้ได้ (NaN, inf, ว่าง, ติดลบ "
+        f"หรือไม่ใช่จำนวนเต็มในช่องที่เป็นจำนวนนับ) จึงประเมิน {name} ไม่ได้"
+    )
     return Check(name=name, status="warn", value=value, detail_th=detail)
 
 
@@ -135,7 +146,9 @@ class Auditor:
             "symbol_days": symbol_days,
             "budget_per_symbol_day": budget,
         }
-        if bad := _unreadable_inputs(**inputs):
+        if bad := _unreadable_inputs(
+            inputs, counts=("n_alerts",), nonneg=("budget_per_symbol_day",)
+        ):
             return _unreadable("alert_rate", inputs, bad)
         budget = float(budget)
         n = int(n_alerts)
@@ -149,6 +162,8 @@ class Auditor:
             )
         mu = budget * float(symbol_days)
         p = float(stats.poisson.sf(n - 1, mu))
+        if not math.isfinite(p):  # never fall through to "ok" on an unreadable p-value
+            return _unreadable("alert_rate", {**inputs, "p": p}, ["p"])
         value = {"n_alerts": n, "expected": _num(mu), "p": _num(p)}
         if p < ALERT_RATE_P:
             detail = (
@@ -165,7 +180,8 @@ class Auditor:
         Callers pass the p-values of one continuous detector on recent normal, scored rows only
         (rule p-values are mostly 1.0 by design and are not uniform). Non-finite values are
         dropped (D3) and counted in `value["n_dropped"]`; fewer than 200 values => ok with a
-        note saying nothing was assessed.
+        note saying nothing was assessed, or warn when dropping unreadable values is what left
+        too few (the input was there but could not be measured).
         """
         raw = np.asarray(pvals, dtype=np.float64).ravel()
         p = raw[np.isfinite(raw)]
@@ -173,10 +189,16 @@ class Auditor:
         if n < CALIBRATION_MIN_N:
             value = {"n": n, "n_dropped": n_dropped, "ks_stat": None, "p": None}
             detail = (
-                f"{NO_DATA_TH}: มี p-value ที่อ่านได้ {n} ค่า (ต้องมีอย่างน้อย {CALIBRATION_MIN_N}, "
+                f"มี p-value ที่อ่านได้ {n} ค่า (ต้องมีอย่างน้อย {CALIBRATION_MIN_N}, "
                 f"ตัดค่าที่อ่านไม่ได้ {n_dropped} ค่า) ยังไม่ประเมินการสอบเทียบ"
             )
-            return Check(name="calibration", status="ok", value=value, detail_th=detail)
+            if n_dropped:
+                return Check(
+                    name="calibration", status="warn", value=value, detail_th=f"อ่านค่าไม่ได้: {detail}"
+                )
+            return Check(
+                name="calibration", status="ok", value=value, detail_th=f"{NO_DATA_TH}: {detail}"
+            )
         res = stats.kstest(p, "uniform")
         value = {
             "n": n,
@@ -214,7 +236,7 @@ class Auditor:
             "rows_per_symbol_day": rows_per_symbol_day,
             "budget": b,
         }
-        if bad := _unreadable_inputs(**inputs):
+        if bad := _unreadable_inputs(inputs, nonneg=("budget",)):
             return _unreadable("calibration_resolution", inputs, bad)
         if n_cal < 0 or n_detectors < 1:
             raise ValueError(f"need n_cal >= 0 and n_detectors >= 1, got {n_cal}, {n_detectors}")
@@ -248,17 +270,31 @@ class Auditor:
         """End-to-end latency: warn iff p99 > 2000 ms; no samples => ok with a note.
 
         NaN (and -inf) samples are dropped; +inf is the worst latency and counts (p99 = inf =>
-        warn, shown as None in `value`, with the count in `n_inf`).
+        warn, shown as None in `value`, with the count in `n_inf`). Samples given but none
+        readable => warn; any negative sample (clock skew between hosts) => warn.
         """
         raw = np.asarray(samples_ms, dtype=np.float64).ravel()
         x = np.sort(raw[~np.isnan(raw) & (raw != -np.inf)])
         if not x.size:
             value = {"n": 0, "n_inf": 0, "p50_ms": None, "p99_ms": None}
+            if raw.size:
+                detail = f"อ่านค่าไม่ได้: ตัวอย่างเวลาแฝง (latency) {raw.size} ค่าเป็น NaN ทั้งหมด"
+                return Check(name="latency", status="warn", value=value, detail_th=detail)
             detail = f"{NO_DATA_TH}: ยังไม่มีตัวอย่างเวลาแฝง (latency)"
             return Check(name="latency", status="ok", value=value, detail_th=detail)
         p50, p99 = _percentile(x, 50), _percentile(x, 99)
         n_inf = int(np.isinf(x).sum())
-        value = {"n": int(x.size), "n_inf": n_inf, "p50_ms": _num(p50), "p99_ms": _num(p99)}
+        n_neg = int((x < 0).sum())
+        value = {
+            "n": int(x.size),
+            "n_inf": n_inf,
+            "n_negative": n_neg,
+            "p50_ms": _num(p50),
+            "p99_ms": _num(p99),
+        }
+        if n_neg:
+            detail = f"อ่านค่าไม่ได้: มีเวลาแฝงติดลบ {n_neg} ค่า นาฬิกาของเครื่องอาจไม่ตรงกัน จึงเชื่อค่า p99 ไม่ได้"
+            return Check(name="latency", status="warn", value=value, detail_th=detail)
         if p99 > LATENCY_P99_MS:
             detail = f"เวลาแฝง p99 = {p99:.0f} ms เกิน {LATENCY_P99_MS:.0f} ms (p50 = {p50:.0f} ms)"
             if n_inf:
@@ -272,6 +308,8 @@ class Auditor:
         (simulated trades have `trade_id < 0` and are ignored). Any gap => warn; rows with a
         null `trade_id` or `symbol` cannot be checked => warn."""
         cols = trades.select("symbol", "trade_id")
+        if cols.schema["trade_id"].is_float():  # off-schema input: NaN ids are unreadable too
+            cols = cols.with_columns(pl.col("trade_id").fill_nan(None))
         n_null = cols.filter(pl.col("trade_id").is_null() | pl.col("symbol").is_null()).height
         real = cols.filter(pl.col("trade_id") >= 0, pl.col("symbol").is_not_null())
         by_symbol: dict[str, dict[str, int]] = {}
@@ -305,9 +343,10 @@ class Auditor:
 
     def exclusion(self, frac: float) -> Check:
         """Share of training rows excluded around labeled periods: warn iff > 0.02, or when
-        `frac` is not a finite number."""
-        if bad := _unreadable_inputs(frac=frac):
-            return _unreadable("exclusion", {"frac": frac}, bad)
+        `frac` is not a number in [0, 1]."""
+        bad = _unreadable_inputs({"frac": frac}, nonneg=("frac",))
+        if bad or float(frac) > 1:
+            return _unreadable("exclusion", {"frac": frac}, ["frac"])
         f = float(frac)
         value = {"frac": _num(f), "max": EXCLUSION_MAX}
         if f > EXCLUSION_MAX:
@@ -330,7 +369,7 @@ class Auditor:
         differs from `meta["config_hash"]`. A missing, unparsable or future `created_at` (clock
         skew / corrupt meta) => warn, as does a non-finite `now_us` or `max_age_days`."""
         inputs = {"now_us": now_us, "max_age_days": max_age_days}
-        if bad := _unreadable_inputs(**inputs):
+        if bad := _unreadable_inputs(inputs, nonneg=("max_age_days",)):
             return _unreadable("staleness", inputs, bad)
         created_us = _created_us(meta.get("created_at"))
         match = None if config_hash is None else meta.get("config_hash") == config_hash
@@ -366,7 +405,7 @@ class Auditor:
         feats = self.cfg.features
         need = feats.min_baseline_samples if min_samples is None else min_samples
         inputs = {"valid_samples": valid_samples, "min_samples": need}
-        if bad := _unreadable_inputs(**inputs):
+        if bad := _unreadable_inputs(inputs, counts=("valid_samples", "min_samples")):
             return _unreadable("warmup", inputs, bad)
         need, have = int(need), int(valid_samples)
         remaining_s = max(need - have, 0) * feats.baseline_sample_s
@@ -398,8 +437,8 @@ class Auditor:
 def _created_us(created_at: Any) -> int | None:
     if isinstance(created_at, bool):
         return None
-    if isinstance(created_at, int):
-        return created_at
+    if isinstance(created_at, int | np.integer):
+        return int(created_at)
     if isinstance(created_at, str):
         try:
             dt = datetime.fromisoformat(created_at)
@@ -467,7 +506,26 @@ def _dynamic_import_target(node: ast.Call, fname: str, package: list[str]) -> st
         pkg = _str_const(_call_arg(node, 1, "package"))
         base = pkg.split(".") if pkg else package
         return _resolve(level, name[level:] or None, base)
+    if fname == "__import__":  # `__import__("idsai", fromlist=["eval"])` loads idsai.eval
+        fromlist = _call_arg(node, 3, "fromlist")
+        if isinstance(fromlist, ast.List | ast.Tuple):
+            subs = [s for e in fromlist.elts if (s := _str_const(e)) is not None]
+            hit = next((f"{name}.{s}" for s in subs if _forbidden(f"{name}.{s}")), None)
+            if hit is not None:
+                return hit
     return name
+
+
+def _import_func_aliases(tree: ast.Module) -> dict[str, str]:
+    """Local names of the dynamic-import functions -> canonical name, including aliases such as
+    `from importlib import import_module as im`."""
+    names = {f: f for f in _IMPORT_FUNCS}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("importlib", "builtins"):
+            for a in node.names:
+                if a.name in _IMPORT_FUNCS and a.asname:
+                    names[a.asname] = a.name
+    return names
 
 
 def _package_aliases(tree: ast.Module, top: str) -> set[str]:
@@ -492,6 +550,7 @@ def _module_violations(tree: ast.Module, package: list[str]) -> list[tuple[int, 
     found: list[tuple[int, str]] = []
     top, sub = _FORBIDDEN_MODULE.split(".")
     aliases = _package_aliases(tree, top)
+    import_funcs = _import_func_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
@@ -521,10 +580,11 @@ def _module_violations(tree: ast.Module, package: list[str]) -> list[tuple[int, 
             fname = (
                 f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
             )
-            if fname in _IMPORT_FUNCS:
-                target = _dynamic_import_target(node, fname, package)
+            if fname in import_funcs:
+                func = import_funcs[fname]
+                target = _dynamic_import_target(node, func, package)
                 if target is not None and _forbidden(target):
-                    found.append((node.lineno, f"imports {target} via {fname}"))
+                    found.append((node.lineno, f"imports {target} via {func}"))
             elif fname == "getattr" and _str_const(_call_arg(node, 1, "")) == _LABEL_NAME:
                 found.append((node.lineno, f"references {_LABEL_NAME} via getattr"))
     return found
@@ -538,8 +598,10 @@ def leakage_violations(package_root: Path) -> list[str]:
     an import of `idsai.eval` (absolute, `from idsai import eval`, or a relative import resolving
     into it); an `importlib.import_module` / `__import__` call whose constant name (positional or
     `name=`) is `idsai.eval…`, including a relative `import_module(".eval", "idsai")` resolved
-    against its package argument; an `idsai.eval` attribute chain on a name bound by
-    `import idsai…`; any name, attribute, imported alias or `getattr(x, "LABELS")` of `LABELS`.
+    against its package argument, `__import__("idsai", fromlist=["eval"])`, and either function
+    imported under an alias (`from importlib import import_module as im`); an `idsai.eval`
+    attribute chain on a name bound by `import idsai…`; any name, attribute, imported alias or
+    `getattr(x, "LABELS")` of `LABELS`.
     Returns sorted `"relpath:lineno: reason"` strings, `relpath` relative to the parent of
     `package_root`; a file that cannot be decoded as UTF-8 or parsed is a violation too.
 

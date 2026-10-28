@@ -111,6 +111,9 @@ def test_calibration_skewed_is_warn_with_recalibrate(aud):
 def test_calibration_needs_200_finite_values(aud):
     skewed = np.concatenate([np.full(199, 0.001), [np.nan, np.inf, -np.inf]])
     c = aud.calibration(skewed)
+    # too few once the 3 unreadable values are dropped => warn (could not be measured)
+    assert c.status == "warn" and c.value["n"] == 199 and "200" in c.detail_th
+    c = aud.calibration(np.full(199, 0.001))  # too few, all readable => plain "no data" note
     assert c.status == "ok" and c.value["n"] == 199 and "200" in c.detail_th
     assert aud.calibration([]).status == "ok"
     assert aud.calibration(np.full(200, 0.001)).status == "warn"  # one more finite value
@@ -351,9 +354,13 @@ def test_alert_rate_non_finite_input_is_warn(aud, args, bad):
 
 def test_calibration_drops_non_finite_and_counts_them(aud):
     # D3: non-finite p-values are dropped (not a health claim: "ยังไม่ประเมิน")
+    # ... but when dropping them is what left too few, the input could not be measured: warn
     c = aud.calibration([NAN] * 500)
-    assert c.status == "ok" and c.value["n"] == 0 and c.value["n_dropped"] == 500
-    assert "ยังไม่ประเมิน" in c.detail_th and "500" in c.detail_th
+    assert c.status == "warn" and c.value["n"] == 0 and c.value["n_dropped"] == 500
+    assert c.detail_th.startswith("อ่านค่าไม่ได้") and "ยังไม่ประเมิน" in c.detail_th
+    assert "500" in c.detail_th
+    c = aud.calibration([0.5] * 10)  # too few, nothing dropped: a plain "no data" note
+    assert c.status == "ok" and c.detail_th.startswith("ข้อมูลไม่พอ")
     c = aud.calibration(np.concatenate([(np.arange(200) + 0.5) / 200, [NAN, INF]]))
     assert c.value["n"] == 200 and c.value["n_dropped"] == 2
     _json(c)
@@ -386,8 +393,10 @@ def test_latency_inf_counts_and_nan_is_dropped(aud):
     assert c.status == "ok" and c.value["p99_ms"] == pytest.approx(100.0)
     c = aud.latency([100.0] * 10 + [NAN] * 50)
     assert c.status == "ok" and c.value["n"] == 10
-    c = aud.latency([NAN, NAN])
-    assert c.status == "ok" and c.value["n"] == 0
+    c = aud.latency([NAN, NAN])  # samples given, none readable
+    assert c.status == "warn" and c.value["n"] == 0 and c.detail_th.startswith("อ่านค่าไม่ได้")
+    c = aud.latency([])
+    assert c.status == "ok" and c.detail_th.startswith("ข้อมูลไม่พอ")
 
 
 def test_trade_gaps_null_ids_are_warn(aud):
@@ -427,3 +436,74 @@ def test_warmup_non_finite_input_is_warn(aud, valid, minimum, bad):
 def test_report_with_unreadable_input_is_not_ok(aud):
     r = aud.report(ts_us=1, exclusion={"frac": NAN}, latency={"samples_ms": [1.0]})
     assert r.overall == "warn"
+
+
+# ---- out-of-range inputs (finite but impossible) are unreadable too
+
+
+@pytest.mark.parametrize(
+    ("args", "bad"),
+    [
+        ((5, 10, -1.0), "budget_per_symbol_day"),  # mu < 0 => Poisson sf is NaN
+        ((-1, 10, 2.0), "n_alerts"),
+        ((2.9, 10, 2.0), "n_alerts"),  # a count is never fractional (no silent truncation)
+        (("3", 10, 2.0), "n_alerts"),
+        ((True, 10, 2.0), "n_alerts"),
+    ],
+)
+def test_alert_rate_out_of_range_input_is_warn(aud, args, bad):
+    _assert_unreadable(aud.alert_rate(*args), bad)
+
+
+def test_alert_rate_accepts_numpy_and_integral_floats(aud):
+    assert aud.alert_rate(np.int64(10), np.float64(5), 2.0).status == "ok"
+    assert aud.alert_rate(10.0, 5, 2.0).value["n_alerts"] == 10
+
+
+def test_negative_budget_from_config_is_warn():
+    cfg = load_settings()
+    cfg.chief.budget_per_symbol_day = -1.0
+    a = Auditor(cfg)
+    _assert_unreadable(a.alert_rate(5, 10), "budget_per_symbol_day")
+    _assert_unreadable(a.calibration_resolution(999, 5, 100.0), "budget")
+
+
+@pytest.mark.parametrize("frac", [-0.5, -1e-9, 1.5])
+def test_exclusion_out_of_range_is_warn(aud, frac):
+    _assert_unreadable(aud.exclusion(frac), "frac")
+
+
+def test_exclusion_bounds_are_readable(aud):
+    assert aud.exclusion(0.0).status == "ok"
+    assert aud.exclusion(1.0).status == "warn" and "เกิน" in aud.exclusion(1.0).detail_th
+
+
+def test_latency_negative_sample_is_warn(aud):
+    c = aud.latency([100.0] * 99 + [-5000.0])
+    assert c.status == "warn" and c.detail_th.startswith("อ่านค่าไม่ได้")
+    assert _json(c)["value"]["n_negative"] == 1
+
+
+def test_staleness_negative_max_age_is_warn(aud):
+    _assert_unreadable(aud.staleness(_meta(NOW_US), NOW_US, max_age_days=-1), "max_age_days")
+
+
+def test_staleness_reads_numpy_int_created_at(aud):
+    c = aud.staleness(_meta(np.int64(NOW_US - DAY_US)), NOW_US)
+    assert c.status == "ok" and c.value["age_days"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("valid", "minimum", "bad"),
+    [(-1, 360, "valid_samples"), (10.5, 360, "valid_samples"), (10, -360, "min_samples")],
+)
+def test_warmup_out_of_range_input_is_warn(aud, valid, minimum, bad):
+    _assert_unreadable(aud.warmup(valid, minimum), bad)
+
+
+def test_trade_gaps_float_nan_ids_are_warn(aud):
+    df = _trades([("AAABTC", 1), ("AAABTC", 2), ("AAABTC", 3)])
+    df = df.with_columns(pl.Series("trade_id", [1.0, float("nan"), 2.0]))
+    c = aud.trade_gaps(df)
+    assert c.status == "warn" and c.detail_th.startswith("อ่านค่าไม่ได้")
+    assert _json(c)["value"]["n_unreadable"] == 1

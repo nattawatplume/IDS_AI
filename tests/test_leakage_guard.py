@@ -127,6 +127,17 @@ def test_violations_are_sorted_and_name_each_file(tmp_path):
             "imports idsai.eval via import_module",
         ),
         ("m = __import__(name='idsai.eval')\n", 1, "imports idsai.eval via __import__"),
+        (
+            "m = __import__('idsai', globals(), locals(), ['contracts', 'eval'])\n",
+            1,
+            "imports idsai.eval via __import__",
+        ),
+        ("m = __import__('idsai', fromlist=('eval',))\n", 1, "imports idsai.eval via __import__"),
+        (
+            "from importlib import import_module as im\nm = im('idsai.eval')\n",
+            2,
+            "imports idsai.eval via import_module",
+        ),
         ("import idsai.contracts.frames as f\nx = getattr(f, 'LABELS')\n", 2, "via getattr"),
         ("import idsai\n\nx = idsai.eval.metrics.paired_bootstrap\n", 3, "attribute access"),
         ("import idsai.ai.chief\nx = idsai.eval.labels\n", 2, "attribute access"),
@@ -145,6 +156,8 @@ def test_dynamic_and_attribute_access_is_caught(tmp_path, source, lineno, reason
         "x = getattr(obj, 'TRADES')\n",
         "import numpy as np\ny = np.eval\n",  # `.eval` on something that is not the package
         "model.eval()\n",
+        "m = __import__('idsai', fromlist=['contracts'])\n",
+        "from importlib import import_module as im\nm = im('idsai.contracts')\n",
     ],
 )
 def test_new_catches_do_not_flag_clean_code(tmp_path, source):
