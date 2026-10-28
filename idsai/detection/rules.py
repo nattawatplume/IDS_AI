@@ -13,7 +13,7 @@ from typing import Any, Literal
 import numpy as np
 import polars as pl
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from idsai.config import REPO_ROOT
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
@@ -39,7 +39,7 @@ class Signature(BaseModel):
     layer: Literal["rule", "baseline"]
     rev: int = 1
     name: str
-    conditions: list[Condition]
+    conditions: list[Condition] = Field(min_length=1)
 
 
 def load_signatures(path: str | Path | None = None) -> list[Signature]:

@@ -54,7 +54,7 @@ def inject(
     t0 = int(sc.t_start_us)
     dur_us = int(round(sc.duration_s * 1e6))
     t_peak = t0 + dur_us
-    tick = _price_tick(ts, price, t0)
+    tick = price_tick(ts, price, t0)
     med_qty, med_quote = _typical_size(ts, real["qty"].to_numpy(), real["quote_qty"].to_numpy(), t0)
     expected_quote = sc.vol_mult * base_quote_per_s * sc.duration_s
 
@@ -77,7 +77,7 @@ def inject(
 
 
 # ------------------------------------------------------------------ helpers
-def _price_tick(ts: np.ndarray, price: np.ndarray, t0: int) -> float:
+def price_tick(ts: np.ndarray, price: np.ndarray, t0: int) -> float:
     """Smallest positive gap between distinct prices seen in the 24 h before `t0`."""
     lo = np.searchsorted(ts, t0 - DAY_US, side="left")
     hi = np.searchsorted(ts, t0, side="left")

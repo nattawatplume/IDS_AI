@@ -26,6 +26,8 @@ class Evidence(BaseModel):
         if len(v) > MAX_EVIDENCE:
             raise ValueError(f"evidence holds at most {MAX_EVIDENCE} items, got {len(v)}")
         contributions = [c for _, _, c in v]
+        if any(math.isnan(c) for c in contributions):
+            raise ValueError("evidence contributions must not be NaN")
         if any(a < b for a, b in zip(contributions, contributions[1:], strict=False)):
             raise ValueError("evidence must be sorted by contribution, descending")
         return v

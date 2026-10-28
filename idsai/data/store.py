@@ -191,6 +191,10 @@ class Store:
         )
         return conform(out, TRADES)
 
+    def days(self, symbol: str) -> list[date]:
+        """Sorted UTC days that have a trades partition for `symbol`."""
+        return self._days_for(symbol)
+
     def _days_for(self, symbol: str) -> list[date]:
         base = self._trades_dir / f"symbol={_check_symbol(symbol)}"
         if not base.exists():

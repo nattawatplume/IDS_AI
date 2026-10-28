@@ -1,7 +1,9 @@
 """Non-AI-layer baselines (IsolationForest, PCA, random) for the baselines experiment.
 
-Baselines run alone and never take part in fusion. Rows with any NaN feature score NaN; `fit`
-ignores such rows.
+Baselines run alone and never take part in fusion. Rows with any NaN feature score NaN (NaN-only
+masking, as in rules/stats: ±inf is an extreme value, its standardized value is clipped to
+±`Z_CAP` so it scores finite and high). `fit` uses only fully finite rows, since mean/std and
+the sklearn models cannot be fit on inf.
 """
 
 import hashlib
@@ -15,6 +17,7 @@ from sklearn.ensemble import IsolationForest
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
 
 STD_FLOOR = 1e-9
+Z_CAP = 1e6  # bound on |standardized value|; only ever reached by ±inf inputs
 N_ESTIMATORS = 200
 
 
@@ -37,23 +40,28 @@ class _FeatureModel(Detector):
         if self._mu is None:
             raise RuntimeError(f"{self.name} is not fitted; call fit() first")
 
-    def _fit_rows(self, normal: pl.DataFrame) -> np.ndarray:
+    def fit(self, normal: pl.DataFrame) -> None:
         x = feature_matrix(normal, self.requires)
         x = x[np.isfinite(x).all(axis=1)]
         if x.shape[0] < 2:
             raise ValueError(f"{self.name}: fewer than 2 complete normal rows to fit on")
-        self._mu = x.mean(axis=0)
-        self._sd = np.maximum(x.std(axis=0), STD_FLOOR)
-        return x
+        mu = x.mean(axis=0)
+        sd = np.maximum(x.std(axis=0), STD_FLOOR)
+        self._fit_std((x - mu) / sd)
+        # set last: a failed model fit leaves the detector unfitted (score raises RuntimeError)
+        self._mu, self._sd = mu, sd
+
+    def _fit_std(self, z: np.ndarray) -> None:
+        raise NotImplementedError
 
     def _std(self, x: np.ndarray) -> np.ndarray:
-        return (x - self._mu) / self._sd
+        return np.clip((x - self._mu) / self._sd, -Z_CAP, Z_CAP)
 
     def score(self, windows: pl.DataFrame) -> np.ndarray:
         self._need_fit()
         x = feature_matrix(windows, self.requires)
         out = np.full(x.shape[0], np.nan)
-        ok = np.isfinite(x).all(axis=1)
+        ok = ~np.isnan(x).any(axis=1)
         if ok.any():
             out[ok] = self._score_std(self._std(x[ok]))
         return out
@@ -78,10 +86,10 @@ class IsolationForestDetector(_FeatureModel):
         super().__init__(features, seed)
         self._model: IsolationForest | None = None
 
-    def fit(self, normal: pl.DataFrame) -> None:
-        x = self._fit_rows(normal)
-        self._model = IsolationForest(n_estimators=N_ESTIMATORS, random_state=self.seed)
-        self._model.fit(self._std(x))
+    def _fit_std(self, z: np.ndarray) -> None:
+        model = IsolationForest(n_estimators=N_ESTIMATORS, random_state=self.seed)
+        model.fit(z)
+        self._model = model
 
     def _score_std(self, z: np.ndarray) -> np.ndarray:
         return -self._model.score_samples(z)
@@ -112,9 +120,8 @@ class PCADetector(_FeatureModel):
         self._components: np.ndarray | None = None  # (k, d)
         self._center: np.ndarray | None = None
 
-    def fit(self, normal: pl.DataFrame) -> None:
-        x = self._fit_rows(normal)
-        pca = PCA(n_components=self.n_components, svd_solver="full").fit(self._std(x))
+    def _fit_std(self, z: np.ndarray) -> None:
+        pca = PCA(n_components=self.n_components, svd_solver="full").fit(z)
         self._components = pca.components_
         self._center = pca.mean_
 
@@ -157,7 +164,8 @@ class RandomDetector(Detector):
 
     def _u(self, symbol: str, t_end_us: int) -> float:
         h = hashlib.blake2b(f"{symbol}|{t_end_us}|{self.seed}".encode(), digest_size=8)
-        return int.from_bytes(h.digest(), "big") / 2.0**64
+        # top 53 bits / 2**53 is exactly representable and < 1 (n / 2**64 can round up to 1.0)
+        return (int.from_bytes(h.digest(), "big") >> 11) / 2.0**53
 
     def score(self, windows: pl.DataFrame) -> np.ndarray:
         syms = windows["symbol"].to_list()
