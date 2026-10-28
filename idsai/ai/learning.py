@@ -149,6 +149,9 @@ class ModelRegistry:
         return state, meta
 
 
+MIN_EVENTS = 2  # fewer events: the paired bootstrap has no variance to measure
+
+
 @dataclass(frozen=True)
 class Decision:
     """Champion/challenger verdict: `diff_mean` and `ci` are challenger - champion recall."""
@@ -182,8 +185,11 @@ def compare(
     and seeds. Each arm is averaged over seeds per event, then events are resampled with the
     same indices for both arms (`paired_bootstrap`). Accept iff the 95 % CI lower bound of
     `challenger - champion` is > 0 and the mean difference is >= `min_effect` (`significant`).
-    No events gives a reject with diff 0 and CI (0, 0).
+    No events gives a reject with diff 0 and CI (0, 0); a single event is a reject too (its
+    bootstrap has no variance, so the CI would collapse to one point and claim certainty).
     """
+    if int(n_boot) < 1:
+        raise ValueError(f"n_boot must be >= 1, got {n_boot}")
     a = _detections(champion, "champion")
     b = _detections(challenger, "challenger")
     if a.shape != b.shape:
@@ -191,14 +197,24 @@ def compare(
     if a.shape[1] == 0:
         return Decision(False, 0.0, (0.0, 0.0), "ไม่ยอมรับ challenger: ไม่มีเหตุการณ์ให้เปรียบเทียบ")
     diff, ci = paired_bootstrap(b, a, n_boot, seed)
-    accept = significant(diff, ci, min_effect)
     nums = f"{diff:+.3f} (95% CI {ci[0]:.3f} ถึง {ci[1]:.3f})"
+    if a.shape[1] < MIN_EVENTS:
+        reason = (
+            f"ไม่ยอมรับ challenger: มีเหตุการณ์เพียง {a.shape[1]} ครั้ง (ผลต่าง {nums}) "
+            f"ต้องมีอย่างน้อย {MIN_EVENTS} ครั้งจึงประเมินช่วงความเชื่อมั่นได้"
+        )
+        return Decision(False, diff, ci, reason)
+    accept = significant(diff, ci, min_effect)
     if accept:
         reason = f"ยอมรับ challenger: recall ดีขึ้น {nums} ถึงเกณฑ์ขั้นต่ำ {min_effect:g}"
     elif ci[1] < 0:
         reason = f"ไม่ยอมรับ challenger: recall ลดลง {nums} CI ต่ำกว่า 0 ทั้งช่วง"
-    elif ci[0] <= 0:
+    elif ci[0] < 0:
         reason = f"ไม่ยอมรับ challenger: ผลต่าง recall {nums} CI คร่อม 0"
+    elif ci[0] == ci[1] == 0:
+        reason = f"ไม่ยอมรับ challenger: ผลต่าง recall {nums} ทั้งสองฝั่งตรวจพบเหตุการณ์เหมือนกัน"
+    elif ci[0] == 0:
+        reason = f"ไม่ยอมรับ challenger: ผลต่าง recall {nums} CI แตะ 0 (ขอบล่างต้องมากกว่า 0)"
     else:
         reason = f"ไม่ยอมรับ challenger: recall ดีขึ้น {nums} แต่ต่ำกว่าเกณฑ์ขั้นต่ำ {min_effect:g}"
     return Decision(accept, diff, ci, reason)

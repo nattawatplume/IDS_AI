@@ -10,7 +10,7 @@ from idsai.ai.learning import Decision, compare
 from idsai.config import load_settings
 from idsai.data.store import Store
 from idsai.eval.metrics import ratio_bootstrap_ci
-from idsai.eval.report import build_report
+from idsai.eval.report import MIXED_CONFIG_NOTE, build_report
 
 N_BOOT = 1000
 SEED = 0
@@ -42,7 +42,7 @@ def test_identical_arms_are_rejected_with_zero_ci():
     assert d.accept is False
     assert d.diff_mean == 0.0
     assert d.ci == (0.0, 0.0)
-    assert d.reason_th.startswith("ไม่ยอมรับ challenger") and "คร่อม 0" in d.reason_th
+    assert d.reason_th.startswith("ไม่ยอมรับ challenger") and "เหมือนกัน" in d.reason_th
 
 
 def test_consistent_small_gain_is_rejected_by_min_effect():
@@ -101,6 +101,33 @@ def test_exact_min_effect_is_accepted_despite_float_rounding():
     assert "ถึงเกณฑ์ขั้นต่ำ" in d.reason_th and "เกิน" not in d.reason_th
 
 
+def _col(j: int, shape: tuple[int, int] = (5, 100)) -> np.ndarray:
+    """Detections only at event `j`, on every seed."""
+    a = np.zeros(shape, dtype=bool)
+    a[:, j] = True
+    return a
+
+
+def test_single_event_is_rejected_with_degenerate_ci():
+    # the bootstrap of one event cannot vary: CI (1, 1) must not read as certainty
+    d = compare(np.zeros((5, 1)), np.ones((5, 1)), N_BOOT, SEED)
+    assert d.accept is False and d.ci == (1.0, 1.0) and d.diff_mean == pytest.approx(1.0)
+    assert "เพียง 1 ครั้ง" in d.reason_th and "อย่างน้อย 2" in d.reason_th
+    assert compare(np.zeros((5, 2)), np.ones((5, 2)), N_BOOT, SEED).accept is True
+
+
+def test_ci_low_exactly_zero_says_touches_not_straddles():
+    d = compare(np.zeros((5, 100)), _col(50), N_BOOT, SEED)
+    assert d.ci[0] == 0.0 and d.accept is False
+    assert "CI แตะ 0" in d.reason_th and "คร่อม" not in d.reason_th
+
+
+@pytest.mark.parametrize("n_boot", [0, -1])
+def test_non_positive_n_boot_raises(n_boot):
+    with pytest.raises(ValueError, match="n_boot"):
+        compare(np.zeros((5, 3)), np.ones((5, 3)), n_boot, SEED)
+
+
 def test_reason_never_claims_a_probability():
     rng = np.random.default_rng(7)
     small = (np.zeros((100, 100), dtype=bool), np.eye(100, dtype=bool))
@@ -110,6 +137,9 @@ def test_reason_never_claims_a_probability():
         "ci_straddles_0": (rng.integers(0, 2, size=(5, 60)), rng.integers(0, 2, size=(5, 60))),
         "below_min_effect": small,
         "zero_events": (np.zeros((5, 0)), np.zeros((5, 0))),
+        "one_event": (np.zeros((5, 1)), np.ones((5, 1))),
+        "identical": (np.eye(5, 100, dtype=bool), np.eye(5, 100, dtype=bool)),
+        "ci_touches_0": (np.zeros((5, 100)), _col(50)),
     }
     expected = {
         "accept": "ถึงเกณฑ์ขั้นต่ำ",
@@ -117,6 +147,9 @@ def test_reason_never_claims_a_probability():
         "ci_straddles_0": "คร่อม 0",
         "below_min_effect": "ต่ำกว่าเกณฑ์ขั้นต่ำ",
         "zero_events": "ไม่มีเหตุการณ์",
+        "one_event": "เพียง 1 ครั้ง",
+        "identical": "เหมือนกัน",
+        "ci_touches_0": "CI แตะ 0",
     }
     banned = ("ความน่าจะเป็น", "probability", "โอกาส", "แน่นอน")
     for name, (champ, chall) in branches.items():
@@ -330,6 +363,9 @@ def test_report_retrain_uses_only_the_latest_config_hash(research, tmp_path):
     )
     assert mismatch in rd["notes"] and mismatch in ai["notes"]
     assert f"  - {ignored}" in text.splitlines() and f"  - {mismatch}" in text.splitlines()
+    # the tables pool both configs while the decision uses the latest: the report warns
+    assert raw["notes"][0] == MIXED_CONFIG_NOTE
+    assert f"**คำเตือน:** {MIXED_CONFIG_NOTE}" in text.splitlines()
 
 
 def test_report_retrain_same_config_has_no_mismatch_note(research, tmp_path):
@@ -339,3 +375,5 @@ def test_report_retrain_same_config_has_no_mismatch_note(research, tmp_path):
     rd = _build(research, tmp_path)[2]["retrain_decision"]
     assert rd["config_hash"] == rd["ai_only"]["config_hash"] == "cfg"
     assert not any("config_hash" in n for n in rd["notes"] + rd["ai_only"]["notes"])
+    data, text, _ = _build(research, tmp_path)
+    assert MIXED_CONFIG_NOTE not in data["notes"] and MIXED_CONFIG_NOTE not in text

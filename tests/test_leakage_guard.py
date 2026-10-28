@@ -183,3 +183,34 @@ def test_utf8_bom_module_is_parsed(tmp_path):
 def test_simulator_lookalikes_are_scanned(tmp_path, rel):
     found = leakage_violations(_plant(tmp_path, rel, "import idsai.eval\n"))
     assert found == [f"idsai/{rel}:1: imports idsai.eval"]
+
+
+@pytest.mark.parametrize(
+    ("source", "hit"),
+    [
+        ("from idsai.ai.learning import training_mask\n", "idsai.ai.learning"),
+        ("from idsai.ai import learning\n", "idsai.ai.learning"),
+        ("from . import learning\n", "idsai.ai.learning"),
+        ("from idsai.data.store import Store\n", "idsai.data.store"),
+        ("import idsai.pipeline.batch\n", "idsai.pipeline.batch"),
+        ("from ..pipeline import batch\n", "idsai.pipeline"),
+        ("import importlib\nm = importlib.import_module('idsai.data.store')\n", "idsai.data.store"),
+    ],
+)
+def test_label_reading_modules_are_caught(tmp_path, source, hit):
+    # unscanned modules that read labels: importing them from a detector is a leakage path
+    found = leakage_violations(_plant(tmp_path, "ai/bad.py", source))
+    assert found and all(hit in v for v in found), found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from idsai.ai.chief import Chief\n",
+        "from idsai.contracts.frames import TRADES\n",
+        "import idsai.datagen\n",
+        "from idsai.config import load_settings\n",
+    ],
+)
+def test_label_reader_prefix_is_exact(tmp_path, source):
+    assert leakage_violations(_plant(tmp_path, "ai/ok.py", source)) == []

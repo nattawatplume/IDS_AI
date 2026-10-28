@@ -25,6 +25,7 @@ dashboard's before/after chart.
 
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,10 @@ AGNOSTIC_NOTE = "technique-agnostic: recall_correct n/a"
 UNIT_EVENT, UNIT_SYMBOL_DAY = "event", "symbol-day"
 UNIT_LEGACY = "event (legacy, optimistic)"
 DROP_REASONS = ("out_of_period", "cal_period", "missing_day", "no_baseline")
+MIXED_CONFIG_NOTE = (
+    "ตาราง runs รวมผลจากหลาย config_hash แต่การตัดสิน champion/challenger ใช้เฉพาะ "
+    "config_hash ล่าสุด ค่าในตาราง retrain_drift จึงอาจไม่ตรงกับกราฟและบล็อกการตัดสิน"
+)
 NOTES_TH = [
     "หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value "
     "อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้",
@@ -285,9 +290,10 @@ def _retrain_block(
     Arrays `(n_seeds, n_events)` of per-event `detected_any` over the seeds where both arms have
     an OK record (`metrics` not null) and the events every such record shares. The decision is
     `compare` (paired event bootstrap); the series uses the cluster ratio estimator of the
-    report tables (unit = event) on the same records and events, so it equals the table cell
-    whenever no seed or event is dropped. Only records of the most recent `config_hash`
-    feeding this block are used.
+    report tables (unit = event) on the same records and events. Only records of the most
+    recent `config_hash` feeding this block are used, while the tables pool every config_hash,
+    so the series equals the table cell only when no seed or event is dropped and the runs
+    share one config_hash (the report says so when they do not: `MIXED_CONFIG_NOTE`).
     """
     recs, config_note = _latest_config(
         [
@@ -427,6 +433,14 @@ def _retrain_md(rd: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
+def _error_th(error: str, limit: int = 300) -> str:
+    """The Thai sentence of a bilingual error (before its English part), whole when it fits;
+    a cut is marked with "…" (the JSON keeps the full text)."""
+    text = error.splitlines()[0] if error else ""
+    thai = re.split(r"(?<=\.) (?=[A-Z])", text, maxsplit=1)[0]
+    return thai if len(thai) <= limit else thai[: limit - 1] + "…"
+
+
 def _fmt(x: float | None, nd: int = 3) -> str:
     return "–" if x is None else f"{x:.{nd}f}"
 
@@ -446,7 +460,7 @@ def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
         flags.append(c["note"])
     if not c["classifies"]:
         flags.append(AGNOSTIC_NOTE)
-    flags += [f"error: {e.splitlines()[0][:160]}" for e in c["errors"]]
+    flags += [f"error: {_error_th(e)}" for e in c["errors"]]
     m, ci = c["mean"], c["ci"] or {}
     if m is None:
         cells = ["–"] * 8
@@ -529,6 +543,8 @@ def build_report(
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
     }
+    if len(data["config_hash"]) > 1:
+        data["notes"] = [MIXED_CONFIG_NOTE, *NOTES_TH]
 
     lines = [
         "# รายงานผลการประเมิน Market IDS (เพื่อการศึกษา)",
@@ -551,6 +567,7 @@ def build_report(
         "",
         "ทุกตัวเลขมาจากตาราง runs ทั้งหมด; ค่าเฉลี่ยข้าม seed และช่วงความเชื่อมั่น 95 % "
         "จากการ bootstrap (หน่วยตามคอลัมน์ bootstrap unit)",
+        *(["", f"**คำเตือน:** {MIXED_CONFIG_NOTE}"] if len(data["config_hash"]) > 1 else []),
     ]
     cols = (
         "| variant | budget | provenance | seeds | events | recall_any [95% CI] | "

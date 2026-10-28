@@ -296,3 +296,12 @@ def test_paired_block_without_older_configs_has_no_config_note(research, tmp_pat
     write(research, [rec("baselines", "ai.autoencoder_trade", 2, 0, [1, 0])])
     data = build_report(research, tmp_path / "r.md", tmp_path / "r.json", cfg=load_settings())
     assert not any("config_hash" in n for n in data["paired_bootstrap"]["notes"])
+
+
+def test_error_text_keeps_the_whole_thai_sentence():
+    from idsai.eval.report import _error_th
+
+    th = "ชุดข้อมูลสอบเทียบเล็กเกินไป (6/(n_cal+1) = 0.000231, n_cal = 25920) — ต้องเพิ่มข้อมูล."
+    assert _error_th(th + " Calibration set too small; calibrate on more rows.") == th
+    assert _error_th("x" * 400).endswith("…") and len(_error_th("x" * 400)) == 300
+    assert _error_th("only english error") == "only english error"

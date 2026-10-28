@@ -459,8 +459,15 @@ _LABEL_NAME = "LABELS"
 _IMPORT_FUNCS = {"import_module", "__import__"}
 
 
+# unscanned modules that read labels (learning: training mask over eval metrics; data: the
+# label store; pipeline: batch loading with LABELS) - a detector importing them could leak
+_LABEL_READERS = ("idsai.ai.learning", "idsai.data", "idsai.pipeline")
+
+
 def _forbidden(module: str) -> bool:
-    return module == _FORBIDDEN_MODULE or module.startswith(_FORBIDDEN_MODULE + ".")
+    return any(
+        module == m or module.startswith(m + ".") for m in (_FORBIDDEN_MODULE, *_LABEL_READERS)
+    )
 
 
 def _scanned(package_root: Path) -> list[Path]:
@@ -607,8 +614,11 @@ def leakage_violations(package_root: Path) -> list[str]:
     Returns sorted `"relpath:lineno: reason"` strings, `relpath` relative to the parent of
     `package_root`; a file that cannot be decoded as UTF-8 or parsed is a violation too.
 
-    Limits (a static scan, not a proof): it cannot see a transitive import through an unscanned
-    helper (e.g. a `pipeline/` module that imports `idsai.eval` and is imported by a detector),
+    Imports of the unscanned modules that read labels (`idsai.ai.learning`, `idsai.data`,
+    `idsai.pipeline`, see `_LABEL_READERS`) are violations in the same forms.
+
+    Limits (a static scan, not a proof): it cannot see a transitive import through another
+    unscanned helper (a new package that imports `idsai.eval` and is imported by a detector),
     module names or attribute names built at run time (string concatenation, f-strings,
     variables), `exec`/`eval` of source text, `sys.modules` lookups, or the package re-bound
     through an assignment (`pkg = idsai; pkg.eval`).
