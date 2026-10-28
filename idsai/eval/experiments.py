@@ -17,6 +17,11 @@ Event days and normal days are loaded with `load_day_windows`; windows of a set 
 concatenated and de-duplicated on `(symbol, t_end_us)` (first kept), and extension rows past
 `D+1` are dropped when the `D+1` partition is absent. Skipped days are counted per reason.
 
+`retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
+its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
+detector set can name a technique at all (a rule or `stat.cusum`), so recall_correct of
+technique-agnostic sets is not read as a real 0.
+
 Red-Team injection only runs here in replay mode. Eval never writes the ModelRegistry: model
 versions are `"eval-" + sha256(pickle(state_dict))[:12]`.
 """
@@ -35,7 +40,7 @@ import numpy as np
 import polars as pl
 from sklearn.ensemble import RandomForestClassifier
 
-from idsai.ai.chief import CalibrationError, Chief
+from idsai.ai.chief import CUSUM_NAME, CalibrationError, Chief
 from idsai.ai.learning import training_mask
 from idsai.config import REPO_ROOT, Settings, config_hash, file_sha
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
@@ -52,7 +57,14 @@ from idsai.detection.simulator import (
 )
 from idsai.detection.simulator.inject import price_tick
 from idsai.eval.metrics import MatchResult, match_events, summarize, window_positive, window_pr_auc
-from idsai.eval.splits import SymDay, day_start_us, drift_ranges, make_split, split_def
+from idsai.eval.splits import (
+    SymDay,
+    day_of_us,
+    day_start_us,
+    drift_ranges,
+    make_split,
+    split_def,
+)
 from idsai.pipeline.batch import load_day_windows, score_windows
 
 S_US = 1_000_000
@@ -82,6 +94,7 @@ MIN_TICKS = 2.0  # skip pumps whose impact moves the price by fewer ticks
 SCENARIO_LEAD_S = 3600
 SCENARIO_TAIL_S = 600
 SUPERVISED_NOTE = "supervised reference (uses labels)"
+SATURATION_WARNING = r"alert budget .* is at or above the peak episode rate"
 REAL, SEMI = "REAL", "SEMI-SYN"
 
 
@@ -483,8 +496,11 @@ def _evaluate(
         )
         Fs.append(fused["F"].to_numpy())
         ys.append(y)
-        for lab in part.labels.select("label_id", "symbol", "family").iter_rows(named=True):
-            info[lab["label_id"]] = {"symbol": lab["symbol"], "family": lab["family"]}
+        for lid, sym, fam, t0 in part.labels.select(
+            "label_id", "symbol", "family", "t_start_us"
+        ).iter_rows():
+            # symbol + day identify the bootstrap cluster of injected (SEMI-SYN) events
+            info[lid] = {"symbol": sym, "day": day_of_us(t0).isoformat(), "family": fam}
     mr = MatchResult(n_events, det_any, det_ok, n_alerts, n_matched, ttd)
     y = np.concatenate(ys) if ys else np.zeros(0, dtype=bool)
     F = np.concatenate(Fs) if Fs else np.zeros(0)
@@ -527,6 +543,21 @@ def _skips(**parts: _Part | list[_Part] | Counter | None) -> dict[str, dict[str,
     return out
 
 
+def _describe(detectors: list[Detector], provenance: str) -> dict[str, Any]:
+    """Record fields that depend only on the detector set (shared by OK and error records).
+
+    `classifies`: the Chief can name a technique only through a fired rule or `stat.cusum`;
+    technique-agnostic sets (baselines alone, the AE alone, the RF) always say MM-T000, so their
+    recall_correct is not meaningful.
+    """
+    names = [d.name for d in detectors]
+    return {
+        "detectors": names,
+        "deterministic": provenance != SEMI and not (SEEDED & set(names)),
+        "classifies": any(d.layer == "rule" or d.name == CUSUM_NAME for d in detectors),
+    }
+
+
 def _variant(
     ctx: _Ctx,
     experiment: str,
@@ -542,11 +573,9 @@ def _variant(
     """Calibrate one Chief on `cal`, then one record per budget."""
     cfg = ctx.cfg
     names = [d.name for d in detectors]
-    deterministic = provenance != SEMI and not (SEEDED & set(names))
     skips = _skips(cal=cal, eval=parts, hard=hard, **extra.pop("_skips", {}))
     base = {
-        "detectors": names,
-        "deterministic": deterministic,
+        **_describe(detectors, provenance),
         "model_versions": dict(model_versions),
         "n_events": int(sum(p.labels.height for p in parts)),
         "n_symbol_days": int(sum(len(p.days) for p in parts)),
@@ -564,8 +593,10 @@ def _variant(
         rec = ctx.record(experiment, variant, budget, provenance, **base, n_cal=chief.n_cal)
         try:
             with warnings.catch_warnings():
-                # saturation is reported through tau_saturated, not as a warning
-                warnings.simplefilter("ignore", RuntimeWarning)
+                # saturation is reported through tau_saturated; other warnings stay visible
+                warnings.filterwarnings(
+                    "ignore", message=SATURATION_WARNING, category=RuntimeWarning
+                )
                 tau = chief.fit_threshold(cal_fused, budget)
         except CalibrationError as e:
             rec["error"] = str(e)
@@ -582,10 +613,17 @@ def _variant(
 
 
 def _error_records(
-    ctx: _Ctx, experiment: str, variant: str, provenance: str, err: Exception, **extra: Any
+    ctx: _Ctx,
+    experiment: str,
+    variant: str,
+    provenance: str,
+    err: Exception,
+    detectors: list[Detector],
+    **extra: Any,
 ) -> list[dict[str, Any]]:
+    desc = _describe(detectors, provenance)
     return [
-        ctx.record(experiment, variant, b, provenance, error=str(err), **extra)
+        ctx.record(experiment, variant, b, provenance, error=str(err), **desc, **extra)
         for b in ctx.cfg.eval.budgets_per_symbol_day
     ]
 
@@ -622,7 +660,7 @@ def _exp_real_t001(ctx: _Ctx) -> list[dict]:
     groups = ctx.build(ctx.cfg.detectors)
     mv, info, err = _fit_groups(ctx, groups, ctx.split.train_normal)
     if err is not None:
-        return _error_records(ctx, "real_t001", "full", REAL, err)
+        return _error_records(ctx, "real_t001", "full", REAL, err, _flatten(groups, groups))
     dets = _flatten(groups, groups)
     cal, real, hard = _real_sets(ctx, dets)
     return _variant(ctx, "real_t001", "full", REAL, dets, mv, cal, [real], hard, info)
@@ -632,7 +670,8 @@ def _exp_semisyn(ctx: _Ctx) -> list[dict]:
     groups = ctx.build(ctx.cfg.detectors)
     mv, info, err = _fit_groups(ctx, groups, ctx.split.train_normal)
     if err is not None:
-        return [r for f in FAMILIES for r in _error_records(ctx, "semisyn", f, SEMI, err)]
+        dets = _flatten(groups, groups)
+        return [r for f in FAMILIES for r in _error_records(ctx, "semisyn", f, SEMI, err, dets)]
     dets = _flatten(groups, groups)
     cal = ctx.clean(ctx.split.cal_normal, dets)
     out = []
@@ -651,7 +690,9 @@ def _exp_ablation(ctx: _Ctx) -> list[dict]:
             r
             for s, prov in (("real_t001", REAL), ("semisyn", SEMI))
             for c in combos
-            for r in _error_records(ctx, "ablation", f"{s}:{c}", prov, err)
+            for r in _error_records(
+                ctx, "ablation", f"{s}:{c}", prov, err, _flatten(groups, combos[c])
+            )
         ]
     every = _flatten(groups, groups)
     cal, real, hard = _real_sets(ctx, every)
@@ -691,7 +732,9 @@ def _exp_baselines(ctx: _Ctx) -> list[dict]:
     groups = ctx.build(BASELINES)
     mv, info, err = _fit_groups(ctx, groups, ctx.split.train_normal)
     if err is not None:
-        return [r for n in BASELINES for r in _error_records(ctx, "baselines", n, REAL, err)]
+        return [
+            r for n in BASELINES for r in _error_records(ctx, "baselines", n, REAL, err, groups[n])
+        ]
     every = _flatten(groups, groups)
     cal, real, hard = _real_sets(ctx, every)
     out = []
@@ -738,7 +781,7 @@ def _exp_ref_supervised(ctx: _Ctx) -> list[dict]:
         y = np.r_[np.ones(pos.height, dtype=bool), np.zeros(neg.height, dtype=bool)]
         rf.fit_supervised(rows, y)
     except ValueError as e:
-        return _error_records(ctx, "ref_supervised", RF_NAME, REAL, e, **extra)
+        return _error_records(ctx, "ref_supervised", RF_NAME, REAL, e, [rf], **extra)
     extra |= {
         "train_rows": rows.height,
         "train_positive_rows": pos.height,
@@ -759,14 +802,29 @@ def _exp_retrain_drift(ctx: _Ctx) -> list[dict]:
         extra = {"train_range": [lo.isoformat(), hi.isoformat()], "train_days": len(days)}
         groups = ctx.build(names)  # fresh instances: v1 and v2 never share a fitted AE
         mv, info, err = _fit_groups(ctx, groups, days)
-        if err is not None:
-            out += _error_records(ctx, "retrain_drift", variant, REAL, err, **extra)
-            continue
         dets = _flatten(groups, groups)
+        ae = groups[AE]
+        if err is not None:
+            out += _error_records(ctx, "retrain_drift", variant, REAL, err, dets, **extra)
+            out += _error_records(ctx, "retrain_drift", f"{variant}:ai", REAL, err, ae, **extra)
+            continue
         cal = ctx.clean(sp.cal_normal, dets)
         acc = ctx.real_parts(sp.accept_events, sp.accept_normal, dets)
         out += _variant(
             ctx, "retrain_drift", variant, REAL, dets, mv, cal, [acc], None, {**info, **extra}
+        )
+        # the AE alone through its own Chief, reusing the same scores (no extra fit)
+        out += _variant(
+            ctx,
+            "retrain_drift",
+            f"{variant}:ai",
+            REAL,
+            ae,
+            _versions_for(mv, ae),
+            cal,
+            [acc],
+            None,
+            {**info, **extra},
         )
     return out
 

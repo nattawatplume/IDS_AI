@@ -3,7 +3,8 @@
 3 BTC-quoted symbols x 16 days with overridden splits (1 normal day per symbol and period).
 AAABTC carries REAL-provenance labels with a pump injected into the stored trades (train,
 accept and test events); every symbol has labels in the cal period and the first days so the
-normal-day candidates are pinned (train normals inside both drift ranges). Clean days are
+normal-day candidates are pinned: BBBBTC's train normal (day 2) lies only in v1's drift range,
+AAABTC's (day 3) in both, so v1 and v2 train on different days. Clean days are
 cached on disk, so later experiments in this module reuse them.
 """
 
@@ -66,6 +67,7 @@ LABEL_ROWS = [
     ("AAABTC", 9, True),  # accept event
     ("AAABTC", 13, True),  # test event
     *[(s, k, False) for s in ("BBBBTC", "CCCBTC") for k in (0, 5)],
+    ("BBBBTC", 4, False),  # pins BBBBTC's only train-normal day to day 2 (inside v1 only)
 ]
 
 
@@ -81,7 +83,7 @@ def make_cfg(tmp):
                 "normal_days_per_symbol": 1,
                 "min_gap_days": 2,
                 "drift_v1": [str(d(1)), str(d(3))],
-                "drift_v2": [str(d(2)), str(d(4))],
+                "drift_v2": [str(d(3)), str(d(4))],
             },
             "eval": {"budgets_per_symbol_day": BUDGETS, "hard_negative_k": 2, "n_boot": 200},
             "ae": {"epochs": 2, "hidden": 16, "bottleneck": 4, "patience": 1},
@@ -169,6 +171,9 @@ def test_semisyn_records(semisyn, world):
         assert r["n_events"] == 1 and r["n_symbol_days"] == 1  # one test-normal day per family
         assert r["n_skipped_tick"] == 0
         assert len(r["per_event"]) == (0 if r["error"] else 1)
+        for pe in r["per_event"].values():  # cluster key of the report's bootstrap
+            assert pe["symbol"] in SYMS and pe["family"] == r["variant"]
+            assert date.fromisoformat(pe["day"]) >= d(12)
     burst = [r for r in semisyn if r["variant"] == "pump_burst" and r["budget"] == 10.0]
     assert burst[0]["metrics"]["recall_any"] == 1.0  # a 3-8 % burst on a quiet pair
     runs = research.list_runs("semisyn")
@@ -177,8 +182,20 @@ def test_semisyn_records(semisyn, world):
 
 def test_retrain_drift_records(drift, world):
     cfg, app, research, _ = world
-    check_common(drift, "retrain_drift", "REAL", {"v1", "v2"}, cfg)
+    check_common(drift, "retrain_drift", "REAL", {"v1", "v2", "v1:ai", "v2:ai"}, cfg)
     accept_label = "L2"
+    by = {(r["variant"], r["budget"]): r for r in drift}
+    v1, v2 = by[("v1", 10.0)], by[("v2", 10.0)]
+    assert v1["train_days"] == 3 and 1 <= v2["train_days"] < 3
+    ae1, ae2 = (r["model_versions"]["ai.autoencoder_trade"] for r in (v1, v2))
+    assert ae1 != ae2
+    for v in ("v1", "v2"):  # the ai-only Chief reuses the same fitted AE (no extra fit)
+        ai = by[(f"{v}:ai", 10.0)]
+        assert ai["detectors"] == ["ai.autoencoder_trade"] and ai["classifies"] is False
+        assert ai["model_versions"] == {
+            "ai.autoencoder_trade": by[(v, 10.0)]["model_versions"]["ai.autoencoder_trade"]
+        }
+        assert by[(v, 10.0)]["classifies"] is True
     for r in drift:
         assert set(r["per_event"]) == (set() if r["error"] else {accept_label})
         assert r["n_events"] == 1 and r["n_symbol_days"] == 4  # 1 accept event + 3 normal days
@@ -241,6 +258,10 @@ def test_other_experiments_run(world):
                 if r["provenance"] == "REAL":
                     assert r["n_events"] == 1 and set(r["per_event"]) == {"L3"}
                     assert math.isfinite(r["metrics"]["fa_per_symbol_day_hard"])
+        if name == "baselines":
+            assert all(r["classifies"] is False for r in recs)
+        if name == "real_t001":
+            assert all(r["classifies"] is True for r in recs)
         if name == "ref_supervised":
             assert all(r["note"] == SUPERVISED_NOTE for r in recs)
             assert all(r["train_positive_rows"] > 0 for r in recs)

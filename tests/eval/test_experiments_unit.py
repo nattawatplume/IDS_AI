@@ -1,19 +1,25 @@
 """Cheap unit tests of experiment helpers (no window computation)."""
 
+import re
 from datetime import date
 
 import numpy as np
 import polars as pl
 import pytest
 
+from idsai.ai.chief import Chief
 from idsai.config import load_settings
+from idsai.contracts.detector import Detector, Evidence
 from idsai.contracts.frames import LABELS
 from idsai.data.store import Store
 from idsai.detection.simulator import EthicsError, load_scenario_ranges
 from idsai.eval.experiments import (
     FAMILIES,
+    SATURATION_WARNING,
     SupervisedRFDetector,
     _Ctx,
+    _evaluate,
+    _Part,
     git_sha,
     model_version,
     run_experiment,
@@ -148,9 +154,116 @@ def test_missing_training_data_is_recorded_not_raised(tmp_path, name):
     try:
         recs = run_experiment(name, ctx.cfg, s, 0, research=research)
         budgets = ctx.cfg.eval.budgets_per_symbol_day
-        assert len(recs) == len(budgets) * (2 if name == "retrain_drift" else 1)
+        assert len(recs) == len(budgets) * (4 if name == "retrain_drift" else 1)
         assert all(r["metrics"] is None and r["error"] for r in recs)
+        # error records describe their detector set like OK records do
+        for r in recs:
+            assert r["detectors"] and r["deterministic"] is False
+            assert r["classifies"] is (name == "real_t001" or r["variant"] in ("v1", "v2"))
+        if name == "retrain_drift":
+            ai = [r for r in recs if r["variant"].endswith(":ai")]
+            assert {r["variant"] for r in ai} == {"v1:ai", "v2:ai"}
+            assert all(r["detectors"] == ["ai.autoencoder_trade"] for r in ai)
         assert len(research.list_runs(name)) == len(recs) and s.list_runs() == []
     finally:
         s.close()
         research.close()
+
+
+# ---------------------------------------------------------------- FA on normal days (values)
+class _Col(Detector):
+    """Scores are read by the Chief from `score__stat.test`; this object only names them."""
+
+    name = "stat.test"
+    layer = "stat"
+    technique_ids = ["ANY"]
+    requires: list[str] = []
+
+    def score(self, windows):
+        return windows["score__stat.test"].to_numpy()
+
+    def evidence(self, row):
+        return Evidence()
+
+
+E, N1, N2, H1, H2 = (date(2020, 7, k) for k in (1, 5, 6, 10, 11))
+
+
+def at_h(day, h, m=0):
+    return day_us(day) + (h * 3600 + m * 60) * S
+
+
+def frame(rows):
+    """rows: (day, hour, minute, score)"""
+    return pl.DataFrame(
+        {
+            "symbol": ["ABCBTC"] * len(rows),
+            "t_end_us": [at_h(d, h, m) for d, h, m, _ in rows],
+            "score__stat.test": [float(v) for *_, v in rows],
+        },
+        schema={"symbol": pl.String, "t_end_us": pl.Int64, "score__stat.test": pl.Float64},
+    )
+
+
+def calibrated_chief():
+    rng = np.random.default_rng(0)
+    n = 10_000
+    cal = pl.DataFrame(
+        {
+            "symbol": ["ABCBTC"] * n,
+            "t_end_us": day_us(date(2020, 6, 1)) + np.arange(n, dtype=np.int64) * 8 * S,
+            "score__stat.test": rng.random(n),
+        }
+    )
+    chief = Chief([_Col()], load_settings().chief, "cfg", {})
+    chief.calibrate(cal)
+    return chief, cal
+
+
+def test_fa_counts_unmatched_episodes_on_normal_days_only():
+    chief, _ = calibrated_chief()  # score 5 -> p = 1/10001 -> F ~ 4; score 0 -> F ~ 0
+    t0 = at_h(E, 12)
+    labels = pl.DataFrame(
+        [("ev", "hu", "ABCBTC", t0, t0, "MM-T001", "telegram_pump", None, "REAL")],
+        schema=LABELS,
+        orient="row",
+    )
+    real = _Part(
+        frame(
+            [
+                (E, 0, 0, 0),
+                (E, 12, 1, 5),  # matched episode
+                (E, 18, 0, 5),  # unmatched, but on the event day: not a false alert
+                (N1, 0, 0, 0),
+                (N1, 6, 0, 5),
+                (N1, 15, 0, 5),  # two false alerts
+                (N2, 0, 0, 0),  # quiet normal day
+            ]
+        ),
+        labels,
+        days=[SymDay("ABCBTC", E), SymDay("ABCBTC", N1), SymDay("ABCBTC", N2)],
+        fa_days=[SymDay("ABCBTC", N1), SymDay("ABCBTC", N2)],
+    )
+    hard = _Part(
+        frame([(H1, 3, 0, 5), (H1, 9, 0, 5), (H2, 0, 0, 0), (H2, 23, 0, 5)]),
+        labels.head(0),
+        days=[SymDay("ABCBTC", H1), SymDay("ABCBTC", H2)],
+    )
+    fused = chief.fuse(real.frame)
+    metrics, per_event = _evaluate(
+        chief, 3.0, [fused], [real], (chief.fuse(hard.frame), hard), 120, 300
+    )
+    assert metrics["n_alerts"] == 4 and metrics["n_alerts_matched"] == 1
+    assert metrics["precision"] == 0.25 and metrics["recall_any"] == 1.0
+    assert metrics["fa_per_symbol_day"] == 1.0  # 2 unmatched episodes / 2 normal days
+    assert metrics["fa_per_symbol_day_hard"] == 1.5  # 3 episodes / 2 hard-negative days
+    assert per_event["ev"]["day"] == E.isoformat() and per_event["ev"]["ttd_s"] == 60.0
+
+
+def test_only_the_saturation_warning_is_silenced():
+    chief, cal = calibrated_chief()
+    with pytest.warns(RuntimeWarning) as caught:
+        chief.fit_threshold(chief.fuse(cal), 1e6)
+    assert chief.tau_saturated
+    assert any(re.match(SATURATION_WARNING, str(w.message)) for w in caught)
+    assert not re.match(SATURATION_WARNING, "invalid value encountered in divide")

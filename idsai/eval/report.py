@@ -2,10 +2,14 @@
 
 `build_report` groups run records by experiment x variant x budget and writes a Markdown report
 plus the same content as JSON (read by `serve`). Per cell: the mean over seeds of each metric,
-a 95 % event-bootstrap CI of recall (per-event detections averaged over seeds when every seed
-has the same events, e.g. REAL labels; pooled `(seed, event)` pairs otherwise, e.g. SEMI-SYN
-scenarios), the provenance, the seed count and a "tau saturated" flag. Recall and false alerts
-per symbol-day are the headline; precision is always printed with prevalence.
+a 95 % bootstrap CI of recall, the provenance, the seed count and a "tau saturated" flag. Recall
+and false alerts per symbol-day are the headline; precision is always printed with prevalence.
+
+Bootstrap unit: detections are first averaged over seeds within a cluster, then clusters are
+resampled. REAL events are their own clusters (`event`, keyed by label_id). SEMI-SYN scenarios of
+every seed and family are injected into the same test-normal days, so they are clustered by
+`(symbol, day)` (`symbol-day`); treating `(seed, event)` pairs as independent would make the CI
+too narrow.
 """
 
 import json
@@ -14,6 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import numpy as np
 
 from idsai.config import Settings, load_settings
@@ -39,6 +44,9 @@ MEAN_METRICS = (
 CI_METRICS = {"recall_any": "detected_any", "recall_correct": "detected_correct"}
 DETERMINISTIC_NOTE = "deterministic: CI from event bootstrap"
 SATURATED_MARK = "τ saturated"
+AGNOSTIC_NOTE = "technique-agnostic: recall_correct n/a"
+UNIT_EVENT, UNIT_SYMBOL_DAY = "event", "symbol-day"
+DROP_REASONS = ("out_of_period", "cal_period", "missing_day", "no_baseline")
 NOTES_TH = [
     "หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value "
     "อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้",
@@ -50,6 +58,10 @@ NOTES_TH = [
     f"{DETERMINISTIC_NOTE}: ตัวตรวจจับที่ไม่ขึ้นกับ seed ให้ผลเหมือนกันทุก seed "
     "ช่วงความเชื่อมั่นจึงมาจากการ bootstrap ข้ามเหตุการณ์เท่านั้น",
     "ref_supervised เป็น supervised reference (uses labels) ใช้เทียบเท่านั้น",
+    f"{AGNOSTIC_NOTE}: ชุดตัวตรวจจับที่ไม่มี rule หรือ stat.cusum ระบุเทคนิคไม่ได้ (ได้ MM-T000 "
+    "เสมอ) จึงไม่แสดง recall_correct",
+    "bootstrap unit: event = สุ่มซ้ำทีละเหตุการณ์จริง; symbol-day = สุ่มซ้ำทีละวันของสัญลักษณ์ "
+    "เพราะเหตุการณ์ SEMI-SYN ทุก seed และทุก family ถูกฉีดลงในวันเดียวกัน",
 ]
 
 
@@ -62,18 +74,23 @@ def _finite_mean(values: list[Any]) -> float | None:
     return float(np.mean(xs)) if xs else None
 
 
-def _event_matrix(records: list[dict], key: str) -> np.ndarray:
-    """`(n_seeds, n_events)` aligned by label_id when all seeds share the events, else pooled."""
-    sets = [tuple(sorted(r["per_event"])) for r in records]
-    if sets and all(s == sets[0] for s in sets):
-        return np.array(
-            [[float(r["per_event"][lid][key]) for lid in sets[0]] for r in records],
-            dtype=np.float64,
-        ).reshape(len(records), len(sets[0]))
-    return np.array(
-        [float(r["per_event"][lid][key]) for r in records for lid in sorted(r["per_event"])],
-        dtype=np.float64,
-    )
+def _bootstrap_unit(records: list[dict]) -> str:
+    return UNIT_SYMBOL_DAY if any(r["provenance"] == "SEMI-SYN" for r in records) else UNIT_EVENT
+
+
+def cluster_values(records: list[dict], key: str, unit: str) -> np.ndarray:
+    """Per-cluster mean of `per_event[...][key]` over every record (seed) of a cell.
+
+    `unit == "event"` clusters by label_id; `"symbol-day"` by `(symbol, day)` of the event.
+    Clusters are returned in sorted key order.
+    """
+    acc: dict[tuple, list[float]] = defaultdict(list)
+    for r in records:
+        for lid, pe in r["per_event"].items():
+            clustered = unit == UNIT_SYMBOL_DAY and "day" in pe
+            k = (pe["symbol"], pe["day"]) if clustered else (lid,)
+            acc[k].append(float(pe[key]))
+    return np.array([np.mean(acc[k]) for k in sorted(acc)], dtype=np.float64)
 
 
 def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
@@ -89,6 +106,8 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
         "note": next((r["note"] for r in records if r.get("note")), None),
         "n_events": max((r.get("n_events") or 0 for r in records), default=0),
         "n_symbol_days": max((r.get("n_symbol_days") or 0 for r in records), default=0),
+        "classifies": all(r.get("classifies", True) for r in records),
+        "ci_unit": _bootstrap_unit(records),
         "mean": None,
         "ci": None,
     }
@@ -96,10 +115,35 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
         out["mean"] = {m: _finite_mean([r["metrics"].get(m) for r in ok]) for m in MEAN_METRICS}
         ci = {}
         for metric, key in CI_METRICS.items():
-            _, (lo, hi) = bootstrap_ci(_event_matrix(ok, key), n_boot, CI_SEED)
+            values = cluster_values(ok, key, out["ci_unit"])
+            _, (lo, hi) = bootstrap_ci(values, n_boot, CI_SEED)
             ci[metric] = [lo, hi] if math.isfinite(lo) else None
         out["ci"] = ci
+        if not out["classifies"]:  # always MM-T000: recall_correct (and F1) carry no information
+            out["mean"]["recall_correct"] = None
+            out["mean"]["f1"] = None
+            ci["recall_correct"] = None
     return out
+
+
+def _labels_summary(runs: list[dict]) -> list[dict[str, Any]]:
+    """Labels considered / used / dropped by reason, once per distinct split."""
+    seen: dict[str, dict[str, Any]] = {}
+    for r in runs:
+        sd = r.get("split_def") or {}
+        if "n_labels" not in sd or sd.get("sha12") in seen:
+            continue
+        by_period = sd.get("labels_dropped") or {}
+        reasons = {k: sum(v.get(k, 0) for v in by_period.values()) for k in DROP_REASONS}
+        n = int(sd["n_labels"])
+        seen[sd["sha12"]] = {
+            "split_sha12": sd["sha12"],
+            "n_labels": n,
+            "used": n - sum(reasons.values()),
+            "dropped": reasons,
+            "dropped_by_period": by_period,
+        }
+    return [seen[k] for k in sorted(seen)]
 
 
 def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
@@ -162,14 +206,17 @@ def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
         flags.append(DETERMINISTIC_NOTE)
     if c["note"]:
         flags.append(c["note"])
+    if not c["classifies"]:
+        flags.append(AGNOSTIC_NOTE)
     flags += [f"error: {e.splitlines()[0][:160]}" for e in c["errors"]]
     m, ci = c["mean"], c["ci"] or {}
     if m is None:
-        cells = ["–"] * 7
+        cells = ["–"] * 8
     else:
         cells = [
             _fmt_ci(m["recall_any"], ci.get("recall_any")),
             _fmt_ci(m["recall_correct"], ci.get("recall_correct")),
+            c["ci_unit"],
             f"{_fmt(m['precision'])} (prevalence {_fmt(m['prevalence'], 4)})",
             _fmt(m["fa_per_symbol_day"]),
             _fmt(m["fa_per_symbol_day_hard"]),
@@ -196,16 +243,20 @@ def build_report(
 ) -> dict[str, Any]:
     """Write the Markdown and JSON report from every run record; returns the JSON content.
 
-    `research_db` is the research DuckDB path (opened through `Store`) or an open `Store`.
-    `cfg` supplies `n_boot` and `min_effect` (default: `load_settings()`).
+    `research_db` is the research DuckDB path (opened read-only, no side effects) or an open
+    `Store`. `cfg` supplies `n_boot` and `min_effect` (default: `load_settings()`).
     """
     cfg = cfg or load_settings()
     if isinstance(research_db, Store):
         runs = research_db.list_runs()
     else:
-        p = Path(research_db)
-        with Store(p.parent, p) as s:
-            runs = s.list_runs()
+        con = duckdb.connect(str(Path(research_db)), read_only=True)
+        try:  # same rows and order as Store.list_runs
+            sql = "SELECT record_json FROM runs ORDER BY created_us, run_id"
+            rows = con.execute(sql).fetchall()
+        finally:
+            con.close()
+        runs = [json.loads(r[0]) for r in rows]
     n_boot = cfg.eval.n_boot
 
     grouped: dict[str, dict[str, dict[str, list[dict]]]] = defaultdict(
@@ -235,6 +286,7 @@ def build_report(
         "config_hash": _uniq(runs, "config_hash"),
         "experiments": experiments,
         "paired_bootstrap": paired,
+        "labels": _labels_summary(runs),
         "notes": NOTES_TH,
     }
 
@@ -248,16 +300,22 @@ def build_report(
         f"git_sha: {', '.join(data['git_sha']) or '–'} · "
         f"config_hash: {', '.join(data['config_hash']) or '–'}",
         "",
+        *[
+            f"labels (split {lab['split_sha12']}): used {lab['used']} of {lab['n_labels']}; "
+            "dropped: " + ", ".join(f"{k} {v}" for k, v in lab["dropped"].items())
+            for lab in data["labels"]
+        ],
+        "",
         "ทุกตัวเลขมาจากตาราง runs ทั้งหมด; ค่าเฉลี่ยข้าม seed และช่วงความเชื่อมั่น 95 % "
-        "จากการ bootstrap ข้ามเหตุการณ์",
+        "จากการ bootstrap (หน่วยตามคอลัมน์ bootstrap unit)",
     ]
     cols = (
         "| variant | budget | provenance | seeds | events | recall_any [95% CI] | "
-        "recall_correct [95% CI] | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | "
-        "TTD median / p90 (s) | PR-AUC | notes |"
+        "recall_correct [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | "
+        "FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |"
     )
     for exp in order:
-        lines += ["", f"## {exp}", "", cols, "|" + "---|" * 13]
+        lines += ["", f"## {exp}", "", cols, "|" + "---|" * 14]
         for v, by_b in experiments[exp].items():
             lines += [_row_md(v, b, c) for b, c in by_b.items()]
     lines += [
@@ -291,10 +349,10 @@ def build_report(
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
     out_json.write_text(
-        json.dumps(_json_safe(data), ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(safe := _json_safe(data), ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    return data
+    return safe
 
 
 def _json_safe(x: Any) -> Any:
