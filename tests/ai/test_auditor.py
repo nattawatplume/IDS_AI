@@ -315,3 +315,115 @@ def test_report_without_inputs_is_ok_with_current_time(aud):
 def test_report_unknown_check_raises(aud):
     with pytest.raises(ValueError, match="nope"):
         aud.report(nope={})
+
+
+# ---- unreadable inputs: a monitor that cannot measure never reports health
+
+NAN, INF = float("nan"), float("inf")
+
+
+def _assert_unreadable(c: Check, *names: str) -> dict:
+    assert c.status == "warn", c
+    assert c.detail_th.startswith("อ่านค่าไม่ได้") and all(n in c.detail_th for n in names)
+    v = _json(c)["value"]
+    assert v["unreadable"] == list(names) and all(v[n] is None for n in names)
+    return v
+
+
+@pytest.mark.parametrize(
+    ("args", "bad"),
+    [
+        ((10, NAN, 2.0), "symbol_days"),
+        ((10, 5, NAN), "budget_per_symbol_day"),
+        ((NAN, 5, 2.0), "n_alerts"),
+        ((10, INF, 2.0), "symbol_days"),
+        ((10, 5, None), None),  # None budget = the cfg default, not unreadable
+    ],
+)
+def test_alert_rate_non_finite_input_is_warn(aud, args, bad):
+    c = aud.alert_rate(*args)
+    if bad is None:
+        assert c.status == "ok"
+        return
+    v = _assert_unreadable(c, bad)
+    assert sum(x is not None for k, x in v.items() if k != "unreadable") == 2  # raw kept
+
+
+def test_calibration_drops_non_finite_and_counts_them(aud):
+    # D3: non-finite p-values are dropped (not a health claim: "ยังไม่ประเมิน")
+    c = aud.calibration([NAN] * 500)
+    assert c.status == "ok" and c.value["n"] == 0 and c.value["n_dropped"] == 500
+    assert "ยังไม่ประเมิน" in c.detail_th and "500" in c.detail_th
+    c = aud.calibration(np.concatenate([(np.arange(200) + 0.5) / 200, [NAN, INF]]))
+    assert c.value["n"] == 200 and c.value["n_dropped"] == 2
+    _json(c)
+
+
+@pytest.mark.parametrize("bad", ["n_cal", "n_detectors", "rows_per_symbol_day", "budget"])
+def test_calibration_resolution_non_finite_input_is_warn(aud, bad):
+    kw = {"n_cal": 999, "n_detectors": 5, "rows_per_symbol_day": 100.0, "budget": 5.0, bad: NAN}
+    v = _assert_unreadable(aud.calibration_resolution(**kw), bad)
+    assert v["n_cal" if bad != "n_cal" else "n_detectors"] is not None
+
+
+@pytest.mark.parametrize(("n_cal", "n_detectors"), [(-1, 5), (999, 0), (999, -2)])
+def test_calibration_resolution_invalid_counts_raise(aud, n_cal, n_detectors):
+    with pytest.raises(ValueError):
+        aud.calibration_resolution(n_cal, n_detectors, 100)
+
+
+def test_calibration_resolution_zero_rows_stays_ok_with_note(aud):
+    c = aud.calibration_resolution(999, 5, 0)
+    assert c.status == "ok" and "ข้อมูลไม่พอ" in c.detail_th
+
+
+def test_latency_inf_counts_and_nan_is_dropped(aud):
+    c = aud.latency([100.0] * 98 + [INF] * 2)  # p99 interpolates into the inf tail
+    assert c.status == "warn" and "inf" in c.detail_th
+    v = _json(c)["value"]
+    assert v["p99_ms"] is None and v["n_inf"] == 2 and v["p50_ms"] == pytest.approx(100.0)
+    c = aud.latency([100.0] * 999 + [INF])  # p99 stays among the finite samples
+    assert c.status == "ok" and c.value["p99_ms"] == pytest.approx(100.0)
+    c = aud.latency([100.0] * 10 + [NAN] * 50)
+    assert c.status == "ok" and c.value["n"] == 10
+    c = aud.latency([NAN, NAN])
+    assert c.status == "ok" and c.value["n"] == 0
+
+
+def test_trade_gaps_null_ids_are_warn(aud):
+    df = _trades([("AAABTC", 1), ("AAABTC", 2), ("AAABTC", 3)])
+    df = df.with_columns(pl.Series("trade_id", [1, None, 3], dtype=pl.Int64))
+    c = aud.trade_gaps(df)
+    assert c.status == "warn" and c.detail_th.startswith("อ่านค่าไม่ได้")
+    assert _json(c)["value"]["n_unreadable"] == 1
+
+
+@pytest.mark.parametrize("frac", [NAN, INF, -INF, None, "x"])
+def test_exclusion_non_finite_is_warn(aud, frac):
+    _assert_unreadable(aud.exclusion(frac), "frac")
+
+
+@pytest.mark.parametrize("bad", ["now_us", "max_age_days"])
+def test_staleness_non_finite_input_is_warn(aud, bad):
+    kw = {"now_us": NOW_US, "max_age_days": 30, bad: NAN}
+    _assert_unreadable(aud.staleness(_meta(NOW_US), **kw), bad)
+
+
+def test_staleness_future_created_at_is_warn(aud):
+    assert aud.staleness(_meta(NOW_US), NOW_US).status == "ok"  # age 0
+    c = aud.staleness(_meta(NOW_US + 1), NOW_US)
+    assert c.status == "warn" and "อนาคต" in c.detail_th and c.value["age_days"] < 0
+    c = aud.staleness(_meta("2026-11-05T00:00:00Z"), NOW_US)
+    assert c.status == "warn" and "อนาคต" in c.detail_th
+
+
+@pytest.mark.parametrize(
+    ("valid", "minimum", "bad"), [(NAN, 360, "valid_samples"), (10, INF, "min_samples")]
+)
+def test_warmup_non_finite_input_is_warn(aud, valid, minimum, bad):
+    _assert_unreadable(aud.warmup(valid, minimum), bad)
+
+
+def test_report_with_unreadable_input_is_not_ok(aud):
+    r = aud.report(ts_us=1, exclusion={"frac": NAN}, latency={"samples_ms": [1.0]})
+    assert r.overall == "warn"

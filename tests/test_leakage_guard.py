@@ -101,3 +101,72 @@ def test_violations_are_sorted_and_name_each_file(tmp_path):
     assert found == sorted(found) and len(found) == 2
     assert found[0].startswith("idsai/ai/a.py:1: ") and "LABELS" in found[0]
     assert found[1] == "idsai/detection/b.py:1: imports idsai.eval"
+
+
+@pytest.mark.parametrize(
+    ("source", "lineno", "reason"),
+    [
+        (
+            "import importlib\nm = importlib.import_module(name='idsai.eval.labels')\n",
+            2,
+            "imports idsai.eval.labels via import_module",
+        ),
+        (
+            "import importlib\nm = importlib.import_module('.eval', 'idsai')\n",
+            2,
+            "imports idsai.eval via import_module",
+        ),
+        (
+            "import importlib\nm = importlib.import_module('.metrics', package='idsai.eval')\n",
+            2,
+            "imports idsai.eval.metrics via import_module",
+        ),
+        (  # non-constant package: resolved against the module's own package (idsai.ai)
+            "import importlib\nm = importlib.import_module('..eval', __package__)\n",
+            2,
+            "imports idsai.eval via import_module",
+        ),
+        ("m = __import__(name='idsai.eval')\n", 1, "imports idsai.eval via __import__"),
+        ("import idsai.contracts.frames as f\nx = getattr(f, 'LABELS')\n", 2, "via getattr"),
+        ("import idsai\n\nx = idsai.eval.metrics.paired_bootstrap\n", 3, "attribute access"),
+        ("import idsai.ai.chief\nx = idsai.eval.labels\n", 2, "attribute access"),
+        ("import idsai as pkg\nx = pkg.eval.labels\n", 2, "attribute access"),
+    ],
+)
+def test_dynamic_and_attribute_access_is_caught(tmp_path, source, lineno, reason):
+    found = leakage_violations(_plant(tmp_path, "ai/bad.py", source))
+    assert any(v.startswith(f"idsai/ai/bad.py:{lineno}: ") and reason in v for v in found), found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib\nm = importlib.import_module('.chief', 'idsai.ai')\n",
+        "x = getattr(obj, 'TRADES')\n",
+        "import numpy as np\ny = np.eval\n",  # `.eval` on something that is not the package
+        "model.eval()\n",
+    ],
+)
+def test_new_catches_do_not_flag_clean_code(tmp_path, source):
+    assert leakage_violations(_plant(tmp_path, "ai/ok.py", source)) == []
+
+
+def test_non_utf8_module_is_reported_not_crashing(tmp_path):
+    p = tmp_path / "idsai" / "ai" / "latin.py"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"x = '\xe9t\xe9'\n")
+    found = leakage_violations(tmp_path / "idsai")
+    assert len(found) == 1 and found[0].startswith("idsai/ai/latin.py:0: cannot decode")
+
+
+def test_utf8_bom_module_is_parsed(tmp_path):
+    p = tmp_path / "idsai" / "ai" / "bom.py"
+    p.parent.mkdir(parents=True)
+    p.write_bytes("﻿import idsai.eval\n".encode())
+    assert leakage_violations(tmp_path / "idsai") == ["idsai/ai/bom.py:1: imports idsai.eval"]
+
+
+@pytest.mark.parametrize("rel", ["detection/simulator.py", "detection/simulator_x/mod.py"])
+def test_simulator_lookalikes_are_scanned(tmp_path, rel):
+    found = leakage_violations(_plant(tmp_path, rel, "import idsai.eval\n"))
+    assert found == [f"idsai/{rel}:1: imports idsai.eval"]
