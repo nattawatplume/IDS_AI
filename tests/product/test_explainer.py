@@ -79,19 +79,6 @@ def test_sub_technique_and_unknown_technique():
     assert "(MM-T999 ความผิดปกติที่ยังไม่จัดประเภท)" in unk
 
 
-def test_top3_by_contribution_stable():
-    ev = [
-        ("ret_60", 0.01, 1.0),
-        ("buy_imb_60", 0.5, 1.0),
-        ("z_rush_60", 3.0, 1.0),
-        ("z_n_trades_60", 9.0, 0.1),
-    ]
-    e = explain(make_alert(evidence=ev))
-    assert len(e.facts) == 3
-    assert "9.0" not in e.text_th
-    assert e.facts[0][0].startswith(REGISTRY["ret"].desc_th)
-
-
 def test_empty_evidence_no_numbers_fabricated():
     a = make_alert(evidence=[])
     e = explain(a)
@@ -160,34 +147,6 @@ def test_validator_rejects_altered_number():
     assert not validate_numbers(t + " เพิ่มอีก 42", allowed_numbers(a))
 
 
-def test_displayed_rounding_value_in_allowed():
-    a = make_alert(evidence=[("buy_imb_60", 0.14, 1.0)], fused_p=0.0004)
-    assert 0.14 in allowed_numbers(a)
-    assert validate_numbers(explain(a).text_th, allowed_numbers(a))
-
-
-@pytest.mark.parametrize(
-    "text,expected",
-    [
-        ("พบ 3 รายการ", [3.0]),
-        ("p ≈ 4.0e-04", [4.0e-4]),
-        ("p 1E+3", [1000.0]),
-        ("ผลตอบแทน -4.20%", [-4.2]),
-        ("ราคา 4.20%", [4.2]),
-        ("ค่า 1,234.5", [1234.5]),
-        ("เวลา 14:00:12", [14.0, 0.0, 12.0]),
-        ("เลข ๑๒.๕", [12.5]),
-        ("MM-T001 MM-T001.002 1000PEPEUSDT z_60s", []),
-        ("x-5 และ 7-8", [5.0, 7.0, 8.0]),
-        ("ไม่มีตัวเลข", []),
-    ],
-)
-def test_numbers_in(text, expected):
-    got = numbers_in(text)
-    assert len(got) == len(expected)
-    assert all(math.isclose(g, e, rel_tol=1e-12) for g, e in zip(got, expected, strict=True))
-
-
 def test_validate_numbers_semantics():
     assert validate_numbers("ไม่มีตัวเลข", [])
     assert validate_numbers("ค่า 7.1", [7.12])  # within 1%
@@ -218,3 +177,207 @@ def test_no_banned_words_everywhere():
 def test_banned_list_and_no_probability_wording():
     assert BANNED_TH == ["โกง", "มิจฉาชีพ", "ผู้ปั่น", "คนร้าย", "ฉ้อโกง"]
     assert "ความน่าจะเป็น" not in explain(make_alert()).text_th
+
+
+def test_full_text_equality():
+    e = explain(make_alert())
+    assert e.text_th == (
+        "พบความผิดปกติทางสถิติ (MM-T001 " + load_taxonomy()["MM-T001"]["name_th"] + ") "
+        "ที่ XYZBTC เวลา 14:00:12 UTC: "
+        + REGISTRY["quote_vol"].desc_th
+        + " (ช่วง 60 วินาที) robust z = 7.1, "
+        + REGISTRY["ret"].desc_th
+        + " (ช่วง 60 วินาที) 4.20%, "
+        + REGISTRY["n_trades"].desc_th
+        + " (ช่วง 60 วินาที) 120; "
+        "3 จาก 3 ชั้นตรวจจับเห็นพ้อง; ความหายากเทียบตลาดปกติ p ≈ 4.0e-04"
+    )
+    assert e.facts[0] == (REGISTRY["quote_vol"].desc_th + " (ช่วง 60 วินาที)", "robust z = 7.1")
+
+
+def test_top3_selection_and_order_unsorted_and_negative():
+    ev = [
+        ("z_rush_60", 1.0, -1.0),
+        ("ret_60", 0.01, 5.0),
+        ("buy_imb_60", 0.5, -0.5),
+        ("z_n_trades_60", 9.0, 2.0),
+    ]
+    e = explain(make_alert(evidence=ev))
+    assert [v for _, v in e.facts] == ["1.00%", "robust z = 9.0", "0.50"]
+    assert "robust z = 1.0" not in e.text_th
+
+
+def test_top3_ties_keep_input_order():
+    ev = [
+        ("z_rush_60", 1.0, 1.0),
+        ("z_jump_60", 2.0, 1.0),
+        ("z_ret_60", 3.0, 1.0),
+        ("z_pingpong_60", 4.0, 1.0),
+    ]
+    assert [v for _, v in explain(make_alert(evidence=ev)).facts] == [
+        "robust z = 1.0",
+        "robust z = 2.0",
+        "robust z = 3.0",
+    ]
+
+
+def test_nan_contribution_ranks_last():
+    ev = [
+        ("z_rush_60", 1.0, float("nan")),
+        ("z_jump_60", 2.0, -9.0),
+        ("z_ret_60", 3.0, 0.0),
+        ("z_pingpong_60", 4.0, 1.0),
+    ]
+    assert [v for _, v in explain(make_alert(evidence=ev)).facts] == [
+        "robust z = 4.0",
+        "robust z = 3.0",
+        "robust z = 2.0",
+    ]
+
+
+def test_rounded_display_value_is_allowed():
+    a = make_alert(evidence=[("z_quote_vol_60", 0.14, 1.0)])
+    assert "robust z = 0.1" in explain(a).text_th
+    assert validate_numbers("robust z = 0.1", allowed_numbers(a))
+    assert not validate_numbers("robust z = 0.2", allowed_numbers(a))
+
+
+def test_displayed_fused_p_is_allowed():
+    a = make_alert(fused_p=3.66e-5)
+    assert "p ≈ 3.7e-05" in explain(a).text_th
+    assert 3.7e-5 in allowed_numbers(a)
+    assert validate_numbers(explain(a).text_th, allowed_numbers(a))
+
+
+@pytest.mark.parametrize(
+    "ev,shown",
+    [
+        (("buy_imb_60", 0.14159, 1.0), "0.14"),  # ratio, 2 decimals
+        (("quote_vol_60", 1234.56, 1.0), "1234.6"),  # quote, 1 decimal
+        (("n_trades_60", 119.6, 1.0), "120"),  # trades, 0 decimals
+        (("jump_300", 0.0123456, 1.0), "1.23%"),  # relative -> percent
+        (("ret_60", -0.0421, 1.0), "-4.21%"),
+        (("cusum_ret", 5.678, 1.0), "5.68"),  # sigma
+    ],
+)
+def test_value_formats(ev, shown):
+    e = explain(make_alert(evidence=[ev]))
+    assert e.facts[0][1] == shown
+
+
+def test_window_label_exact():
+    e = explain(make_alert(evidence=[("rush_300", 4.0, 1.0)]))
+    assert e.facts[0][0] == REGISTRY["rush"].desc_th + " (ช่วง 300 วินาที)"
+    e2 = explain(make_alert(evidence=[("cusum_ret", 4.0, 1.0)]))
+    assert e2.facts[0][0] == REGISTRY["cusum_ret"].desc_th  # state feature: no window
+
+
+def test_no_negative_zero():
+    a = make_alert(
+        evidence=[
+            ("ret_60", -0.000001, 3.0),
+            ("z_rush_60", -0.04, 2.0),
+            ("buy_imb_60", -0.001, 1.0),
+        ]
+    )
+    e = explain(a)
+    assert [v for _, v in e.facts] == ["0.00%", "robust z = 0.0", "0.00"]
+    assert "-0.0" not in e.text_th and "-0 " not in e.text_th
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("พบ 3 รายการ", [3.0]),
+        ("3 จาก 3 ชั้น", [3.0, 3.0]),
+        ("p ≈ 4.0e-04", [4.0e-4]),
+        ("p 1E+3", [1000.0]),
+        ("p9e-9", [9e-9]),
+        ("ผลตอบแทน -4.20%", [-4.2]),
+        ("ราคา 4.20%", [4.2]),
+        ("ค่า 1,234.5", [1234.5]),
+        ("1,234USDT", [1234.0]),
+        ("เวลา 14:00:12", [14.0, 0.0, 12.0]),
+        ("เลข ๑๒.๕", [12.5]),
+        ("MM-T001 MM-T001.002 (MM-T000)", []),
+        ("MM-T001 7", [7.0]),
+        ("1000PEPEUSDT", [1000.0]),
+        ("5000USDT", [5000.0]),
+        ("robustz9.9", [9.9]),
+        ("z9.9", [9.9]),
+        ("4.2USDT", [4.2]),
+        ("10.5BTC", [10.5]),
+        ("z_60s", [60.0]),
+        (".5", [0.5]),
+        ("-.5", [-0.5]),
+        ("0.5.1", [0.5, 0.1]),
+        ("1_000", [1.0, 0.0]),
+        ("0x10", [0.0, 10.0]),
+        ("12,3456", [12.0, 3456.0]),
+        ("x-5 และ 7-8", [5.0, 7.0, 8.0]),
+        ("a -5", [-5.0]),
+        ("(-5)", [-5.0]),
+        ("+5", [5.0]),
+        ("−5", [-5.0]),
+        ("–5", [-5.0]),
+        ("—5", [-5.0]),
+        ("－5", [-5.0]),
+        ("﹣5", [-5.0]),
+        ("x−5", [5.0]),
+        ("ไม่มีตัวเลข", []),
+    ],
+)
+def test_numbers_in(text, expected):
+    got = numbers_in(text)
+    assert len(got) == len(expected), got
+    assert all(
+        math.isclose(g, e, rel_tol=1e-12, abs_tol=0) for g, e in zip(got, expected, strict=True)
+    )
+
+
+def test_numbers_in_overflow_underflow_are_nan():
+    for t in ("1e999", "1e-999", "-1e999", "0.5e-9999"):
+        got = numbers_in(t)
+        assert len(got) == 1 and math.isnan(got[0]), t
+    assert numbers_in("0e-999") == [0.0]
+    assert numbers_in("0") == [0.0]
+
+
+def test_validate_rejects_nonfinite_numbers_in_text():
+    allowed = [0.0, 1.0, 1e300]
+    for t in ("1e999", "1e-999", "ค่า 0 และ 1e-999"):
+        assert not validate_numbers(t, allowed)
+    assert validate_numbers("ค่า 0", allowed)
+
+
+def test_falsification_percent_and_sign():
+    a = make_alert(evidence=[("ret_60", 0.042, 1.0)])
+    assert "4.20%" in explain(a).text_th
+    assert validate_numbers("4.20%", allowed_numbers(a))
+    assert not validate_numbers("0.042%", allowed_numbers(a))
+    assert not validate_numbers("–4.2", allowed_numbers(a))
+    assert not validate_numbers("-4.2", allowed_numbers(a))
+    assert validate_numbers("4.2", allowed_numbers(a))
+
+
+def test_glued_numbers_cannot_hide():
+    a = make_alert()
+    assert not validate_numbers("9.9USDT", allowed_numbers(a))
+    assert not validate_numbers("robustz9.9", allowed_numbers(a))
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"symbol": "1000PEPEUSDT"},
+        {"symbol": "1000X"},
+        {"symbol": "BTC-5"},
+        {"evidence": [("foo_60", 2.5, 1.0)]},
+        {"evidence": [("ae_2", -3.0, 1.0), ("x9", 1.0, 0.5)]},
+        {"technique_id": "MM-T999"},
+        {"evidence": [("ret_60", -0.000001, 1.0), ("z_rush_60", -0.04, 0.5)]},
+    ],
+)
+def test_explain_text_always_validates(kw):
+    a = make_alert(**kw)
+    assert validate_numbers(explain(a).text_th, allowed_numbers(a))

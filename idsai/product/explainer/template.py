@@ -46,36 +46,40 @@ class Explanation:
 # ---------------------------------------------------------------- number parsing / validation
 
 _THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
+_DASHES = {c: "-" for c in [*range(0x2010, 0x2016), 0x2212, 0xFE63, 0xFF0D]}
+_TECH_ID_RE = re.compile(r"MM-T\d+(?:\.\d+)?")
 _NUM_RE = re.compile(
-    r"(?<![A-Za-z0-9_.])"
-    r"(?P<sign>[-\u2212+]?)"
-    r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"(?:(?<![A-Za-z0-9])(?P<sign>[-+]))?"
+    r"(?P<num>(?:\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.\d+)?|\.\d+)"
     r"(?:[eE](?P<exp>[-+]?\d+))?"
-    r"(?!\d|[A-Z]{2,})"
 )
 
 
 def numbers_in(text: str) -> list[float]:
-    """Numbers appearing in `text`: ints, decimals, sci-notation, signs, thousands separators,
-    percents (value only) and Thai digits. Digits inside identifiers (MM-T001, 1000PEPEUSDT,
-    z_60s) are not numbers; a hyphen right after a letter or digit is not a sign."""
+    """Every number in `text`, strictly: ints, decimals (`.5` too), sci-notation, signs,
+    thousands separators, percents (value only) and Thai digits. The only exemption is a
+    technique id (`MM-T001`, `MM-T001.002`); digits glued to letters (`1000PEPEUSDT`, `z9.9`)
+    count, and malformed runs (`0.5.1`, `1_000`) yield every digit run. Unicode dashes are a
+    minus; a dash right after a letter or digit is a separator, not a sign. A value that
+    overflows, or underflows to zero from a nonzero mantissa, is nan."""
+    text = _TECH_ID_RE.sub(" ", text.translate(_THAI_DIGITS).translate(_DASHES))
     out = []
-    for m in _NUM_RE.finditer(text.translate(_THAI_DIGITS)):
-        x = float(m["num"].replace(",", ""))
-        if m["exp"] is not None:
-            x *= 10.0 ** int(m["exp"])
-        if m["sign"] in ("-", "\u2212"):
-            x = -x
-        out.append(x)
+    for m in _NUM_RE.finditer(text):
+        num = m["num"].replace(",", "")
+        x = float(f"{num}e{m['exp']}" if m["exp"] is not None else num)
+        if math.isinf(x) or (x == 0.0 and any(c in "123456789" for c in num)):
+            x = math.nan
+        out.append(-x if m["sign"] == "-" else x)
     return out
 
 
 def validate_numbers(text: str, allowed: Iterable[float], rel_tol: float = 0.01) -> bool:
-    """True when every number in `text` matches some finite allowed value within `rel_tol`
-    (relative only: 0 matches only 0; sign matters)."""
+    """True when every number in `text` is finite and matches some finite allowed value within
+    `rel_tol` (relative only: 0 matches only 0; sign matters)."""
     ok = [a for a in allowed if math.isfinite(a)]
     return all(
-        any(math.isclose(x, a, rel_tol=rel_tol, abs_tol=0.0) for a in ok) for x in numbers_in(text)
+        math.isfinite(x) and any(math.isclose(x, a, rel_tol=rel_tol, abs_tol=0.0) for a in ok)
+        for x in numbers_in(text)
     )
 
 
@@ -93,12 +97,17 @@ def _names() -> dict[str, str]:
     return names
 
 
+def _no_neg_zero(s: str) -> str:
+    """Drop the sign of a formatted value that rounds to zero ("-0.00" -> "0.00")."""
+    return s.replace("-", "") if float(s.rstrip("%")) == 0.0 else s
+
+
 def _fmt(value: float, unit: str) -> tuple[str, list[float]]:
     """Formatted value and the numbers it can legitimately show (displayed and raw)."""
     if unit in _PERCENT_UNITS:
-        s = f"{value * 100:.2f}%"
-        return s, [float(f"{value * 100:.2f}"), value * 100, value]
-    s = _UNIT_FORMATS.get(unit, "{:.3g}").format(value)
+        s = _no_neg_zero(f"{value * 100:.2f}%")
+        return s, [float(s.rstrip("%")), value * 100]
+    s = _no_neg_zero(_UNIT_FORMATS.get(unit, "{:.3g}").format(value))
     return s, [float(s), value]
 
 
@@ -109,7 +118,7 @@ def _fact(name: str, value: float) -> tuple[str, str, list[float]]:
     try:
         spec = spec_for(name)
     except KeyError:
-        s = f"{value:.3g}"
+        s = _no_neg_zero(f"{value:.3g}")
         return _label_generic(name), s, [float(s), value]
     label = spec.desc_th
     allowed = numbers_in(spec.desc_th)
@@ -118,7 +127,7 @@ def _fact(name: str, value: float) -> tuple[str, str, list[float]]:
         label += f" (ช่วง {m[1]} วินาที)"
         allowed.append(float(m[1]))
     if name.startswith("z_"):
-        s = f"{value:.1f}"
+        s = _no_neg_zero(f"{value:.1f}")
         return label, f"robust z = {s}", [*allowed, float(s), value]
     s, nums = _fmt(value, spec.unit)
     return label, s, [*allowed, *nums]
@@ -157,6 +166,8 @@ def _render(alert) -> tuple[str, list[tuple[str, str]], list[float]]:
         float(alert.agreement), 3.0,
         float(p_shown), alert.fused_p,
         *numbers_in(technique_name),
+        *numbers_in(alert.symbol),
+        *numbers_in(alert.technique_id),
     ]  # fmt: skip
     return text, facts, allowed
 
