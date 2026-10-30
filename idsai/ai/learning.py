@@ -11,6 +11,7 @@ import os
 import pickle
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from idsai.eval.metrics import paired_bootstrap, significant
 
 REQUIRED_META = ("data_hash", "config_hash", "seed", "created_at", "train_range")
 MAX_SAVE_ATTEMPTS = 100
+RENAME_RETRY_S = 0.05
 _VERSION_RE = re.compile(r"^v([1-9]\d*)$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -120,6 +122,11 @@ class ModelRegistry:
                     os.rename(tmp, d / version)
                     return version
                 except FileExistsError:  # a concurrent save took this number: retry
+                    continue
+                except PermissionError:
+                    # Windows: an antivirus/indexer briefly holds the new files; wait and retry
+                    if not (d / version).exists():
+                        time.sleep(RENAME_RETRY_S)
                     continue
                 except OSError:
                     if (d / version).exists():
