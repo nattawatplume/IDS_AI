@@ -24,6 +24,10 @@ zero activity and widen its scale, hiding real anomalies. So bars and kernels re
 and only the `Baseline` goes on: no rows until the new kernel has its `max(W)` bars (no measurement,
 no alert; CUSUM and the Kamps-Kleinberg history start over too). Open episodes stay open.
 
+A gap with `to_us < from_us` says the source's clock was ahead (a rogue first trade set it). What
+was measured since the new origin has wrong times: samples and series points are dropped, episodes
+are closed, and publishing starts from the new origin, since rows must go on in time order.
+
 Every default detector is row-independent (no state between `score` calls), so skipping them in
 the pre-roll cannot change a later score; CUSUM state lives in the feature kernel.
 
@@ -198,7 +202,8 @@ class StreamPipeline:
                     await asyncio.sleep(0)
 
     async def _on_gap(self, span: tuple[int, int]) -> None:
-        if self._grace_s and self._last_tick_us is not None:
+        backward = span[1] < span[0]
+        if self._grace_s and self._last_tick_us is not None and not backward:
             await self._on_tick(self._last_tick_us + self._grace_s * S_US)  # bars still in grace
         baselines = {s: w.kernel.baseline for s, w in self._windows.items()}
         self._late_before_gaps = self.late_trades()
@@ -209,6 +214,19 @@ class StreamPipeline:
         self._latest_us = span[1]
         for symbol, baseline in baselines.items():
             self._builder(symbol, baseline)
+        if backward:
+            self._undo_from(self._origin_us)
+
+    def _undo_from(self, t_us: int) -> None:
+        for w in self._windows.values():
+            w.kernel.baseline.drop_from(t_us)
+        for ring in self._ring.values():
+            while ring and ring[-1]["t_end_us"] >= t_us:
+                ring.pop()
+        self._emit(self._stream.flush())
+        self._stream = ChiefStream(self.chief, self.mode)
+        if self._publish_from_us is not None:
+            self._publish_from_us = min(self._publish_from_us, t_us)
 
     def _on_seek(self, target_us: int) -> None:
         if self.mode == "live":

@@ -23,10 +23,16 @@ counts): `("gap", (last tick, now))` first, and ticks resume from there.
 
 A slow consumer is no outage. Time blocked on the full queue does not count toward a gap, and the
 trades that piled up in the socket meanwhile are older than the clock, so until the reader has
-caught up, ticks follow the trades it has read instead of the clock and no trade turns late.
+caught up, ticks follow the trades it has read instead of the clock and no trade turns late. The
+same goes for an event loop that stood still (the reader looked at the clock over 1 s ago).
+
+A start that was wrong: a lone rogue first trade sets ticks ahead of the true time. When the offset
+falls more than 60 s below the last tick, `("gap", (last tick, now))` runs backward and ticks
+restart at `now`. It is the only way tick values ever go down; below 60 s, ticks wait for the clock.
 """
 
 import asyncio
+import bisect
 import json
 import math
 import time
@@ -55,6 +61,7 @@ EVENT_TRADE_MAX_US = 60 * S_US  # |E - T| above this: a trade time nobody can be
 DEDUP_SIZE = 10_000
 SKEW_SAMPLES = 1000
 QUEUE_SIZE = 10_000
+STALL_US = S_US  # longer between two looks at the clock: the socket may hold a backlog
 MAX_POLL_S = 0.25  # longest wait for a message before the clock is looked at again
 MIN_POLL_S = 0.01
 CLOSE_TIMEOUT_S = 2
@@ -164,6 +171,26 @@ def _check_symbols(symbols: list[str]) -> list[str]:
     return list(dict.fromkeys(s.upper() for s in symbols))
 
 
+class SkewWindow:
+    """The `rank`-th largest of the last `size` values, kept sorted as they come and go."""
+
+    def __init__(self, size: int, rank: int):
+        self.rank = rank
+        self._recent: deque[int] = deque(maxlen=size)
+        self._sorted: list[int] = []
+
+    def __len__(self) -> int:
+        return len(self._sorted)
+
+    def add(self, x: int) -> int:
+        """Add `x`; returns `sorted(window)[-min(rank, len(window))]`."""
+        if len(self._recent) == self._recent.maxlen:
+            del self._sorted[bisect.bisect_left(self._sorted, self._recent[0])]
+        self._recent.append(x)
+        bisect.insort(self._sorted, x)
+        return self._sorted[-min(self.rank, len(self._sorted))]
+
+
 class _NoRedirectConnect(connect):
     """A redirect could lead away from the allowed hosts: it is a failed handshake instead."""
 
@@ -219,7 +246,7 @@ class LiveTradeSensor:
         self._closed = False
         self._seen: set[tuple[str, int]] = set()
         self._seen_order: deque[tuple[str, int]] = deque()
-        self._skews: deque[int] = deque(maxlen=SKEW_SAMPLES)
+        self._skews = SkewWindow(SKEW_SAMPLES, SKEW_RANK)
         self._offset_us = 0
         self._next_tick: int | None = None  # None until the start
         self._held: list[Trade] = []  # trades before the start
@@ -329,16 +356,21 @@ class LiveTradeSensor:
         rotate_us = self.rotate_s * S_US
         self._blocked_us = 0  # a lost connection is an outage, whatever else was going on
         self._catching_up = False
+        looked = connected
         while True:
             now = self._now()
             if now - connected >= rotate_us:
                 return True
+            if now - looked > STALL_US:
+                self._catching_up = True
+            looked = now
             wait = await self._advance(now, connected)
             try:
                 async with asyncio.timeout(wait):
                     raw = await ws.recv()
             except TimeoutError:
                 self._catching_up = False  # nothing was waiting in the socket
+                looked = self._now()  # and this wait was no stall
                 continue
             self._delay_s = BACKOFF_FIRST_S
             await self._on_message(raw)
@@ -361,11 +393,14 @@ class LiveTradeSensor:
         self._seen_order.append(key)
         if len(self._seen_order) > DEDUP_SIZE:
             self._seen.discard(self._seen_order.popleft())
-        if not self._catching_up:  # a trade from the backlog says how far behind we are, not skew
-            self._skews.append(trade.ts_us - now)
-            self._offset_us = sorted(self._skews)[-min(SKEW_RANK, len(self._skews))]
-        if trade.ts_us <= now + self._offset_us:
-            self._latest_ts = max(self._latest_ts, trade.ts_us)
+        # a trade from the backlog says how far behind we are, not skew; but a window this short may
+        # hold nothing except a rogue, and only a later trade can correct it
+        if not self._catching_up or len(self._skews) < SKEW_RANK:
+            self._offset_us = self._skews.add(trade.ts_us - now)
+        if self._next_tick is not None:
+            await self._restart_if_ahead(now + self._offset_us)  # before this trade: it is on time
+            if trade.ts_us <= now + self._offset_us:
+                self._latest_ts = max(self._latest_ts, trade.ts_us)
         if self._next_tick is None:
             if not self._held:
                 self._held_since = now
@@ -379,7 +414,8 @@ class LiveTradeSensor:
             return
         if len(self._held) < 2 and now - self._held_since < self._start_hold_us:
             return
-        await self._start(min(t.ts_us for t in self._held))
+        self._latest_ts = min(t.ts_us for t in self._held)
+        await self._start(self._latest_ts)
         held, self._held = sorted(self._held, key=lambda t: t.ts_us), []
         for trade in held:
             await self._put(("trade", trade))
@@ -388,6 +424,14 @@ class LiveTradeSensor:
         second = t_us // S_US * S_US
         self._next_tick = second + S_US
         await self._put(("preroll_done", second))
+
+    async def _restart_if_ahead(self, t: int) -> None:
+        last_tick = self._next_tick - S_US
+        if last_tick - t > GAP_RESTART_S * S_US:
+            self.gaps += 1
+            self._latest_ts = t
+            await self._put(("gap", (last_tick, t)))
+            self._next_tick = t // S_US * S_US + S_US
 
     async def _advance(self, now: int, connected: int) -> float:
         """Emit what the clock has reached; returns how long to wait for a message, in seconds."""
@@ -398,6 +442,7 @@ class LiveTradeSensor:
             if self._held or now - connected < SILENT_START_S * S_US:
                 return MAX_POLL_S
             await self._start(t)
+        await self._restart_if_ahead(t)
         if self._catching_up:
             if self._latest_ts >= t - S_US:
                 self._catching_up = False
@@ -414,7 +459,9 @@ class LiveTradeSensor:
         while self._next_tick <= t:
             tick, self._next_tick = self._next_tick, self._next_tick + S_US
             await self._put(("tick", tick))
-        if moved:  # blocked time up to `t` is spent; what these puts blocked is behind the next `t`
+        # blocked time up to `t` is spent, once `t` is the clock again; what these puts blocked is
+        # behind the next `t`
+        if moved and not self._catching_up:
             self._blocked_us -= forgiven
         if self._catching_up:  # a short wait says nothing about the socket being drained
             return MAX_POLL_S

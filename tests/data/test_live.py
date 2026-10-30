@@ -1236,10 +1236,12 @@ class SimExchange:
     """Stands in for the connection: 100 trades/s, `recv` gives what the clock has reached. Time
     passes whether or not anyone reads, which a socket cannot show without real waiting."""
 
-    def __init__(self, clock: Clock):
+    def __init__(self, clock: Clock, rogue: dict[int, int] | None = None, last: int | None = None):
         self.clock = clock
         self.t0 = clock.exchange
         self.sent = 0
+        self.rogue = rogue or {}  # trade number -> seconds its `T` is ahead
+        self.last = last  # no trades after this many: silence
 
     async def __aenter__(self):
         return self
@@ -1249,19 +1251,23 @@ class SimExchange:
 
     @property
     def backlog(self) -> bool:
+        if self.last is not None and self.sent >= self.last:
+            return False
         return self.t0 + self.sent * 10_000 <= self.clock.exchange
 
     async def recv(self) -> str:
         while not self.backlog:
             await asyncio.sleep(0)
         self.sent += 1
-        return tmsg(self.sent, self.t0 + (self.sent - 1) * 10_000)
+        t = self.t0 + (self.sent - 1) * 10_000 + self.rogue.get(self.sent, 0) * S
+        return tmsg(self.sent, t)
 
 
-@pytest.mark.parametrize("blocked_s, queue_size", [(170, 10_000), (90, 1000)])
-def test_a_blocked_consumer_causes_no_gap_and_no_late_trade(monkeypatch, blocked_s, queue_size):
+def sim_run(monkeypatch, blocked_s=0, stall_s=0, queue_size=1000, hold=0, rogue=None, last=None):
+    """5 s of normal reading; the consumer then does nothing for `blocked_s`, or the whole event
+    loop stands still for `stall_s` (one jump of the clock); the backlog drains; 5 s more."""
     clock = Clock()
-    sim = SimExchange(clock)
+    sim = SimExchange(clock, rogue, last)
     monkeypatch.setattr(live, "_NoRedirectConnect", lambda url, **kw: sim)
 
     async def main():
@@ -1269,7 +1275,10 @@ def test_a_blocked_consumer_causes_no_gap_and_no_late_trade(monkeypatch, blocked
         builder = BarBuilder(SYM, grace_s=2)
         got: list[int] = []
         ticks: list[int] = []
-        sensor = sensor_for("ws://127.0.0.1:1/s", clock=clock, queue_size=queue_size)
+        skews: list[float] = []
+        sensor = sensor_for(
+            "ws://127.0.0.1:1/s", clock=clock, queue_size=queue_size, start_hold_s=hold
+        )
 
         async def exchange_time():
             while True:
@@ -1278,6 +1287,7 @@ def test_a_blocked_consumer_causes_no_gap_and_no_late_trade(monkeypatch, blocked
                 await asyncio.sleep(0)
 
         def feed(ev):
+            skews.append(sensor.clock_skew_ms)
             if ev[0] == "trade":
                 builder.on_trade(ev[1])
                 got.append(ev[1].trade_id)
@@ -1294,22 +1304,69 @@ def test_a_blocked_consumer_causes_no_gap_and_no_late_trade(monkeypatch, blocked
         until = clock.exchange + blocked_s * S
         while clock.exchange < until:  # the consumer does nothing at all
             await asyncio.sleep(0)
-        assert sensor._queue.full()  # the reader really was blocked, for most of that time
+        if blocked_s:
+            assert sensor._queue.full()  # the reader really was blocked, for most of that time
         frozen = True  # time stands still while the backlog drains, so it does drain
+        clock.exchange += stall_s * S
         while sim.backlog or not sensor._queue.empty():
             feed(await anext(sensor))
-        frozen = False
-        await consume_until(clock.exchange + 5 * S)
+        if last is None:
+            frozen = False
+            await consume_until(clock.exchange + 5 * S)
+        else:  # silence: only the ticks are left, and fake time must not race ahead of real polls
+            clock.exchange += 5 * S
+            while not ticks or ticks[-1] < clock.exchange // S * S:
+                feed(await anext(sensor))
         passing.cancel()
         await sensor.aclose()
-        return builder, got, ticks, sensor
+        return builder, got, ticks, skews, sensor
 
-    builder, got, ticks, sensor = run(main())
+    return run(main())
+
+
+@pytest.mark.parametrize("blocked_s, queue_size", [(170, 10_000), (90, 1000)])
+def test_a_blocked_consumer_causes_no_gap_and_no_late_trade(monkeypatch, blocked_s, queue_size):
+    builder, got, ticks, skews, sensor = sim_run(
+        monkeypatch, blocked_s=blocked_s, queue_size=queue_size
+    )
     assert sensor.gaps == 0 and builder.late == 0
     assert got == list(range(1, len(got) + 1))
     assert len(got) > (blocked_s + 5) * 100
     assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
     assert sensor.clock_skew_ms == pytest.approx(0, abs=1000)
+
+
+def test_backlog_trades_are_not_skew_samples(monkeypatch):
+    """Sampled, the backlog would drag the offset down to how far behind the reader is."""
+    *_, skews, sensor = sim_run(monkeypatch, blocked_s=90)
+    assert min(skews) > -1000 and sensor.gaps == 0
+
+
+def test_a_rogue_first_trade_does_not_disable_catch_up(monkeypatch):
+    builder, got, _, _, sensor = sim_run(monkeypatch, blocked_s=90, hold=5, rogue={1: DAY_S})
+    assert builder.late == 0 and sensor.gaps == 0
+    assert sorted(got) == list(range(1, len(got) + 1))
+
+
+def test_a_rogue_during_the_session_does_not_disable_catch_up(monkeypatch):
+    builder, _, _, _, sensor = sim_run(monkeypatch, blocked_s=90, rogue={300: 3600})
+    assert builder.late == 0 and sensor.gaps == 0
+
+
+def test_a_stalled_event_loop_makes_no_trade_late(monkeypatch):
+    """`time.sleep` in the consumer: nobody blocks on the queue, the trades wait in the socket."""
+    builder, got, ticks, _, sensor = sim_run(monkeypatch, stall_s=5)
+    assert builder.late == 0 and sensor.gaps == 0
+    assert got == list(range(1, len(got) + 1))
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
+
+
+def test_blocked_time_is_not_spent_before_the_backlog_is_gone(monkeypatch):
+    """A 100 s burst, then silence, then a long block: the silent part is blocked time too."""
+    builder, got, ticks, _, sensor = sim_run(monkeypatch, blocked_s=170, last=10_000)
+    assert sensor.gaps == 0 and builder.late == 0
+    assert len(got) == 10_000
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
 
 
 def test_a_blocked_consumer_in_a_quiet_market_causes_no_gap():
@@ -1340,6 +1397,198 @@ def test_a_blocked_consumer_in_a_quiet_market_causes_no_gap():
     ticks, sensor = run(main())
     assert sensor.gaps == 0
     assert ticks == list(range(T0 + S, T0 + 96 * S, S))
+
+
+@pytest.mark.parametrize("rogue_s", [3600, DAY_S])
+def test_a_lone_rogue_first_trade_recovers_with_a_gap(rogue_s):
+    """It is alone for the whole hold, so it does set the start: the next trade corrects it."""
+    clock = Clock()
+    n = 200
+    step = None
+
+    async def handler(ws):
+        step.ack.clear()
+        await ws.send(tmsg(0, T0 + rogue_s * S))
+        await asyncio.sleep(0.01)
+        clock.exchange += 6 * S  # the hold ends
+        await step.ack.wait()
+        for i in range(1, n + 1):
+            t = T0 + 6 * S + i * S // 10
+            await step.send(ws, tmsg(i, t), t)
+        await ws.wait_closed()
+
+    async def main():
+        nonlocal step
+        step = Lockstep(clock)
+        builder = None
+        late = 0
+        ticks, gaps = [], []
+        async with server(handler) as url:
+            sensor = sensor_for(url, clock=clock, start_hold_s=5)
+            async for kind, v in acked(sensor, step):
+                if kind == "preroll_done":
+                    builder = BarBuilder(SYM, 2, start_us=v)
+                elif kind == "gap":  # the only reset: a pipeline rebuilds here
+                    gaps.append(v)
+                    late += builder.late
+                    builder = BarBuilder(SYM, 2, start_us=v[1] // S * S)
+                    ticks.append([])
+                elif kind == "tick":
+                    if ticks and ticks[-1]:
+                        assert v > ticks[-1][-1]
+                    if not ticks:
+                        ticks.append([])
+                    ticks[-1].append(v)
+                    builder.on_tick(v)
+                else:
+                    builder.on_trade(v)
+                    if v.trade_id == n:
+                        break
+            await sensor.aclose()
+        return late + builder.late, ticks, gaps, sensor
+
+    late, ticks, gaps, sensor = run(main())
+    assert late == 0 and sensor.gaps == 1
+    frm, to = gaps[0]
+    assert frm > to and to == pytest.approx(T0 + 6 * S, abs=2 * S)
+    assert ticks[-1] and ticks[-1][-1] < T0 + 60 * S  # back on the true time
+
+
+@pytest.mark.parametrize("rogue_s", [3600, DAY_S])
+def test_a_lone_rogue_first_trade_end_to_end_in_a_pipeline(store, rogue_s):
+    chief = cheap_chief(CFG, "TESTBTC")
+    clock = Clock()
+    n_quiet, burst = 1820, 60
+    start = T0 + 6 * S
+    step = None
+
+    async def handler(ws):
+        step.ack.clear()
+        await ws.send(tmsg(10**6, T0 + rogue_s * S, "TESTBTC"))
+        await asyncio.sleep(0.01)
+        clock.exchange += 6 * S
+        await step.ack.wait()
+        i = 0
+        for k in range(n_quiet):
+            t = start + k * S + 1
+            i += 1
+            await step.send(ws, tmsg(i, t, "TESTBTC", q=str(7 + k % 5)), t)
+        for k in range(burst):
+            t = start + n_quiet * S + k * 100_000
+            i += 1
+            await step.send(ws, tmsg(i, t, "TESTBTC", q=str(7 + k % 5)), t)
+        for k in range(30):
+            t = start + (n_quiet + 10 + k) * S
+            i += 1
+            await step.send(ws, tmsg(i, t, "TESTBTC", q=str(7 + k % 5)), t)
+        await ws.wait_closed()
+
+    total = n_quiet + burst + 30
+
+    async def main():
+        nonlocal step
+        step = Lockstep(clock)
+        bus = Bus(maxsize=100_000)
+        pipe = StreamPipeline(CFG, store, chief.detectors, chief, bus, "live")
+        async with server(handler) as url:
+            sensor = sensor_for(url, clock=clock, symbols=["TESTBTC"], start_hold_s=5)
+
+            async def source():
+                seen = 0
+                async for ev in acked(sensor, step):
+                    yield ev
+                    if ev[0] == "trade":
+                        seen += 1
+                        if seen == total + 1:
+                            return
+
+            await pipe.run(source())
+            await sensor.aclose()
+        return pipe, sensor
+
+    pipe, sensor = asyncio.run(main())
+    assert sensor.gaps == 1 and pipe.late_trades() == 0
+    series = pipe.series("TESTBTC")
+    assert series and series[0]["t_end_us"] >= start + 1800 * S - 10 * S
+    assert series[-1]["t_end_us"] < start + (n_quiet + 60) * S  # true time, published
+    alerts = store.list_alerts()
+    assert [a for a in alerts if a.window[1] >= start + n_quiet * S]
+    assert all(a.window[1] < start + (n_quiet + 60) * S for a in alerts)
+
+
+def test_a_backward_gap_undoes_what_was_measured_at_the_wrong_time(store):
+    """A rogue start followed by a long lull: rows, samples and series a day ahead, then the
+    correction. Rows must not arrive out of order, and nothing of the wrong time may stay."""
+    chief = cheap_chief(CFG, "TESTBTC")
+    pipe = StreamPipeline(CFG, store, chief.detectors, chief, Bus(maxsize=100_000), "live")
+    wrong = T0 + DAY_S * S
+    sample = live_trades(wrong, 1)[1][1]
+
+    def second(t_us, trade_id):
+        tr = sample.model_copy(update={"ts_us": t_us + 1, "recv_us": t_us, "trade_id": trade_id})
+        return [("trade", tr), ("tick", t_us + S)]
+
+    async def source():
+        yield "preroll_done", wrong
+        for k in range(1900):
+            for ev in second(wrong + k * S, k):
+                yield ev
+        assert pipe.baseline_samples("TESTBTC") > 0 and pipe.series("TESTBTC")
+        yield "gap", (wrong + 1900 * S, T0)
+        assert pipe.baseline_samples("TESTBTC") == 0
+        assert pipe.series("TESTBTC") == []
+        for k in range(1900):
+            for ev in second(T0 + k * S, 10_000 + k):
+                yield ev
+
+    asyncio.run(pipe.run(source()))
+    series = pipe.series("TESTBTC")
+    assert series and series[-1]["t_end_us"] <= T0 + 1900 * S
+    assert pipe.baseline_samples("TESTBTC") > 0  # sampling went on from the true time
+
+
+def test_delivered_ticks_do_not_go_back_when_the_offset_falls():
+    """Enough rogues push the offset up; when they age out of the window it falls by under the
+    restart limit, so ticks wait for the clock instead of repeating values."""
+    clock = Clock()
+    n = 1100
+    step = None
+
+    async def handler(ws):
+        for i in range(n):
+            t = T0 + i * S // 100
+            await step.send(ws, tmsg(i, t + 30 * S if 10 <= i < 16 else t), t)
+        await ws.wait_closed()
+
+    async def main():
+        nonlocal step
+        step = Lockstep(clock)
+        ticks, offsets = [], []
+        async with server(handler) as url:
+            sensor = sensor_for(url, clock=clock)
+            async for kind, v in acked(sensor, step):
+                offsets.append(sensor.clock_skew_ms)
+                if kind == "tick":
+                    ticks.append(v)
+                elif kind == "trade" and v.trade_id == n - 1:
+                    break
+            await sensor.aclose()
+        return ticks, offsets, sensor
+
+    ticks, offsets, sensor = run(main())
+    assert max(offsets) > 25_000 and abs(offsets[-1]) < 1000  # up, and back down
+    assert sensor.gaps == 0
+    assert ticks == sorted(set(ticks))
+
+
+def test_the_skew_window_equals_the_sorted_form():
+    rng = np.random.default_rng(3)
+    for size, rank, n, spread in [(1000, 5, 5000, 10**6), (1000, 5, 3000, 7), (3, 5, 50, 5)]:
+        window = live.SkewWindow(size, rank)
+        recent: list[int] = []
+        for x in rng.integers(-spread, spread, n).tolist():
+            recent = [*recent, x][-size:]
+            assert window.add(x) == sorted(recent)[-min(rank, len(recent))]
 
 
 def test_warmup_filters_the_archive_to_the_sensor_symbols(archive):

@@ -279,6 +279,12 @@ class Baseline:
         lo = np.searchsorted(times, t_us - self.cfg.baseline_s * S_US, side="left")
         return int(np.searchsorted(times, t_us, side="left") - lo)
 
+    def drop_from(self, t_us: int) -> None:
+        """Forget the samples at or after `t_us`: their times turned out to be wrong."""
+        keep = int(np.searchsorted(self._t.view(), t_us, side="left"))
+        self._t.n = self._x.n = keep
+        self._start = min(self._start, keep)
+
     def add(self, t_us: int, xt: np.ndarray) -> None:
         """Store a transformed raw row sampled at `t_us` (NaNs kept)."""
         if self._t.n and t_us <= self._t.data[self._t.n - 1]:
