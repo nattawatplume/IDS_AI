@@ -12,6 +12,10 @@ from idsai.contracts.frames import TRADES
 from idsai.detection.features.bars import trades_to_bars
 from idsai.detection.features.kernel import (
     FLOOR_LOG,
+    KK_LAGS,
+    KK_WINDOW_S,
+    S_US,
+    TRIM_SLACK_S,
     BarArrays,
     Baseline,
     Kernel,
@@ -516,3 +520,71 @@ def test_one_symbol_day_under_5s():  # 2 days of bars, rows for D only
     assert d.height == 8640
     print(f"compute_windows 2 days: {dt:.2f} s")
     assert dt < 5.0
+
+
+# ------------------------------------------------------------------ bounded buffers (LIVE)
+
+
+def _trim_cfg() -> FeatureCfg:
+    return FeatureCfg(baseline_s=3600, min_baseline_samples=30)
+
+
+def _bar_arrays(n: int, seed: int = 11) -> BarArrays:
+    rng = np.random.default_rng(seed)
+    t0 = 1_700_006_400 * S_US
+    nt = rng.poisson(0.7, n).astype(np.int64)
+    buy, sell = rng.lognormal(0, 1, n) * nt, rng.lognormal(0, 1, n) * nt
+    close = 100.0 * np.exp(np.cumsum(rng.normal(0, 1e-4, n)))
+    return BarArrays(
+        t_us=t0 + np.arange(n, dtype=np.int64) * S_US,
+        n_trades=nt,
+        buy_quote=buy,
+        sell_quote=sell,
+        quote_vol=buy + sell,
+        high=close * 1.0001,
+        close=close,
+        rush_orders=rng.poisson(0.05, n).astype(np.int64),
+        pingpong=rng.poisson(0.01, n).astype(np.int64),
+        n_round=rng.binomial(nt, 0.2).astype(np.int64),
+    )
+
+
+def test_kernel_buffers_stay_bounded_with_exact_parity():
+    cfg, n = _trim_cfg(), 50_000
+    bars = _bar_arrays(n)
+    # one-shot extend trims only after every row is computed: the untrimmed reference
+    t_ref, ref = Kernel(cfg, 1.0).extend(bars)
+
+    k = Kernel(cfg, 1.0)
+    bar_keep = max(max(cfg.windows_s) + 1, cfg.baseline_s) + TRIM_SLACK_S
+    rows_keep = KK_LAGS * KK_WINDOW_S // cfg.stride_s + TRIM_SLACK_S // cfg.stride_s
+    peak_bars = peak_rows = peak_samples = 0
+    ts, out = [], []
+    for i in range(n):
+        got = k.extend(bars.slice(i, i + 1))
+        ts.append(got[0])
+        out.append(got[1])
+        peak_bars = max(peak_bars, k._close.n, k._high.n, k._rel.n, k._pc.n - 1, k._pf.n - 1)
+        peak_rows = max(peak_rows, k._hist_qv.n, k._hist_close.n)
+        peak_samples = max(peak_samples, k.baseline._t.n, k.baseline._x.n)
+    assert np.array_equal(np.concatenate(ts), t_ref)
+    assert np.array_equal(np.concatenate(out), ref, equal_nan=True)
+
+    assert k.n_bars == n  # still the absolute count
+    assert peak_bars <= bar_keep < n
+    assert k._close.n < n  # trimming really happened
+    assert peak_rows <= rows_keep
+    assert k._hist_qv.n < (n - max(cfg.windows_s)) // cfg.stride_s  # trimmed as well
+    assert peak_samples <= 4097 + cfg.baseline_s // cfg.baseline_sample_s
+    assert len(k._close.data) <= 2 * bar_keep  # capacity is bounded too
+
+
+def test_kernel_trim_with_chunks_is_bounded_and_identical():
+    cfg, n, chunk = _trim_cfg(), 60_000, 1_000
+    bars = _bar_arrays(n, seed=12)
+    t_ref, ref = Kernel(cfg, 1.0).extend(bars)
+    k = Kernel(cfg, 1.0)
+    got = [k.extend(bars.slice(i, i + chunk)) for i in range(0, n, chunk)]
+    assert np.array_equal(np.concatenate([g[0] for g in got]), t_ref)
+    assert np.array_equal(np.concatenate([g[1] for g in got]), ref, equal_nan=True)
+    assert k._close.n <= max(max(cfg.windows_s) + 1, cfg.baseline_s) + TRIM_SLACK_S + chunk

@@ -25,6 +25,7 @@ _INDEX_SCHEMA = pl.Schema(
 _DUCK_TYPES = {pl.Int64: "BIGINT", pl.String: "VARCHAR"}
 Verdict = Literal["tp", "fp", "unsure"]
 _VERDICTS = ("tp", "fp", "unsure")
+_DELETABLE_PROVENANCE = ("replay", "sim")
 
 
 def _now_us() -> int:
@@ -274,6 +275,50 @@ class Store:
                 "VALUES (?, ?, ?, ?)",
                 self._alert_row(a),
             )
+
+    @staticmethod
+    def _check_deletable(provenance: str) -> None:
+        if provenance not in _DELETABLE_PROVENANCE:
+            raise ValueError(
+                f"alerts of provenance {provenance!r} cannot be deleted; "
+                f"only {_DELETABLE_PROVENANCE} can, never live"
+            )
+
+    def delete_alerts(self, provenance: str, alert_ids: list[str]) -> list[str]:
+        """Delete the given alerts that have this replay / sim provenance; returns the ids deleted.
+
+        Raises ValueError for any other provenance, "live" included.
+        """
+        self._check_deletable(provenance)
+        wanted = set(alert_ids)
+        return self._delete_alerts_where(
+            lambda aid, a: aid in wanted and a["provenance"] == provenance
+        )
+
+    def delete_alerts_from(self, provenance: str, t_us: int) -> list[str]:
+        """Delete the alerts of this replay / sim provenance whose window ends at or after `t_us`.
+
+        Returns the ids deleted. Raises ValueError for any other provenance, "live" included.
+        """
+        self._check_deletable(provenance)
+        return self._delete_alerts_where(
+            lambda aid, a: a["provenance"] == provenance and a["window"][1] >= t_us
+        )
+
+    def _delete_alerts_where(self, match) -> list[str]:
+        with self._lock:
+            con = self._db()
+            rows = con.execute("SELECT alert_id, json FROM alerts").fetchall()
+            ids = [aid for aid, js in rows if match(aid, json.loads(js))]
+            if ids:
+                con.execute("BEGIN")
+                try:
+                    con.executemany("DELETE FROM alerts WHERE alert_id = ?", [(i,) for i in ids])
+                    con.execute("COMMIT")
+                except BaseException:
+                    con.execute("ROLLBACK")
+                    raise
+        return ids
 
     def list_alerts(self, limit: int = 200, symbol: str | None = None) -> list[Alert]:
         sql = "SELECT json FROM alerts"

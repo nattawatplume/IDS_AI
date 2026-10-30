@@ -1,4 +1,5 @@
 import json
+import os
 import pickle
 import time
 
@@ -330,3 +331,33 @@ def test_fit_100k_by_40_under_120s():
     elapsed = time.perf_counter() - t
     print(f"AE fit 100k x 40: {elapsed:.1f}s info={det.fit_info}")
     assert elapsed < 120
+
+
+def test_registry_retries_a_transient_rename_lock(tmp_path, small_fit, monkeypatch):
+    # Windows: an antivirus/indexer may hold the just-written files for a moment
+    det, _ = small_fit
+    real, calls = os.rename, []
+
+    def flaky(src, dst):
+        calls.append(dst)
+        if len(calls) <= 2:
+            raise PermissionError(13, "Access is denied", str(src))
+        real(src, dst)
+
+    monkeypatch.setattr("idsai.ai.learning.os.rename", flaky)
+    monkeypatch.setattr("idsai.ai.learning.RENAME_RETRY_S", 0.0)
+    assert ModelRegistry(tmp_path).save(det, meta(seed=1)) == "v1"
+    assert len(calls) == 3
+
+
+def test_registry_gives_up_on_a_permanent_rename_lock(tmp_path, small_fit, monkeypatch):
+    det, _ = small_fit
+
+    def locked(src, dst):
+        raise PermissionError(13, "Access is denied", str(src))
+
+    monkeypatch.setattr("idsai.ai.learning.os.rename", locked)
+    monkeypatch.setattr("idsai.ai.learning.RENAME_RETRY_S", 0.0)
+    with pytest.raises(RuntimeError, match="could not claim"):
+        ModelRegistry(tmp_path).save(det, meta(seed=1))
+    assert ModelRegistry(tmp_path).versions(det.name) == []

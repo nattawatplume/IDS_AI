@@ -1,0 +1,1 @@
+"""Thai explanations of alerts."""

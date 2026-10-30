@@ -76,7 +76,7 @@ def _cache_path(
     return root / symbol / f"{tag}.parquet"
 
 
-def _round_f32(windows: pl.DataFrame, cfg: FeatureCfg) -> pl.DataFrame:
+def round_f32(windows: pl.DataFrame, cfg: FeatureCfg) -> pl.DataFrame:
     """Feature columns rounded through float32 and returned as float64."""
     cols = feature_columns(cfg)
     return windows.with_columns(pl.col(c).cast(pl.Float32).cast(pl.Float64) for c in cols)
@@ -190,7 +190,7 @@ def load_day_windows(
     bars = trades_to_bars(trades, symbol, start_us, hi)
     windows = compute_windows(bars, fcfg, unit)
     windows = windows.filter((pl.col("t_end_us") >= lo) & (pl.col("t_end_us") < hi))
-    windows = _round_f32(windows, fcfg)
+    windows = round_f32(windows, fcfg)
     if path is not None:
         _write_cache(path, windows, fcfg)
     return DayResult(symbol, day, windows, labels, next_day_present=next_present)

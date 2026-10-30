@@ -14,7 +14,8 @@ a mixed Chief baselines get a `p__` column but never enter `F`, `agreement` or `
 Batch/stream parity: a p-value is `k / (n + 1)` for an integer `k`, and `-log10 p` is read from a
 per-detector lookup table built at calibration time, so `F` of a row is bit-identical whether it
 is fused alone (`ChiefStream.step`) or in a batch (`fuse`). Both go through `_fuse_matrix`, and
-both build alerts through `_alert`; episode ids are `f"{symbol}-{first_us}"`.
+both build alerts through `_alert`; episode ids are `f"{provenance}-{symbol}-{first_us}"`, so a
+replay or sim run on the same data never overwrites a live alert.
 
 Alert budget: `fit_threshold` picks the smallest `tau` (among observed `F` values) whose alert
 episodes per symbol-day on calibration data stay within the budget. Exceedances are rows with
@@ -66,6 +67,10 @@ def _symbol_days(frame: pl.DataFrame) -> int:
 
 def _finite_or_none(x: float) -> float | None:
     return x if math.isfinite(x) else None
+
+
+def alert_id_for(provenance: str, symbol: str, first_us: int) -> str:
+    return f"{provenance}-{symbol}-{first_us}"
 
 
 def _parent_technique(technique_id: str) -> str:
@@ -328,7 +333,7 @@ class Chief:
         sig = self.detectors[rule_j] if rule_j >= 0 else None
         agreement = int(fu.agreement[i])
         return Alert(
-            alert_id=f"{ep.symbol}-{ep.first_us}",
+            alert_id=alert_id_for(provenance, ep.symbol, ep.first_us),
             ts_event_us=ep.first_us,
             symbol=ep.symbol,
             technique_id=str(fu.technique[i]),
@@ -578,6 +583,15 @@ class ChiefStream:
         else:
             o.episode.last_us = t
         return out
+
+    def discard_open(self) -> list[str]:
+        """Forget every open episode without an alert (a seek); returns their alert ids."""
+        ids = [
+            alert_id_for(self.provenance, o.episode.symbol, o.episode.first_us)
+            for o in self._open.values()
+        ]
+        self._open.clear()
+        return ids
 
     def flush(self) -> list[Alert]:
         """Close every open episode (end of replay or shutdown)."""

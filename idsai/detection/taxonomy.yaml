@@ -1,7 +1,7 @@
 # Taxonomy of market-manipulation techniques used by the IDS (MM = market manipulation).
 # Track T = detectable from public trade data. Track B = needs L2 order-book data; synthetic only.
 MM-T000:
-  name_th: ความผิดปกติที่ยังจัดประเภทไม่ได้
+  name_th: ความผิดปกติที่ยังไม่จัดประเภท
   definition_th: >-
     ความผิดปกติทางสถิติที่เกิดขึ้นในตลาดแต่ยังไม่ตรงกับเทคนิคที่รู้จัก
     ระบบแจ้งเตือนเพื่อให้มนุษย์ตรวจสอบต่อ และไม่ได้ระบุว่าเป็นการปั่นราคา

@@ -15,6 +15,10 @@ the last prefix value, then call the same `Kernel._emit` per due row in time ord
 same bars in any chunking therefore gives bit-identical rows. Window sums are differences of
 prefix sums anchored at the first bar `t0`; a driver must start at the same first bar as the
 batch run to reproduce it bit-for-bit (the baseline schedule itself is start-independent).
+
+Memory: after every `extend` the bar and KK-history buffers are trimmed to what later rows can
+read (`Kernel._bars_keep` bars, `Kernel._rows_keep` rows). Only the front of a buffer is dropped:
+prefix values are never rebased, so the kept values, and every later row, stay bit-identical.
 """
 
 import math
@@ -41,6 +45,7 @@ KK_WINDOW_S = 1800
 KK_LAGS = 24
 Z_CLIP = 50.0
 IQR_TO_SIGMA = 1.349
+TRIM_SLACK_S = 3600  # extra history kept so the front is dropped about once per hour of bars
 FLOOR_LOG = 0.25
 FLOOR_RATIO = 0.05
 FLOOR_RET_MIN = 1e-4
@@ -368,6 +373,12 @@ class Kernel:
         self._i_imb = self.raw_cols.index(f"buy_imb_{CUSUM_WINDOW_S}")
         self._i_qv = self.raw_cols.index(f"quote_vol_{KK_WINDOW_S}")
         self._kk_step = KK_WINDOW_S // cfg.stride_s
+        # a later row reads close[i_end - 1 - max(W)], the prefix rows from i_end - max(W), the
+        # `baseline_s` bars of |dclose| / close and the last KK_LAGS * step emitted rows
+        self._bars_keep = max(self._max_w + 1, cfg.baseline_s)
+        self._rows_keep = KK_LAGS * self._kk_step
+        self._rows_slack = TRIM_SLACK_S // cfg.stride_s
+        self._dropped_bars = 0  # bars trimmed off the front; buffer index = bar index - this
 
         self.t0_us: int | None = None
         self._pc = _Buf(np.int64, width=4)
@@ -384,7 +395,8 @@ class Kernel:
 
     @property
     def n_bars(self) -> int:
-        return self._close.n
+        """Bars pushed so far (not the number still buffered)."""
+        return self._dropped_bars + self._close.n
 
     def row_dict(self, values: np.ndarray) -> dict[str, float]:
         return dict(zip(self.columns, values.tolist(), strict=True))
@@ -438,7 +450,8 @@ class Kernel:
         self._pc.extend(prefix(counts, start=self._pc.data[self._pc.n - 1])[1:])
         self._pf.extend(prefix(flows, start=self._pf.data[self._pf.n - 1])[1:])
         close = bars.close.astype(np.float64, copy=False)
-        prev = np.concatenate([[self._close.data[n0 - 1] if n0 else np.nan], close[:-1]])
+        prev_c = self._close.data[self._close.n - 1] if self._close.n else np.nan
+        prev = np.concatenate([[prev_c], close[:-1]])
         with np.errstate(divide="ignore", invalid="ignore"):
             rel = np.abs(close - prev) / prev
         self._close.extend(close)
@@ -451,12 +464,26 @@ class Kernel:
         out = np.empty((len(i_ends), len(self.columns)))
         for r, i_end in enumerate(i_ends.tolist()):
             out[r] = self._emit(i_end)
+        self._trim()
         return t_end[due], out
+
+    def _trim(self) -> None:
+        """Drop buffer fronts no later row can read; never changes a kept value."""
+        k = self._close.n - self._bars_keep
+        if k >= TRIM_SLACK_S:
+            for buf in (self._pc, self._pf, self._close, self._high, self._rel):
+                buf.drop_front(k)
+            self._dropped_bars += k
+        k = self._hist_qv.n - self._rows_keep
+        if k >= self._rows_slack:
+            self._hist_qv.drop_front(k)
+            self._hist_close.drop_front(k)
 
     def _emit(self, i_end: int) -> np.ndarray:
         """Row for `t_end = t0 + i_end s`; mutates baseline / CUSUM / KK history (call once, in
         time order). Reads only bars with index < i_end."""
         t_end = self.t0_us + i_end * S_US
+        i_end -= self._dropped_bars  # buffer index; still > max(W) and >= baseline_s once trimmed
         # causal views: bars [0, i_end) and prefix rows [0, i_end]; any look-ahead -> IndexError
         close = self._close.data[:i_end]
         raw = raw_vector(

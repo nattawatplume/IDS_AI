@@ -299,7 +299,7 @@ def test_episode_fields_from_peak_row():
     )
     sc = sc.with_columns(pl.Series("fa", [0.1, 7.0, 0.3]))
     (a,) = ch.episodes(ch.fuse(sc))
-    assert a.alert_id == f"A-{T0_US}"
+    assert a.alert_id == f"replay-A-{T0_US}"
     assert a.ts_event_us == T0_US
     assert a.window == (T0_US, T0_US + 250 * S_US)
     assert a.status == "closed"
@@ -513,11 +513,11 @@ def test_stream_close_and_open_on_one_row():
     ).to_dicts()
     out = [[(a.status, a.alert_id) for a in st.step(r)] for r in rows]
     t = [T0_US + s * S_US for s in (0, 100, 250, 600)]
-    assert out[0] == [("open", f"A-{t[0]}")]
-    assert out[1] == [("updated", f"A-{t[0]}")]
+    assert out[0] == [("open", f"replay-A-{t[0]}")]
+    assert out[1] == [("updated", f"replay-A-{t[0]}")]
     assert out[2] == []
-    assert out[3] == [("closed", f"A-{t[0]}"), ("open", f"A-{t[3]}")]
-    assert [(a.status, a.alert_id) for a in st.flush()] == [("closed", f"A-{t[3]}")]
+    assert out[3] == [("closed", f"replay-A-{t[0]}"), ("open", f"replay-A-{t[3]}")]
+    assert [(a.status, a.alert_id) for a in st.flush()] == [("closed", f"replay-A-{t[3]}")]
     assert st.flush() == []
 
 
