@@ -18,6 +18,12 @@ symbol's bars, so symbols that show up late still match a batch run over the sam
 is scored, stored or published until `preroll_done`; the pre-roll only warms up the features. A
 source that wants output must therefore send `preroll_done`.
 
+`("gap", (from_us, to_us))` says that nothing was observed in that span (a LIVE outage, or the time
+between an archive pre-roll and the first live trade). Empty bars there would enter the baseline as
+zero activity and widen its scale, hiding real anomalies. So bars and kernels restart at `to_us`
+and only the `Baseline` goes on: no rows until the new kernel has its `max(W)` bars (no measurement,
+no alert; CUSUM and the Kamps-Kleinberg history start over too). Open episodes stay open.
+
 Every default detector is row-independent (no state between `score` calls), so skipping them in
 the pre-roll cannot change a later score; CUSUM state lives in the feature kernel.
 
@@ -46,6 +52,7 @@ from idsai.contracts.detector import Detector
 from idsai.contracts.events import Trade
 from idsai.data.store import Store
 from idsai.detection.features.bars import S_US, BarBuilder
+from idsai.detection.features.kernel import Baseline
 from idsai.detection.features.streaming import StreamingWindows
 from idsai.detection.features.windows import windows_schema
 from idsai.pipeline.batch import round_f32, score_windows
@@ -105,6 +112,11 @@ class StreamPipeline:
         first; non-finite values are None, so the result is strict JSON."""
         return list(self._ring.get(symbol, ()))
 
+    def baseline_samples(self, symbol: str) -> int:
+        """Baseline samples of `symbol` so far (0 when unknown), for `Auditor.warmup`."""
+        w = self._windows.get(symbol)
+        return 0 if w is None else w.kernel.baseline.n_samples
+
     async def run(self, source: AsyncIterable[tuple[str, Any]]) -> None:
         """Consume `source` to its end, then close the open episodes and store / publish them.
 
@@ -130,6 +142,8 @@ class StreamPipeline:
                     self._on_preroll_done(payload)
                 elif kind == "seek":
                     self._on_seek(payload)
+                elif kind == "gap":
+                    await self._on_gap(payload)
                 else:
                     raise ValueError(f"unknown stream event {kind!r}")
         except asyncio.CancelledError:
@@ -144,13 +158,15 @@ class StreamPipeline:
             self._origin_us = t.ts_us // S_US * S_US
         self._builder(t.symbol).on_trade(t)
 
-    def _builder(self, symbol: str) -> BarBuilder:
+    def _builder(self, symbol: str, baseline: Baseline | None = None) -> BarBuilder:
         b = self._builders.get(symbol)
         if b is None:
             b = BarBuilder(symbol, self._grace_s, start_us=self._origin_us)
             self._builders[symbol] = b
             unit = quote_unit_for(symbol, self.cfg.features)
-            self._windows[symbol] = StreamingWindows(symbol, self.cfg.features, unit)
+            self._windows[symbol] = StreamingWindows(
+                symbol, self.cfg.features, unit, baseline=baseline
+            )
         return b
 
     async def _on_tick(self, t_us: int) -> None:
@@ -165,6 +181,17 @@ class StreamPipeline:
                 n += 1
                 if n % BACKLOG_YIELD_BARS == 0:  # a late symbol catches up on many empty bars
                     await asyncio.sleep(0)
+
+    async def _on_gap(self, span: tuple[int, int]) -> None:
+        if self._grace_s and self._last_tick_us is not None:
+            await self._on_tick(self._last_tick_us + self._grace_s * S_US)  # bars still in grace
+        baselines = {s: w.kernel.baseline for s, w in self._windows.items()}
+        self._builders.clear()
+        self._windows.clear()
+        self._origin_us = span[1] // S_US * S_US
+        self._last_tick_us = None
+        for symbol, baseline in baselines.items():
+            self._builder(symbol, baseline)
 
     def _on_seek(self, target_us: int) -> None:
         if self.mode == "live":

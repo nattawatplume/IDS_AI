@@ -338,9 +338,12 @@ class Kernel:
     Feed contiguous 1 s bars with `push_bar` (one) or `extend` (many); every due row is computed
     once, in time order, by `_emit`. Row vectors follow `self.columns`
     (= `registry.feature_columns(cfg)`).
+
+    `baseline` continues an existing `Baseline` instead of a new one (a stream restarting its bars
+    after an outage: everything else starts over, and the samples age out by their own time).
     """
 
-    def __init__(self, cfg: FeatureCfg, quote_unit: float):
+    def __init__(self, cfg: FeatureCfg, quote_unit: float, *, baseline: Baseline | None = None):
         if CUSUM_WINDOW_S not in cfg.windows_s or KK_WINDOW_S not in cfg.windows_s:
             raise ValueError(f"windows_s must contain {CUSUM_WINDOW_S} and {KK_WINDOW_S}")
         st = cfg.stride_s
@@ -368,7 +371,9 @@ class Kernel:
             [{"log": FLOOR_LOG, "ratio": FLOOR_RATIO, "ret": np.nan}[s.floor] for s in kinds]
         )
         is_log = np.array([s.transform in ("log1p", "log1p_quote") for s in kinds])
-        self.baseline = Baseline(cfg, floors, is_log)
+        if baseline is not None and len(baseline._floors) != len(floors):
+            raise ValueError(f"baseline has {len(baseline._floors)} features, need {len(floors)}")
+        self.baseline = Baseline(cfg, floors, is_log) if baseline is None else baseline
         self._i_ret = self.raw_cols.index(f"ret_{CUSUM_WINDOW_S}")
         self._i_imb = self.raw_cols.index(f"buy_imb_{CUSUM_WINDOW_S}")
         self._i_qv = self.raw_cols.index(f"quote_vol_{KK_WINDOW_S}")
