@@ -102,6 +102,9 @@ NOTES_TH = [
     f"การเปรียบเทียบสองฝั่งต้องมีอย่างน้อย {MIN_EVENTS} เหตุการณ์ ถ้าน้อยกว่านั้นจะไม่สรุปว่าดีกว่า",
     "TTD ติดลบหมายความว่าการแจ้งเตือนเริ่มก่อนเวลาเริ่มของป้ายกำกับ (label)",
     "งบการแจ้งเตือนเป็นเพดาน ไม่ใช่เป้าหมาย: อัตรา FA ที่วัดได้จึงอาจต่ำกว่างบที่ตั้งไว้",
+    "recall_correct นับเหตุการณ์ที่มีการแจ้งเตือนทับช่วงเหตุการณ์และระบุเทคนิคตรงกับป้ายกำกับ: "
+    "เทคนิคของการแจ้งเตือนมาจากแถวที่จัดประเภทได้และมีค่า F สูงสุดของ episode "
+    "ส่วนหลักฐานมาจากแถวจุดสูงสุดของ episode ซึ่งอาจเป็นคนละแถวกัน",
 ]
 
 
@@ -407,7 +410,7 @@ def _retrain_block(
         diff_mean=d.diff_mean,
         ci=list(d.ci),
         # `compare` rejects below MIN_EVENTS; the report says that nothing was decided
-        accept=None if 0 < len(events) < MIN_EVENTS else d.accept,
+        accept=None if len(events) < MIN_EVENTS else d.accept,
         reason_th=d.reason_th,
     )
     return block

@@ -23,6 +23,7 @@ BANNED_TH = ["โกง", "มิจฉาชีพ", "ผู้ปั่น", "
 
 UNCLASSIFIED_TH = "ความผิดปกติที่ยังไม่จัดประเภท"
 NO_EVIDENCE_TH = "ไม่มีหลักฐานรายคุณลักษณะแนบมา"
+OTHER_ROW_TH = "การจัดประเภทมาจากแถวอื่นในเหตุการณ์เดียวกัน ตัวเลขข้างต้นมาจากจุดที่ผิดปกติที่สุด"
 MAX_FACTS = 3
 
 _UNIT_FORMATS: dict[str, str] = {
@@ -180,6 +181,8 @@ def _render(alert) -> tuple[str, list[tuple[str, str]], list[float]]:
         f"{alert.agreement} จาก 3 ชั้นตรวจจับเห็นพ้อง; "
         f"ความหายากเทียบตลาดปกติ p ≈ {p_shown}"
     )
+    if alert.peak_technique_id not in (None, alert.technique_id):
+        text += f"; {OTHER_ROW_TH}"
     allowed += [
         float(hh), float(mm), float(ss),
         float(alert.agreement), 3.0,

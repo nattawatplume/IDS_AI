@@ -25,8 +25,9 @@ apart belong to the same episode.
 Episode technique: `technique_id`, `signature_id` and `rev` come from the episode's highest-`F`
 exceedance row whose technique is not `MM-T000` (earliest on ties), so an episode whose peak row
 is unclassified still names the technique a less extreme row found; `MM-T000` only when no row
-classifies. `fused_p`, `window`, `detectors`, `agreement`, `severity` and `evidence` stay from the
-peak row. Batch and stream both fold rows through `_Attribution.merge`.
+classifies. `fused_p`, `detectors`, `agreement`, `severity`, `evidence` and `peak_technique_id`
+(the peak row's own technique) stay from the peak row; `window` spans the episode's first and last
+rows. Batch and stream both fold rows through `_Attribution.merge`.
 """
 
 import math
@@ -377,6 +378,7 @@ class Chief:
             ts_event_us=ep.first_us,
             symbol=ep.symbol,
             technique_id=attribution.technique,
+            peak_technique_id=str(fu.technique[i]),
             signature_id=attribution.signature_id,
             rev=attribution.rev,
             severity=1 + int(agreement >= 2) + int(agreement >= 3),
@@ -406,10 +408,10 @@ class Chief:
     ) -> list[Alert]:
         """Closed alert episodes of `fuse` output: rows with `F >= tau`, grouped per symbol.
 
-        `tau` defaults to `self.tau`. `fused_p`, window, detectors, agreement and evidence come
-        from the episode's peak row (max `F`, earliest on ties); the technique and signature from
-        its highest-`F` classified row (see the module docstring). Alerts are ordered by
-        `(symbol, first_us)`.
+        `tau` defaults to `self.tau`. `fused_p`, detectors, agreement and evidence come from the
+        episode's peak row (max `F`, earliest on ties); the window from its first and last rows;
+        the technique and signature from its highest-`F` classified row (see the module
+        docstring). Alerts are ordered by `(symbol, first_us)`.
         """
         tau = self._resolve_tau(tau)
         order, sym, t, F = self._sorted_view(fused)

@@ -138,3 +138,29 @@ def test_trade_model_mirrors_trades():
         Trade(**valid_trade_kwargs(taker_side="maker"))
     with pytest.raises(ValidationError):
         Trade(**valid_trade_kwargs(source="csv"))
+
+
+def test_alert_without_peak_technique_id_still_loads():
+    from idsai.contracts.alert import Alert
+
+    data = {
+        "alert_id": "a",
+        "ts_event_us": 1,
+        "symbol": "S",
+        "technique_id": "MM-T001",
+        "severity": 1,
+        "status": "open",
+        "fused_p": 0.5,
+        "detectors": [],
+        "agreement": 0,
+        "evidence": [],
+        "window": [1, 2],
+        "dedup_key": "k",
+        "suppress_for_s": 60,
+        "config_hash": "h",
+        "model_versions": {},
+        "provenance": "sim",
+        "schema_v": 1,
+    }
+    a = Alert.model_validate(data)
+    assert a.peak_technique_id is None and a.schema_v == 1

@@ -615,8 +615,9 @@ def test_episode_technique_comes_from_a_classified_row_not_the_peak(classified_f
     assert ch.fuse(sc)["technique"][peak_i] == "MM-T000"  # the peak row itself says nothing
     batch, _ = _both_paths(ch, sc)
     assert batch.technique_id == "MM-T005"
+    assert batch.peak_technique_id == "MM-T000"
     assert (batch.signature_id, batch.rev) == (501, 3)
-    # fused_p, window and evidence stay from the peak row
+    # fused_p and evidence stay from the peak row; the window spans the whole episode
     assert batch.fused_p == pytest.approx(1 / 1001)
     assert batch.window == (T0_US, T0_US + 100 * S_US)
     assert batch.evidence == [("fa", 7.0, 7.0)]
@@ -722,3 +723,22 @@ def test_rule_that_never_fires_in_cal_is_saturated():
     with pytest.warns(RuntimeWarning, match="tau_saturated"):
         ch.fit_threshold(ch.fuse(cal_with(r.name, [-1.0] * 2000)), 2.0)
     assert ch.tau_saturated is True
+
+
+def test_peak_technique_is_the_peak_rows_own_in_every_stream_alert():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame("A", [0, 100], stat_a=[5000.0, -1.0], rule_501=[-1.0, 0.5])
+    batch, emitted = _both_paths(ch, sc)
+    assert [(a.technique_id, a.peak_technique_id) for a in emitted] == [
+        ("MM-T000", "MM-T000"),
+        ("MM-T005", "MM-T000"),
+        ("MM-T005", "MM-T000"),
+    ]
+    assert batch.peak_technique_id == "MM-T000"
+
+
+def test_peak_technique_equals_technique_when_the_peak_row_classifies():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame("A", [0], stat_a=[-1.0], rule_501=[1.5])
+    batch, _ = _both_paths(ch, sc)
+    assert batch.technique_id == batch.peak_technique_id == "MM-T005"

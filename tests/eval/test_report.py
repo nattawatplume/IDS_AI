@@ -553,3 +553,9 @@ def test_notes_explain_negative_ttd_and_the_budget_cap():
     text = " ".join(NOTES_TH)
     assert "TTD ติดลบ" in text and "ก่อน" in text
     assert "งบการแจ้งเตือนเป็นเพดาน" in text and "ต่ำกว่า" in text
+
+
+def test_note_defines_recall_correct():
+    (note,) = [n for n in NOTES_TH if n.startswith("recall_correct")]
+    assert "ทับ" in note and "F สูงสุด" in note and "หลักฐาน" in note and "จุดสูงสุด" in note
+    assert "สังเคราะห์" not in note and "ข้อมูลจริง" not in note

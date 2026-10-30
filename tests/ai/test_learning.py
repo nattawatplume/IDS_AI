@@ -321,7 +321,7 @@ def test_report_retrain_without_both_ok_arms(research, tmp_path):
 
 
 def test_report_retrain_without_shared_events(research, tmp_path):
-    # both arms OK but on disjoint events: nothing to compare, rejected with a Thai reason
+    # both arms OK but on disjoint events: nothing to compare, undecided with a Thai reason
     research.insert_run(_rec("v1", 0, V1))
     v2 = _rec("v2", 0, V2)
     v2["per_event"] = {f"other-{k}": pe for k, pe in v2["per_event"].items()}
@@ -329,12 +329,13 @@ def test_report_retrain_without_shared_events(research, tmp_path):
     _, text, raw = _build(research, tmp_path)
     rd = raw["retrain_decision"]
     assert rd["n_seeds"] == 1 and rd["n_events"] == 0
-    assert rd["accept"] is False and rd["ci"] == [0.0, 0.0]
+    assert rd["accept"] is None and rd["ci"] == [0.0, 0.0]
     assert "ไม่มีเหตุการณ์" in rd["reason_th"]
     assert rd["series"]["v1"] == {"mean": None, "ci": None}
     assert any("0 จาก 80" in n for n in rd["notes"])
     (row,) = [ln for ln in text.splitlines() if ln.startswith("| full stack (deployed) |")]
     assert not re.search(r"\bnan\b", row), row
+    assert row.endswith("| ยังตัดสินไม่ได้ |")
 
 
 def test_report_retrain_uses_only_the_latest_config_hash(research, tmp_path):
