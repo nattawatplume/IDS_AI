@@ -267,3 +267,51 @@ def test_only_the_saturation_warning_is_silenced():
     assert chief.tau_saturated
     assert any(re.match(SATURATION_WARNING, str(w.message)) for w in caught)
     assert not re.match(SATURATION_WARNING, "invalid value encountered in divide")
+
+
+# ---------------------------------------------------------------- labels of a set's event days
+def _label(lid, t0, t1=None):
+    return (lid, "hu", "ABCBTC", t0, t1 or t0, "MM-T001", "telegram_pump", None, "REAL")
+
+
+def _ctx_with_labels(tmp_path, first_day, n_days, rows):
+    cfg = load_settings(overrides={"paths": {"data_dir": str(tmp_path)}, "splits": SPLITS})
+    s = Store(tmp_path, tmp_path / "app.duckdb")
+    s.write_trades(make_trades(first_day, n_days, symbol="ABCBTC", rate=0.01))
+    s.write_labels(pl.DataFrame(rows, schema=LABELS, orient="row"))
+    return _Ctx(cfg, s, 0), s
+
+
+def test_label_past_midnight_in_a_missing_day_is_not_an_event(tmp_path):
+    a, b = at_h(DAY, 23, 55), at_h(date(2025, 1, 21), 0, 3)
+    ctx, s = _ctx_with_labels(
+        tmp_path, date(2025, 1, 19), 2, [_label("a", a), _label("dropped", b)]
+    )
+    try:
+        assert ctx.split.labels_dropped == {"test": {"missing_day": 1}}
+        assert ctx.split.test_events == [SymDay("ABCBTC", DAY, 10)]
+        part = ctx.real_parts(ctx.split.test_events, [], [])
+        assert part.labels["label_id"].to_list() == ["a"]
+    finally:
+        s.close()
+
+
+def test_label_of_a_neighbouring_period_is_not_an_event_of_this_set(tmp_path):
+    last_accept, first_test = date(2025, 1, 16), date(2025, 1, 17)
+    a, b = at_h(last_accept, 23, 55), at_h(first_test, 0, 3)
+    ctx, s = _ctx_with_labels(
+        tmp_path,
+        date(2025, 1, 15),
+        3,
+        # "a" runs past midnight, so it overlaps the first test day too
+        [_label("a", a, at_h(first_test, 0, 2)), _label("b", b)],
+    )
+    try:
+        assert ctx.split.accept_events == [SymDay("ABCBTC", last_accept, 10)]
+        assert ctx.split.test_events == [SymDay("ABCBTC", first_test)]
+        accept = ctx.real_parts(ctx.split.accept_events, [], [])
+        assert accept.labels["label_id"].to_list() == ["a"]
+        test = ctx.real_parts(ctx.split.test_events, [], [])
+        assert test.labels["label_id"].to_list() == ["b"]
+    finally:
+        s.close()

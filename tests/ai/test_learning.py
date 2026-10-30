@@ -9,7 +9,7 @@ import pytest
 from idsai.ai.learning import Decision, compare
 from idsai.config import load_settings
 from idsai.data.store import Store
-from idsai.eval.metrics import ratio_bootstrap_ci
+from idsai.eval.metrics import MIN_EVENTS, ratio_bootstrap_ci
 from idsai.eval.report import MIXED_CONFIG_NOTE, build_report
 
 N_BOOT = 1000
@@ -112,8 +112,18 @@ def test_single_event_is_rejected_with_degenerate_ci():
     # the bootstrap of one event cannot vary: CI (1, 1) must not read as certainty
     d = compare(np.zeros((5, 1)), np.ones((5, 1)), N_BOOT, SEED)
     assert d.accept is False and d.ci == (1.0, 1.0) and d.diff_mean == pytest.approx(1.0)
-    assert "เพียง 1 ครั้ง" in d.reason_th and "อย่างน้อย 2" in d.reason_th
-    assert compare(np.zeros((5, 2)), np.ones((5, 2)), N_BOOT, SEED).accept is True
+    assert "เพียง 1 ครั้ง" in d.reason_th and f"อย่างน้อย {MIN_EVENTS}" in d.reason_th
+    n = MIN_EVENTS
+    assert compare(np.zeros((5, n)), np.ones((5, n)), N_BOOT, SEED).accept is True
+
+
+def test_too_few_events_cannot_be_decided_even_with_a_clear_gain():
+    assert MIN_EVENTS == 10
+    n = MIN_EVENTS - 1
+    d = compare(np.zeros((5, n)), np.ones((5, n)), N_BOOT, SEED)
+    assert d.accept is False and d.diff_mean == pytest.approx(1.0)
+    assert "ตัดสินไม่ได้" in d.reason_th
+    assert f"เพียง {n} ครั้ง" in d.reason_th and f"อย่างน้อย {MIN_EVENTS}" in d.reason_th
 
 
 def test_ci_low_exactly_zero_says_touches_not_straddles():
@@ -377,3 +387,25 @@ def test_report_retrain_same_config_has_no_mismatch_note(research, tmp_path):
     assert not any("config_hash" in n for n in rd["notes"] + rd["ai_only"]["notes"])
     data, text, _ = _build(research, tmp_path)
     assert MIXED_CONFIG_NOTE not in data["notes"] and MIXED_CONFIG_NOTE not in text
+
+
+def test_report_retrain_says_it_cannot_decide_on_few_events(research, tmp_path):
+    n = MIN_EVENTS - 1
+    for seed in range(2):
+        research.insert_run(_rec("v1", seed, [0] * n))
+        research.insert_run(_rec("v2", seed, [1] * n))
+    _, text, raw = _build(research, tmp_path)
+    rd = raw["retrain_decision"]
+    assert rd["n_events"] == n and rd["diff_mean"] == pytest.approx(1.0)
+    assert rd["accept"] is None
+    assert "ตัดสินไม่ได้" in rd["reason_th"] and f"เพียง {n} ครั้ง" in rd["reason_th"]
+    (row,) = [ln for ln in text.splitlines() if ln.startswith("| full stack (deployed) |")]
+    assert row.endswith("| ยังตัดสินไม่ได้ |")
+    assert rd["reason_th"] in text
+
+
+def test_report_retrain_decides_at_the_minimum_event_count(research, tmp_path):
+    for seed in range(2):
+        research.insert_run(_rec("v1", seed, [0] * MIN_EVENTS))
+        research.insert_run(_rec("v2", seed, [1] * MIN_EVENTS))
+    assert _build(research, tmp_path)[2]["retrain_decision"]["accept"] is True

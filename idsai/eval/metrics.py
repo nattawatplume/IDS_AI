@@ -25,6 +25,7 @@ from idsai.contracts.frames import LABELS, conform
 S_US = 1_000_000
 UNCLASSIFIED = "MM-T000"
 NAN = float("nan")
+MIN_EVENTS = 10  # fewer events: a comparison between two arms is not decided
 
 
 @dataclass(frozen=True)
@@ -213,6 +214,11 @@ def paired_bootstrap(
     idx = rng.integers(0, n, size=(n_boot, n))
     diffs = ma[idx].mean(axis=1) - mb[idx].mean(axis=1)
     return float(ma.mean() - mb.mean()), _ci(diffs)
+
+
+def few_events_th(n_events: int) -> str:
+    """Thai reason why `n_events < MIN_EVENTS` cannot decide a comparison."""
+    return f"ยังตัดสินไม่ได้ มีเหตุการณ์เพียง {n_events} ครั้ง ต้องมีอย่างน้อย {MIN_EVENTS} ครั้งจึงจะตัดสินได้"
 
 
 EFFECT_TOL = 1e-12

@@ -15,7 +15,10 @@ Protocol shared by every experiment (one `seed` per call; the CLI loops seeds):
 
 Event days and normal days are loaded with `load_day_windows`; windows of a set are
 concatenated and de-duplicated on `(symbol, t_end_us)` (first kept), and extension rows past
-`D+1` are dropped when the `D+1` partition is absent. Skipped days are counted per reason.
+`D+1` are dropped when the `D+1` partition is absent. Skipped days are counted per reason. A
+set's events are only the labels whose `t_start` falls on one of its event days: a label read
+through the near-midnight extension or an overlap belongs to another period, or was dropped from
+the split (`missing_day`), and is not counted here.
 
 `retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
 its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
@@ -247,6 +250,16 @@ def _dedupe(frames: list[pl.DataFrame], schema: dict[str, Any]) -> pl.DataFrame:
     )
 
 
+def _labels_on_days(labels: pl.DataFrame, days: Iterable[SymDay]) -> pl.DataFrame:
+    """Labels whose `(symbol, day_of(t_start))` is one of `days`."""
+    keys = {(sd.symbol, sd.day) for sd in days}
+    keep = [
+        (sym, day_of_us(t0)) in keys
+        for sym, t0 in labels.select("symbol", "t_start_us").iter_rows()
+    ]
+    return labels.filter(pl.Series(keep, dtype=pl.Boolean))
+
+
 class _Ctx:
     """Per-call state: split, labels, run metadata, and lazily loaded train frames."""
 
@@ -309,7 +322,7 @@ class _Ctx:
             schema.update({f"score__{d.name}": pl.Float64 for d in detectors})
         lab = pl.concat(labels) if labels else empty(LABELS)
         lab = lab.unique(subset=["label_id"], keep="first", maintain_order=True)
-        return _Part(_dedupe(frames, schema), lab, days, skipped=skipped)
+        return _Part(_dedupe(frames, schema), _labels_on_days(lab, days), days, skipped=skipped)
 
     def clean(self, days: Iterable[SymDay], detectors: list[Detector], **kw: Any) -> _Part:
         return self.load(((sd, None) for sd in days), detectors, **kw)
@@ -404,6 +417,7 @@ class _Ctx:
         part = self.clean([*events, *normal], detectors)
         loaded = set(part.days)
         part.fa_days = [sd for sd in normal if sd in loaded]
+        part.labels = _labels_on_days(part.labels, events)
         return part
 
     # ---- records
