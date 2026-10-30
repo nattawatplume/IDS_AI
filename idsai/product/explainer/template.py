@@ -11,9 +11,9 @@ Evidence value formats, by registry unit (z-score columns `z_*` are always "robu
 
 import math
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
 from idsai.detection.features.registry import WINDOW_BASES, spec_for
@@ -45,24 +45,42 @@ class Explanation:
 
 # ---------------------------------------------------------------- number parsing / validation
 
-_THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
-_DASHES = {c: "-" for c in [*range(0x2010, 0x2016), 0x2212, 0xFE63, 0xFF0D]}
-_TECH_ID_RE = re.compile(r"MM-T\d+(?:\.\d+)?")
+_MINUS_EXTRA = {0x2212, 0x02D7, 0x2796, 0x207B, 0x208B}
+_TECH_ID_RE = re.compile(r"(?<![A-Za-z0-9])MM-T\d{3}(?:\.\d{3})?(?![0-9.])")
 _NUM_RE = re.compile(
-    r"(?:(?<![A-Za-z0-9])(?P<sign>[-+]))?"
+    r"(?:(?<![A-Za-z0-9])(?P<sign>[-+])\s*)?"
     r"(?P<num>(?:\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.\d+)?|\.\d+)"
     r"(?:[eE](?P<exp>[-+]?\d+))?"
 )
 
 
+def _normalise(text: str) -> str:
+    """ASCII digits for every Unicode decimal digit (Nd), a plain minus for every dash-like
+    character (Pd and look-alikes), and no format characters (Cf, e.g. zero-width)."""
+    out = []
+    for c in text:
+        cat = unicodedata.category(c)
+        if cat == "Cf":
+            continue
+        if cat == "Nd":
+            out.append(str(unicodedata.digit(c)))
+        elif cat == "Pd" or ord(c) in _MINUS_EXTRA:
+            out.append("-")
+        else:
+            out.append(c)
+    return "".join(out)
+
+
 def numbers_in(text: str) -> list[float]:
     """Every number in `text`, strictly: ints, decimals (`.5` too), sci-notation, signs,
-    thousands separators, percents (value only) and Thai digits. The only exemption is a
-    technique id (`MM-T001`, `MM-T001.002`); digits glued to letters (`1000PEPEUSDT`, `z9.9`)
-    count, and malformed runs (`0.5.1`, `1_000`) yield every digit run. Unicode dashes are a
-    minus; a dash right after a letter or digit is a separator, not a sign. A value that
-    overflows, or underflows to zero from a nonzero mantissa, is nan."""
-    text = _TECH_ID_RE.sub(" ", text.translate(_THAI_DIGITS).translate(_DASHES))
+    thousands separators, percents (value only) and any Unicode decimal digits. The only
+    exemption is a technique id (`MM-T001`, `MM-T001.002`, exactly 3 digits each); digits glued
+    to letters (`1000PEPEUSDT`, `z9.9`) count, and malformed runs (`0.5.1`, `1_000`) yield every
+    digit run. Dash-like characters are a minus (format characters are dropped); a minus,
+    optionally followed by whitespace, before a number is a sign unless it directly follows a
+    letter or digit (then it is a separator). A value that overflows, or underflows to zero
+    from a nonzero mantissa, is nan."""
+    text = _TECH_ID_RE.sub(" ", _normalise(text))
     out = []
     for m in _NUM_RE.finditer(text):
         num = m["num"].replace(",", "")
@@ -104,7 +122,7 @@ def _no_neg_zero(s: str) -> str:
 
 def _fmt(value: float, unit: str) -> tuple[str, list[float]]:
     """Formatted value and the numbers it can legitimately show (displayed and raw)."""
-    if unit in _PERCENT_UNITS:
+    if unit in _PERCENT_UNITS and math.isfinite(value * 100):
         s = _no_neg_zero(f"{value * 100:.2f}%")
         return s, [float(s.rstrip("%")), value * 100]
     s = _no_neg_zero(_UNIT_FORMATS.get(unit, "{:.3g}").format(value))
@@ -152,17 +170,18 @@ def _render(alert) -> tuple[str, list[tuple[str, str]], list[float]]:
         ", ".join(f"{label} {shown}" for label, shown in facts) if facts else NO_EVIDENCE_TH
     )
 
-    t = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=alert.ts_event_us)
+    sod = (alert.ts_event_us // 1_000_000) % 86_400  # UTC seconds of day (floor, any int)
+    hh, mm, ss = sod // 3600, sod // 60 % 60, sod % 60
     p_shown = f"{alert.fused_p:.1e}"
     technique_name = _names().get(alert.technique_id, UNCLASSIFIED_TH)
     text = (
         f"พบความผิดปกติทางสถิติ ({alert.technique_id} {technique_name}) "
-        f"ที่ {alert.symbol} เวลา {t:%H:%M:%S} UTC: {facts_text}; "
+        f"ที่ {alert.symbol} เวลา {hh:02d}:{mm:02d}:{ss:02d} UTC: {facts_text}; "
         f"{alert.agreement} จาก 3 ชั้นตรวจจับเห็นพ้อง; "
         f"ความหายากเทียบตลาดปกติ p ≈ {p_shown}"
     )
     allowed += [
-        float(t.hour), float(t.minute), float(t.second),
+        float(hh), float(mm), float(ss),
         float(alert.agreement), 3.0,
         float(p_shown), alert.fused_p,
         *numbers_in(technique_name),

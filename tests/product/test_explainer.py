@@ -381,3 +381,128 @@ def test_glued_numbers_cannot_hide():
 def test_explain_text_always_validates(kw):
     a = make_alert(**kw)
     assert validate_numbers(explain(a).text_th, allowed_numbers(a))
+
+
+# ---------------------------------------------------------------- fix round 2
+
+
+def _has(allowed, x):
+    return any(math.isclose(a, x, rel_tol=1e-9, abs_tol=0) for a in allowed)
+
+
+@pytest.mark.parametrize("text", ["４e-999", "٤e-999", "๔e-999", "４e999"])
+def test_unicode_digits_get_overflow_checks(text):
+    got = numbers_in(text)
+    assert len(got) == 1 and math.isnan(got[0])
+    assert not validate_numbers(text, [0.0, 4.0, 1e300])
+
+
+def test_unicode_digits_normalised():
+    assert numbers_in("４") == [4.0]
+    assert numbers_in("٤.٥") == [4.5]
+    assert numbers_in("๑๒.๕") == [12.5]
+
+
+@pytest.mark.parametrize(
+    "text", ["XMM-T42.5", "MM-T99999.5%", "MM-T1", "MM-T001.5", "MM-T0011", "xMM-T001"]
+)
+def test_technique_exemption_is_narrow(text):
+    assert numbers_in(text), text
+    assert not validate_numbers(text, [3.0, 14.0, 60.0])
+
+
+@pytest.mark.parametrize("text", ["MM-T001", "MM-T001.002", "(MM-T000 x)", "ที่ MM-T005.001 ได้"])
+def test_technique_exemption_exact(text):
+    assert numbers_in(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- 4.2%",
+        "\u2212\xa05",
+        "-\u200b5",
+        "\u02d75",
+        "\u27965",
+        "\u207b5",
+        "\u208b5",
+        "\u2010 5",
+        "\u20115",
+        "\u20125",
+        "\u2013\u00a05",
+        "\ufe635",
+        "\uff0d5",
+        "a - 5",
+        "1 \u2212 5",
+    ],
+)
+def test_signs_fail_closed(text):
+    got = numbers_in(text)
+    assert got and got[-1] < 0, got
+    assert not validate_numbers(text, [4.2, 5.0])
+
+
+@pytest.mark.parametrize("text", ["x-5", "x\u20105", "7-8", "7\u2212 8"])
+def test_separator_after_letter_or_digit(text):
+    assert all(x > 0 for x in numbers_in(text))
+
+
+def test_every_desc_th_explained_text_validates():
+    for name in REGISTRY:
+        col = name if name.startswith(("cusum", "kk_")) else f"{name}_60"
+        for value in (1.0, -0.5, 0.0):
+            a = make_alert(evidence=[(col, value, 1.0), (f"z_{col}", -value, 0.5)])
+            t = explain(a).text_th
+            assert validate_numbers(t, allowed_numbers(a)), (name, value, t)
+    assert "(\u22121)" in REGISTRY["jump"].desc_th
+
+
+def test_percent_overflow_renders_generic():
+    a = make_alert(evidence=[("ret_60", 1e307, 1.0)])
+    t = explain(a).text_th
+    assert "inf" not in t.lower()
+    assert explain(a).facts[0][1] == "1e+307"
+    assert validate_numbers(t, allowed_numbers(a))
+
+
+@pytest.mark.parametrize(
+    "us,hms",
+    [
+        (10**20, None),
+        (-1, "23:59:59"),
+        (-(10**6) * 86400, "00:00:00"),
+        (0, "00:00:00"),
+        (86399 * 10**6 + 999_999, "23:59:59"),
+    ],
+)
+def test_time_integer_arithmetic(us, hms):
+    a = make_alert(ts_event_us=us)
+    t = explain(a).text_th
+    sod = (us // 10**6) % 86400
+    expect = f"{sod // 3600:02d}:{sod // 60 % 60:02d}:{sod % 60:02d}"
+    if hms:
+        assert expect == hms
+    assert f"เวลา {expect} UTC" in t
+    assert validate_numbers(t, allowed_numbers(a))
+
+
+def test_displayed_percent_needed():
+    a = make_alert(evidence=[("ret_60", 0.000056, 1.0)])
+    assert explain(a).facts[0][1] == "0.01%"
+    assert validate_numbers("0.01%", allowed_numbers(a))  # displayed
+    assert validate_numbers("0.0056", allowed_numbers(a))  # value * 100
+    assert not validate_numbers("0.000056", allowed_numbers(a))  # raw fraction
+
+
+def test_displayed_unit_and_raw_paths():
+    a = make_alert(evidence=[("buy_imb_60", 0.006, 1.0)])
+    assert explain(a).facts[0][1] == "0.01"
+    assert validate_numbers("0.01", allowed_numbers(a))  # displayed
+    assert validate_numbers("0.006", allowed_numbers(a))  # raw
+    z = make_alert(evidence=[("z_rush_60", 0.14, 1.0)])
+    assert _has(allowed_numbers(z), 0.14) and _has(allowed_numbers(z), 0.1)
+    p = make_alert(fused_p=1.049e-4)
+    assert "1.0e-04" in explain(p).text_th
+    assert validate_numbers("1.0e-04", allowed_numbers(p))  # displayed
+    assert validate_numbers("1.049e-4", allowed_numbers(p))  # raw
+    assert not validate_numbers("1.2e-4", allowed_numbers(p))
