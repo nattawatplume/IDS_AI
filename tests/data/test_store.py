@@ -316,3 +316,43 @@ def test_close_is_idempotent_and_persists(tmp_path):
     s.close()
     with Store(tmp_path / "d", tmp_path / "d" / "app.duckdb") as s2:
         assert s2.get_alert("a1") == make_alert()
+
+
+# ---- alert deletion (seek) ----
+
+
+def _windowed(alert_id, end, provenance="replay"):
+    return make_alert(alert_id, ts=end - 10, window=(end - 10, end), provenance=provenance)
+
+
+def test_delete_alerts_from_uses_the_window_end_and_the_provenance(store):
+    t = D1_US + 1_000
+    for a in (
+        _windowed("old", t - 1),
+        _windowed("at", t),
+        _windowed("new", t + 5),
+        _windowed("sim", t + 5, "sim"),
+        _windowed("live", t + 5, "live"),
+    ):
+        store.insert_alert(a)
+    assert sorted(store.delete_alerts_from("replay", t)) == ["at", "new"]
+    assert {a.alert_id for a in store.list_alerts()} == {"old", "sim", "live"}
+    assert store.delete_alerts_from("replay", t) == []
+
+
+def test_delete_alerts_by_id_only_within_the_provenance(store):
+    for a in (_windowed("a", D1_US), _windowed("b", D1_US, "sim"), _windowed("c", D1_US, "live")):
+        store.insert_alert(a)
+    assert store.delete_alerts("replay", ["a", "b", "c", "missing"]) == ["a"]
+    assert {a.alert_id for a in store.list_alerts()} == {"b", "c"}
+    assert store.delete_alerts("replay", []) == []
+
+
+@pytest.mark.parametrize("provenance", ["live", "LIVE", "other", ""])
+def test_alert_deletion_refuses_live_and_unknown_provenance(store, provenance):
+    store.insert_alert(_windowed("c", D1_US, "live"))
+    with pytest.raises(ValueError):
+        store.delete_alerts_from(provenance, 0)
+    with pytest.raises(ValueError):
+        store.delete_alerts(provenance, ["c"])
+    assert store.get_alert("c") is not None

@@ -69,3 +69,17 @@ def test_publish_wakes_a_waiting_consumer():
         return await asyncio.wait_for(waiter, 1)
 
     assert asyncio.run(main()) == "x"
+
+
+def test_unsubscribe_stops_delivery_and_drop_counting_and_is_idempotent():
+    bus = Bus(maxsize=1)
+    gone, kept = bus.subscribe("bars"), bus.subscribe("bars")
+    bus.unsubscribe("bars", gone)
+    bus.unsubscribe("bars", gone)
+    bus.publish("bars", 1)
+    assert gone.empty() and kept.get_nowait() == 1
+    bus.publish("bars", 2)
+    bus.publish("bars", 3)
+    assert bus.dropped["bars"] == 1  # only the kept queue
+    with pytest.raises(ValueError):
+        bus.unsubscribe("nope", gone)

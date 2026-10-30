@@ -13,7 +13,8 @@ up its features. `("preroll_done", start)` then says that everything before `sta
 the marker comes first, so a consumer never waits for it forever.
 
 `seek(t)` restarts from `max(first second, t - 24 h)`: `("seek", t)` first, so the consumer drops
-its state, then the pre-roll, then `("preroll_done", t)`. A replay that ran out cannot be sought.
+its state, then the pre-roll, then `("preroll_done", t)`. A replay that ran out cannot be sought
+(RuntimeError): start a new Replayer.
 
 Speed only changes the delays, never the events. All controls are plain synchronous calls: with a
 single event loop they always run between two events, so they cannot tear the replay state.
@@ -76,6 +77,7 @@ class Replayer:
         origin = start if preroll_from_us is None else self._clamp(preroll_from_us)
         self._paused = False
         self._announce_seek: int | None = None
+        self._ended = False
         self._begin(origin, start)
 
     # ---- state ----
@@ -121,6 +123,8 @@ class Replayer:
 
     def seek(self, t_us: int) -> None:
         """Jump to `t_us` (floored to the second, clamped to the data range)."""
+        if self._ended:
+            raise RuntimeError("this replay has ended and cannot seek: start a new Replayer")
         t = self._clamp(t_us)
         self._begin(max(self._first, t - PREROLL_US), t)
         self._announce_seek = t
@@ -214,6 +218,7 @@ class Replayer:
                 continue
             ev = self._next_event()
             if ev is None:
+                self._ended = True
                 return
             kind, t = ev
             if not self._preroll_pending and not await self._pace(t):

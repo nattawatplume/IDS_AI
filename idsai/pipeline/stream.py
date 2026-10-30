@@ -1,8 +1,12 @@
 """Stream pipeline: event source -> bars -> window rows -> scores -> Chief -> store + bus.
 
-Reproduces the batch path of `pipeline.batch` on the same trades: rows are rounded through float32
-exactly as `load_day_windows` returns them (detectors are fitted and calibrated on those), then
-scored by the same `score_windows` and fused by the same `Chief`.
+Rows are rounded through float32 exactly as `load_day_windows` returns them (detectors are fitted
+and calibrated on those), then scored by the same `score_windows` and fused by the same `Chief`.
+
+Parity with the batch path: bit-identical from the same first bar. Across days, batch restarts its
+kernel per day while stream runs on, so the first hour of later days differs (z-scores and F
+included) and episodes crossing midnight may merge. After a seek, rows equal a fresh run from the
+re-pre-roll point.
 
 A source is an async iterable of `("trade", Trade)`, `("tick", t_us)`, `("preroll_done", t_us)` and
 `("seek", t_us)` events (`data.replay.Replayer`). The first event fixes the first second of every
@@ -12,6 +16,12 @@ source that wants output must therefore send `preroll_done`.
 
 Every default detector is row-independent (no state between `score` calls), so skipping them in
 the pre-roll cannot change a later score; CUSUM state lives in the feature kernel.
+
+Bus messages: `bars` = bar dict, `scores` = `{symbol, **series point}`, `alerts` = `Alert`, or on a
+seek one `{"event": "alerts_reset", "t_us": target, "deleted": [alert ids]}`, telling a dashboard
+to drop those rows. A seek discards open episodes without any alert, and deletes their stored rows
+plus every stored alert of this provenance whose window ends at or after the target; it is refused
+in live mode, and live rows are never touched.
 """
 
 import asyncio
@@ -34,11 +44,12 @@ from idsai.data.store import Store
 from idsai.detection.features.bars import S_US, BarBuilder
 from idsai.detection.features.streaming import StreamingWindows
 from idsai.detection.features.windows import windows_schema
-from idsai.pipeline.batch import _round_f32, score_windows
+from idsai.pipeline.batch import round_f32, score_windows
 
 MODES = ("live", "replay", "sim")
 LATENCY_SAMPLES = 10_000
 SERIES_S = 86_400
+BACKLOG_YIELD_BARS = 1000  # bars closed by one tick between two yields to the event loop
 
 
 def _finite_or_none(x: Any) -> Any:
@@ -97,18 +108,17 @@ class StreamPipeline:
                 if kind == "trade":
                     self._on_trade(payload)
                 elif kind == "tick":
-                    self._on_tick(payload)
+                    await self._on_tick(payload)
                 elif kind == "preroll_done":
                     self._on_preroll_done(payload)
                 elif kind == "seek":
-                    self._close_episodes()
-                    self._reset()
+                    self._on_seek(payload)
                 else:
                     raise ValueError(f"unknown stream event {kind!r}")
         except asyncio.CancelledError:
-            self._finish()
+            await self._finish()
             raise
-        self._finish()
+        await self._finish()
 
     # ---- events ----
 
@@ -126,14 +136,26 @@ class StreamPipeline:
             self._windows[symbol] = StreamingWindows(symbol, self.cfg.features, unit)
         return b
 
-    def _on_tick(self, t_us: int) -> None:
+    async def _on_tick(self, t_us: int) -> None:
         received = time.monotonic()
         if self._origin_us is None:
             self._origin_us = (t_us - 1) // S_US * S_US  # this tick closes the first second
         self._last_tick_us = t_us
+        n = 0
         for b in self._builders.values():
             for bar in b.on_tick(t_us):
                 self._on_bar(bar, received)
+                n += 1
+                if n % BACKLOG_YIELD_BARS == 0:  # a late symbol catches up on many empty bars
+                    await asyncio.sleep(0)
+
+    def _on_seek(self, target_us: int) -> None:
+        if self.mode == "live":
+            raise ValueError("a live pipeline cannot seek")
+        deleted = self.store.delete_alerts(self.mode, self._stream.discard_open())
+        deleted += self.store.delete_alerts_from(self.mode, target_us)
+        self.bus.publish("alerts", {"event": "alerts_reset", "t_us": target_us, "deleted": deleted})
+        self._reset()
 
     def _on_preroll_done(self, t_us: int) -> None:
         if self._origin_us is None:
@@ -148,7 +170,7 @@ class StreamPipeline:
         self.bus.publish("bars", {k: _finite_or_none(v) for k, v in bar.items()})
         if row is None:
             return
-        frame = _round_f32(pl.DataFrame([row], schema=self._schema), self.cfg.features)
+        frame = round_f32(pl.DataFrame([row], schema=self._schema), self.cfg.features)
         scored = score_windows(frame, self.detectors)
         alerts = self._stream.step(scored.to_dicts()[0])
         self.latency_ms.append((time.monotonic() - received) * 1000.0)
@@ -176,10 +198,7 @@ class StreamPipeline:
             self.store.upsert_alert(a)
             self.bus.publish("alerts", a)
 
-    def _close_episodes(self) -> None:
-        self._emit(self._stream.flush())
-
-    def _finish(self) -> None:
+    async def _finish(self) -> None:
         if self._grace_s and self._last_tick_us is not None:
-            self._on_tick(self._last_tick_us + self._grace_s * S_US)  # bars still in their grace
-        self._close_episodes()
+            await self._on_tick(self._last_tick_us + self._grace_s * S_US)  # bars still in grace
+        self._emit(self._stream.flush())

@@ -29,6 +29,12 @@ class Bus:
         self._queues(topic).append(q)
         return q
 
+    def unsubscribe(self, topic: str, queue: asyncio.Queue) -> None:
+        """Stop delivering to `queue`; removing a queue that is not subscribed is a no-op."""
+        queues = self._queues(topic)
+        if queue in queues:
+            queues.remove(queue)
+
     def publish(self, topic: str, msg: Any) -> None:
         for q in self._queues(topic):
             if q.full():

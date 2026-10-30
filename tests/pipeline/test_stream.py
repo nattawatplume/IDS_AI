@@ -360,23 +360,6 @@ def test_seek_through_the_pipeline_rebuilds_state(small, tmp_path, target_h, at_
     assert ts == sorted(ts)
 
 
-def test_seek_closes_the_open_episode_so_no_stale_open_alert_remains(small, store):
-    t0 = small["t0"]
-
-    async def source():
-        r = Replayer(small["trades"], speed=0)
-        sought = False
-        async for k, v in r:
-            yield k, v
-            if k == "tick" and v == t0 + 3600 * S + 5 * S and not sought:
-                sought = True
-                r.seek(t0 + 3 * 3600 * S)
-
-    asyncio.run(pipe_for(small, store).run(source()))
-    al = store.list_alerts(limit=1000)
-    assert al and {a.status for a in al} == {"closed"}
-
-
 def test_series_is_bounded_and_strict_json(small, store):
     p = pipe_for(small, store)
     assert p._ring_maxlen == 86_400 // small["cfg"].features.stride_s

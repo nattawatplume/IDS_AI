@@ -384,3 +384,12 @@ def test_requested_range_before_the_first_trade_ticks_from_the_requested_second(
     r = Replayer(frame([T0 + 3 * S]), speed=0, start_us=T0)
     r.seek(T0 - 100 * S)
     assert r.cursor_us == T0
+
+
+def test_seek_after_the_end_raises_with_the_cursor_unchanged():
+    r = Replayer(frame([T0, T0 + S]), speed=0)
+    collect(r)
+    c = r.cursor_us
+    with pytest.raises(RuntimeError):
+        r.seek(T0)
+    assert r.cursor_us == c
