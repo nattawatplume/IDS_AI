@@ -21,6 +21,12 @@ Alert budget: `fit_threshold` picks the smallest `tau` (among observed `F` value
 episodes per symbol-day on calibration data stay within the budget. Exceedances are rows with
 `F >= tau` and `F > 0`, grouped per symbol; consecutive exceedances at most `suppress_for_s`
 apart belong to the same episode.
+
+Episode technique: `technique_id`, `signature_id` and `rev` come from the episode's highest-`F`
+exceedance row whose technique is not `MM-T000` (earliest on ties), so an episode whose peak row
+is unclassified still names the technique a less extreme row found; `MM-T000` only when no row
+classifies. `fused_p`, `window`, `detectors`, `agreement`, `severity` and `evidence` stay from the
+peak row. Batch and stream both fold rows through `_Attribution.merge`.
 """
 
 import math
@@ -95,6 +101,29 @@ class _Episode:
     symbol: str
     first_us: int
     last_us: int
+
+
+@dataclass(frozen=True)
+class _Attribution:
+    """The technique an episode reports so far, and the `F` of the row it came from."""
+
+    F: float
+    technique: str
+    signature_id: int | None
+    rev: int | None
+
+    @property
+    def label(self) -> tuple[str, int | None, int | None]:
+        """What an alert shows of this attribution."""
+        return self.technique, self.signature_id, self.rev
+
+    def merge(self, later: "_Attribution") -> "_Attribution":
+        """Attribution after a later row: highest-`F` classified row, earliest on ties."""
+        if later.technique == UNCLASSIFIED:
+            return self
+        if self.technique == UNCLASSIFIED or later.F > self.F:
+            return later
+        return self
 
 
 class Chief:
@@ -308,16 +337,29 @@ class Chief:
         starts = np.flatnonzero(new)
         return pos, starts, np.append(starts[1:], pos.size)
 
+    def _attribution(self, fu: _Fusion, i: int) -> _Attribution:
+        """The technique row `i` of `fu` names on its own."""
+        rule_j = int(fu.rule[i])
+        sig = self.detectors[rule_j] if rule_j >= 0 else None
+        return _Attribution(
+            F=float(fu.F[i]),
+            technique=str(fu.technique[i]),
+            signature_id=sig.signature_id if sig is not None else None,
+            rev=sig.rev if sig is not None else None,
+        )
+
     def _alert(
         self,
         ep: _Episode,
         fu: _Fusion,
         i: int,
         row: dict[str, Any],
+        attribution: _Attribution,
         status: Literal["open", "updated", "closed"],
         provenance: Provenance,
     ) -> Alert:
-        """Build one alert from the peak row `i` of `fu` (shared by batch and stream)."""
+        """Build one alert from the peak row `i` of `fu` and the episode's `attribution` (shared
+        by batch and stream)."""
         best = self.detectors[int(fu.best[i])]
         if all(c in row for c in best.requires):
             clean = {c: (math.nan if row[c] is None else row[c]) for c in best.requires}
@@ -329,16 +371,14 @@ class Chief:
             ]
         else:
             evidence = []
-        rule_j = int(fu.rule[i])
-        sig = self.detectors[rule_j] if rule_j >= 0 else None
         agreement = int(fu.agreement[i])
         return Alert(
             alert_id=alert_id_for(provenance, ep.symbol, ep.first_us),
             ts_event_us=ep.first_us,
             symbol=ep.symbol,
-            technique_id=str(fu.technique[i]),
-            signature_id=sig.signature_id if sig is not None else None,
-            rev=sig.rev if sig is not None else None,
+            technique_id=attribution.technique,
+            signature_id=attribution.signature_id,
+            rev=attribution.rev,
             severity=1 + int(agreement >= 2) + int(agreement >= 3),
             status=status,
             fused_p=10.0 ** -float(fu.F[i]),
@@ -366,26 +406,28 @@ class Chief:
     ) -> list[Alert]:
         """Closed alert episodes of `fuse` output: rows with `F >= tau`, grouped per symbol.
 
-        `tau` defaults to `self.tau`. Fields come from the episode's peak row (max `F`, earliest
-        on ties). Alerts are ordered by `(symbol, first_us)`.
+        `tau` defaults to `self.tau`. `fused_p`, window, detectors, agreement and evidence come
+        from the episode's peak row (max `F`, earliest on ties); the technique and signature from
+        its highest-`F` classified row (see the module docstring). Alerts are ordered by
+        `(symbol, first_us)`.
         """
         tau = self._resolve_tau(tau)
         order, sym, t, F = self._sorted_view(fused)
         pos, starts, ends = self._group(sym, t, F, tau)
         if starts.size == 0:
             return []
-        peaks, bounds = [], []
+        fu = self._fuse_matrix(self._score_matrix(fused[order[pos].tolist()]))
+        out = []
         for a, b in zip(starts, ends, strict=True):
             seg = pos[a:b]
-            peaks.append(int(order[seg[int(np.argmax(F[seg]))]]))  # first max = earliest
-            bounds.append((int(t[seg[0]]), int(t[seg[-1]])))
-        peak_rows = fused[peaks]
-        fu = self._fuse_matrix(self._score_matrix(peak_rows))
-        dicts = peak_rows.to_dicts()
-        return [
-            self._alert(_Episode(d["symbol"], first, last), fu, i, d, "closed", provenance)
-            for i, (d, (first, last)) in enumerate(zip(dicts, bounds, strict=True))
-        ]
+            peak = int(a) + int(np.argmax(F[seg]))  # first max = earliest
+            attribution = self._attribution(fu, int(a))
+            for i in range(int(a) + 1, int(b)):
+                attribution = attribution.merge(self._attribution(fu, i))
+            row = fused[int(order[pos[peak]])].to_dicts()[0]
+            ep = _Episode(row["symbol"], int(t[seg[0]]), int(t[seg[-1]]))
+            out.append(self._alert(ep, fu, peak, row, attribution, "closed", provenance))
+        return out
 
     # ------------------------------------------------------------ threshold
 
@@ -398,8 +440,10 @@ class Chief:
 
         When no observed value fits (or every `F` is 0), `tau` is the next float above `max(F)`,
         which gives no calibration episodes. When no candidate exceeds the budget at all (the
-        budget is at or above the data's peak episode rate), `tau` is the smallest positive `F`,
-        `self.tau_saturated` is set and a `RuntimeWarning` is issued; eval reports the flag.
+        budget is at or above the data's peak episode rate), `self.tau_saturated` is set and a
+        `RuntimeWarning` is issued; eval reports the flag. `tau` is then the smallest positive `F`,
+        or, with no positive `F` at all (say a rule that never fires in calibration), that next
+        float above `max(F)`: the budget was never tested against any episode.
         """
         self._require_calibration()
         budget = float(budget_per_symbol_day)
@@ -453,12 +497,17 @@ class Chief:
                 best, lo = mid, mid + 1
             else:
                 hi = mid - 1
-        saturated = cand.size > 0 and bad == cand.size
+        saturated = bad == cand.size
         if saturated:
+            why = (
+                "tau saturated at the smallest positive F (near-continuous exceedances merged "
+                "into few episodes)"
+                if cand.size > 0
+                else "no row has a positive F, so tau stays above every F"
+            )
             warnings.warn(
                 f"alert budget {budget:g} per symbol-day is at or above the peak episode rate "
-                "of the calibration data: tau saturated at the smallest positive F "
-                "(near-continuous exceedances merged into few episodes); tau_saturated=True",
+                f"of the calibration data: {why}; tau_saturated=True",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -519,6 +568,7 @@ class _Open:
     peak_F: float
     peak: _Fusion
     peak_row: dict[str, Any]
+    attribution: _Attribution
 
 
 class ChiefStream:
@@ -527,7 +577,8 @@ class ChiefStream:
     `step(row)` takes one scored row (`symbol`, `t_end_us`, `score__<name>`, plus any feature
     columns used for evidence) and returns 0-2 alerts: a `closed` alert for this symbol's open
     episode when the row lies more than `suppress_for_s` after its last exceedance, then `open`
-    (first exceedance) or `updated` (the episode's peak `F` rose). `flush()` closes everything.
+    (first exceedance) or `updated` (the episode's peak `F` rose, or the technique or signature
+    it reports changed; see the `Chief` module docstring). `flush()` closes everything.
 
     Closing is driven only by later rows of the same symbol or by `flush()`: an episode of a
     symbol whose rows stop stays open. LIVE must call `flush()` on shutdown or when a symbol
@@ -542,7 +593,9 @@ class ChiefStream:
         self._last_t: dict[str, int] = {}
 
     def _emit(self, o: _Open, status: Literal["open", "updated", "closed"]) -> Alert:
-        return self.chief._alert(o.episode, o.peak, 0, o.peak_row, status, self.provenance)
+        return self.chief._alert(
+            o.episode, o.peak, 0, o.peak_row, o.attribution, status, self.provenance
+        )
 
     def step(self, row: dict[str, Any]) -> list[Alert]:
         ch = self.chief
@@ -572,16 +625,20 @@ class ChiefStream:
         F = float(fu.F[0])
         if not (F >= tau and F > 0):
             return out
+        attribution = ch._attribution(fu, 0)
         if o is None:
-            o = _Open(_Episode(symbol, t, t), F, fu, dict(row))
+            o = _Open(_Episode(symbol, t, t), F, fu, dict(row), attribution)
             self._open[symbol] = o
             out.append(self._emit(o, "open"))
-        elif F > o.peak_F:
-            o.episode.last_us = t
+            return out
+        o.episode.last_us = t
+        before = o.attribution.label
+        o.attribution = o.attribution.merge(attribution)
+        rose = F > o.peak_F
+        if rose:
             o.peak_F, o.peak, o.peak_row = F, fu, dict(row)
+        if rose or o.attribution.label != before:
             out.append(self._emit(o, "updated"))
-        else:
-            o.episode.last_us = t
         return out
 
     def discard_open(self) -> list[str]:
