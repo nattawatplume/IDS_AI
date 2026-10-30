@@ -105,6 +105,8 @@ class StreamPipeline:
         self._origin_us: int | None = None
         self._publish_from_us: int | None = None
         self._last_tick_us: int | None = None
+        self._latest_us: int | None = None  # the last tick or gap end, for what is in the baseline
+        self._late_before_gaps = 0
         self._ring.clear()
 
     def series(self, symbol: str) -> list[dict[str, Any]]:
@@ -113,9 +115,21 @@ class StreamPipeline:
         return list(self._ring.get(symbol, ()))
 
     def baseline_samples(self, symbol: str) -> int:
-        """Baseline samples of `symbol` so far (0 when unknown), for `Auditor.warmup`."""
+        """Baseline samples of `symbol` in the window ending at the last tick (0 when unknown), for
+        `Auditor.warmup`: samples of an old archive that are about to age out do not count."""
         w = self._windows.get(symbol)
-        return 0 if w is None else w.kernel.baseline.n_samples
+        if w is None:
+            return 0
+        baseline = w.kernel.baseline
+        return (
+            baseline.n_samples
+            if self._latest_us is None
+            else baseline.samples_in_window(self._latest_us)
+        )
+
+    def late_trades(self) -> int:
+        """Trades dropped as late so far, over all symbols and across gaps."""
+        return self._late_before_gaps + sum(b.late for b in self._builders.values())
 
     async def run(self, source: AsyncIterable[tuple[str, Any]]) -> None:
         """Consume `source` to its end, then close the open episodes and store / publish them.
@@ -174,6 +188,7 @@ class StreamPipeline:
         if self._origin_us is None:
             self._origin_us = (t_us - 1) // S_US * S_US  # this tick closes the first second
         self._last_tick_us = t_us
+        self._latest_us = t_us
         n = 0
         for b in self._builders.values():
             for bar in b.on_tick(t_us):
@@ -186,10 +201,12 @@ class StreamPipeline:
         if self._grace_s and self._last_tick_us is not None:
             await self._on_tick(self._last_tick_us + self._grace_s * S_US)  # bars still in grace
         baselines = {s: w.kernel.baseline for s, w in self._windows.items()}
+        self._late_before_gaps = self.late_trades()
         self._builders.clear()
         self._windows.clear()
         self._origin_us = span[1] // S_US * S_US
         self._last_tick_us = None
+        self._latest_us = span[1]
         for symbol, baseline in baselines.items():
             self._builder(symbol, baseline)
 

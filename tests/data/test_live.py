@@ -18,6 +18,7 @@ from idsai.ai.auditor import Auditor
 from idsai.bus import Bus
 from idsai.config import load_settings
 from idsai.contracts.events import Trade
+from idsai.data import live
 from idsai.data.live import GAP_RESTART_S, LiveTradeSensor, parse_trade, warmup_then_live
 from idsai.data.replay import Replayer
 from idsai.data.store import Store
@@ -59,6 +60,10 @@ class Clock:
 
     def __call__(self) -> int:
         return self.exchange + self.skew_us
+
+    def mono(self) -> float:
+        """A monotonic clock: exchange time passes on it, a step of the local clock does not."""
+        return (self.exchange - T0) / S
 
 
 class Sleeps:
@@ -117,8 +122,11 @@ def ids(events: list[tuple[str, Any]]) -> list[int]:
 
 
 def sensor_for(url: str, clock=None, sleep=None, symbols=None, **kw) -> LiveTradeSensor:
+    """Fake clocks and backoff; the hold before the start is off unless a test is about it."""
+    clock = clock or Clock()
+    kw.setdefault("start_hold_s", 0)
     return LiveTradeSensor(
-        symbols or [SYM], url, clock=clock or Clock(), sleep=sleep or Sleeps(), **kw
+        symbols or [SYM], url, clock=clock, monotonic=clock.mono, sleep=sleep or Sleeps(), **kw
     )
 
 
@@ -216,6 +224,9 @@ def test_the_configured_url_is_allowed():
         "https://data-stream.binance.vision/stream",
         "wss://key:secret@data-stream.binance.vision/stream",
         "wss://data-stream.binance.vision/stream?streams=x",
+        "wss://data-stream.binance.vision/stream?",
+        "wss://data-stream.binance.vision/stream#",
+        "ws://127.0.0.1:1/stream?",
         "wss:///stream",
         "",
     ],
@@ -237,8 +248,6 @@ def test_symbols_are_checked(symbols):
 
 
 def test_no_order_or_auth_code_in_the_module():
-    import idsai.data.live as live
-
     src = open(live.__file__, encoding="utf-8").read()
     assert ".send(" not in src
     for word in (
@@ -602,11 +611,14 @@ class Lockstep:
         self.clock = clock
         self.ack = asyncio.Event()
 
-    async def send(self, ws, msg: str, t_us: int) -> None:
+    async def send(self, ws, msg: str, t_us: int, ack: bool = True) -> None:
         self.clock.exchange = t_us
         self.ack.clear()
         await ws.send(msg)
-        await self.ack.wait()
+        if ack:
+            await self.ack.wait()
+        else:  # a message the sensor holds back: nothing to wait for
+            await asyncio.sleep(0.01)
 
 
 async def acked(sensor, step: Lockstep):
@@ -717,42 +729,44 @@ def test_a_skewed_local_clock_loses_no_trade_in_a_real_bar_builder(skew_s):
     assert not math.isnan(bars[-1]["close"])
 
 
-def test_ticks_never_go_back_when_the_local_clock_does():
+@pytest.mark.parametrize("step_s", [90, -90])
+def test_a_wall_clock_step_while_connected_has_no_effect(step_s):
     clock = Clock()
     step = None
 
     async def handler(ws):
         for i in range(10):
             await step.send(ws, tmsg(i), T0 + i * S)
-        clock.skew_us = -30 * S  # the local clock is set back, and a trade shows it
+        clock.skew_us = step_s * S
+        await asyncio.sleep(0.02)  # the sensor looks at its clocks without a trade first
         for i in range(10, 20):
             await step.send(ws, tmsg(i), T0 + i * S)
-        clock.skew_us = -300 * S  # again, with no trade yet to correct the offset
-        await asyncio.sleep(0.02)
-        await step.send(ws, tmsg(20), T0 + 20 * S)
         await ws.wait_closed()
 
     async def main():
         nonlocal step
         step = Lockstep(clock)
         builder = BarBuilder(SYM, grace_s=2)
-        ticks = []
+        ticks, trades = [], []
         async with server(handler) as url:
             sensor = sensor_for(url, clock=clock)
             async for kind, v in acked(sensor, step):
                 if kind == "tick":
                     ticks.append(v)
-                    builder.on_tick(v)  # raises if a tick goes backward
+                    builder.on_tick(v)
                 elif kind == "trade":
                     builder.on_trade(v)
-                    if v.trade_id == 20:
+                    trades.append(v)
+                    if v.trade_id == 19:
                         break
             await sensor.aclose()
-        return ticks, builder
+        return ticks, trades, builder, sensor
 
-    ticks, builder = run(main())
-    assert ticks == sorted(set(ticks))
-    assert builder.late == 0
+    ticks, trades, builder, sensor = run(main())
+    assert sensor.gaps == 0 and builder.late == 0
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
+    assert sensor.clock_skew_ms == pytest.approx(0, abs=1000)
+    assert trades[-1].recv_us == trades[-1].ts_us + step_s * S  # recv_us stays the wall clock
 
 
 # ------------------------------------------------------------------ gaps
@@ -769,7 +783,7 @@ def outage_events(outage_s: float) -> tuple[list, LiveTradeSensor]:
             await step.send(ws, tmsg(2, T0 + 2 * S), T0 + 2 * S)
         else:
             t = clock.exchange
-            await step.send(ws, tmsg(3, t + 100), t + 100)
+            await step.send(ws, tmsg(3, t), t)
             await step.send(ws, tmsg(4, t + 100_000), t + 100_000)
             await ws.wait_closed()
 
@@ -811,6 +825,13 @@ def test_a_short_outage_resumes_ticks_without_a_gap():
     ticks = [e[1] for e in out if e[0] == "tick"]
     assert ticks == list(range(T0 + 2 * S, ticks[-1] + 1, S))  # the short empty fill, every second
     assert ticks[-1] >= T0 + (GAP_RESTART_S - 1) * S
+
+
+@pytest.mark.parametrize("outage_s, gaps", [(60, 0), (61, 1)])
+def test_the_exact_gap_boundary(outage_s, gaps):
+    out, sensor = outage_events(outage_s)
+    assert sensor.gaps == gaps
+    assert [e[0] for e in out].count("gap") == gaps
 
 
 def test_a_stall_while_connected_is_a_gap_too():
@@ -855,10 +876,12 @@ LIVE_T = T0 + 8 * 3600 * S
 class FakeSensor:
     """Events given in advance; records its closing."""
 
-    def __init__(self, events: list[tuple[str, Any]]):
+    def __init__(self, events: list[tuple[str, Any]], symbols: list[str] | None = None):
         self.events = events
         self.closed = False
         self._it = iter(events)
+        if symbols is not None:
+            self.symbols = symbols
 
     def __aiter__(self):
         return self
@@ -1063,6 +1086,319 @@ def test_fake_server_to_a_live_pipeline_to_a_stored_alert(store):
         assert store.get_alert(a.alert_id) is not None
     with pytest.raises(ValueError):  # a live pipeline cannot seek, and live rows stay
         pipe._on_seek(T0)
+
+
+# ------------------------------------------------------------------ fix round 1
+DAY_S = 86_400
+
+
+def rogue_run(at: int, rogue_s: int, n_after: int = 30, **rogue_fields: Any):
+    """Trades 0.2 s apart; number `at` carries a `T` that is `rogue_s` ahead. Real start hold."""
+    clock = Clock()
+    total = at + n_after
+    step = None
+
+    async def handler(ws):
+        for i in range(total):
+            t = T0 + i * S // 5
+            msg = tmsg(i, t + rogue_s * S if i == at else t, **(rogue_fields if i == at else {}))
+            await step.send(ws, msg, t, ack=i != 0 and not (rogue_fields and i == at))
+        await ws.wait_closed()
+
+    async def main():
+        nonlocal step
+        step = Lockstep(clock)
+        builder = BarBuilder(SYM, grace_s=2)
+        bars = []
+        async with server(handler) as url:
+            sensor = sensor_for(url, clock=clock, start_hold_s=5)
+            first = None
+            async for kind, v in acked(sensor, step):
+                first = first if first is not None else (kind, v)
+                if kind == "trade":
+                    builder.on_trade(v)
+                    if v.trade_id == total - 1:
+                        break
+                elif kind == "tick":
+                    bars += builder.on_tick(v)
+            await sensor.aclose()
+        return builder, bars, sensor, first
+
+    return run(main())
+
+
+@pytest.mark.parametrize("rogue_s", [30, 3600, DAY_S])
+@pytest.mark.parametrize("at", [0, 1, 1000])
+def test_one_rogue_trade_does_not_wreck_the_session(at, rogue_s):
+    builder, bars, sensor, first = rogue_run(at, rogue_s)
+    assert builder.late == 0 and sensor.gaps == 0
+    assert sensor.clock_skew_ms == pytest.approx(0, abs=1000)
+    assert first == ("preroll_done", T0)
+    assert sum(b["n_trades"] for b in bars) > 0  # the session goes on closing real bars
+
+
+def test_a_trade_time_far_from_its_event_time_is_refused():
+    assert parse_trade(body(1, E=T0 + 1 * S + 60 * S)).trade_id == 1
+    with pytest.raises(ValueError):
+        parse_trade(body(1, E=T0 + 1 * S + 60 * S + 1))
+    with pytest.raises(ValueError):
+        parse_trade(body(1, E=T0 + 1 * S - 60 * S - 1))
+    with pytest.raises(ValueError):
+        parse_trade(body(1, E="soon"))
+
+
+def test_a_rogue_refused_by_its_event_time_is_only_counted():
+    builder, _, sensor, _ = rogue_run(1, DAY_S, E=T0)
+    assert sensor.bad == 1 and builder.late == 0 and sensor.gaps == 0
+
+
+def test_a_lone_first_trade_is_released_when_the_hold_ends():
+    clock = Clock()
+
+    async def handler(ws):
+        await ws.send(tmsg(0, T0))
+        await ws.wait_closed()
+
+    async def main():
+        async with server(handler) as url:
+            sensor = sensor_for(url, clock=clock, start_hold_s=5)
+            reader = asyncio.create_task(anext(sensor))
+            await asyncio.sleep(0.05)
+            assert not reader.done()
+            clock.exchange += 5 * S
+            first = await reader
+            second = await anext(sensor)
+            await sensor.aclose()
+            return first, second
+
+    first, second = run(main())
+    assert first == ("preroll_done", T0) and second[0] == "trade"
+
+
+@pytest.mark.parametrize(
+    "poison",
+    [
+        json.dumps(body(1)).replace('"2.5"', "1" + "0" * 400),  # p = 10**400: OverflowError
+        "[" * 200_000,  # RecursionError
+        "[]",
+        "null",
+        json.dumps(body(1, t=2**70)),  # would not fit the store's int64
+        json.dumps(body(1, T=2**70, E=2**70)),
+    ],
+    ids=["overflow", "recursion", "list", "null", "huge_id", "huge_time"],
+)
+def test_poison_messages_are_counted_and_the_iterator_goes_on(poison):
+    async def handler(ws):
+        await ws.send(poison)
+        await ws.send(tmsg(2))
+        await ws.wait_closed()
+
+    async def main():
+        async with server(handler) as url:
+            sensor = sensor_for(url)
+            got = await take(sensor, 1)
+            await sensor.aclose()
+            return ids(got), sensor.bad
+
+    assert run(main()) == ([2], 1)
+
+
+def test_parse_trade_says_valueerror_for_poison_too():
+    with pytest.raises(ValueError):
+        parse_trade("[" * 200_000)
+    with pytest.raises(ValueError):
+        parse_trade(body(1, p=10**400))
+
+
+def test_aclose_from_another_task_ends_a_pending_anext():
+    async def handler(ws):
+        await ws.wait_closed()
+
+    async def main():
+        async with server(handler) as url:
+            sensor = sensor_for(url)
+
+            async def consume():
+                return [ev async for ev in sensor]
+
+            task = asyncio.create_task(consume())
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            await sensor.aclose()
+            async with asyncio.timeout(1):
+                assert await task == []
+            assert not [t for t in asyncio.all_tasks() if t.get_name() == "live-trade-sensor"]
+
+    run(main())
+
+
+class SimExchange:
+    """Stands in for the connection: 100 trades/s, `recv` gives what the clock has reached. Time
+    passes whether or not anyone reads, which a socket cannot show without real waiting."""
+
+    def __init__(self, clock: Clock):
+        self.clock = clock
+        self.t0 = clock.exchange
+        self.sent = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    @property
+    def backlog(self) -> bool:
+        return self.t0 + self.sent * 10_000 <= self.clock.exchange
+
+    async def recv(self) -> str:
+        while not self.backlog:
+            await asyncio.sleep(0)
+        self.sent += 1
+        return tmsg(self.sent, self.t0 + (self.sent - 1) * 10_000)
+
+
+@pytest.mark.parametrize("blocked_s, queue_size", [(170, 10_000), (90, 1000)])
+def test_a_blocked_consumer_causes_no_gap_and_no_late_trade(monkeypatch, blocked_s, queue_size):
+    clock = Clock()
+    sim = SimExchange(clock)
+    monkeypatch.setattr(live, "_NoRedirectConnect", lambda url, **kw: sim)
+
+    async def main():
+        frozen = False
+        builder = BarBuilder(SYM, grace_s=2)
+        got: list[int] = []
+        ticks: list[int] = []
+        sensor = sensor_for("ws://127.0.0.1:1/s", clock=clock, queue_size=queue_size)
+
+        async def exchange_time():
+            while True:
+                if not frozen:
+                    clock.exchange += 10_000
+                await asyncio.sleep(0)
+
+        def feed(ev):
+            if ev[0] == "trade":
+                builder.on_trade(ev[1])
+                got.append(ev[1].trade_id)
+            elif ev[0] == "tick":
+                ticks.append(ev[1])
+                builder.on_tick(ev[1])
+
+        async def consume_until(t_us):
+            while clock.exchange < t_us:
+                feed(await anext(sensor))
+
+        passing = asyncio.create_task(exchange_time())
+        await consume_until(T0 + 5 * S)
+        until = clock.exchange + blocked_s * S
+        while clock.exchange < until:  # the consumer does nothing at all
+            await asyncio.sleep(0)
+        assert sensor._queue.full()  # the reader really was blocked, for most of that time
+        frozen = True  # time stands still while the backlog drains, so it does drain
+        while sim.backlog or not sensor._queue.empty():
+            feed(await anext(sensor))
+        frozen = False
+        await consume_until(clock.exchange + 5 * S)
+        passing.cancel()
+        await sensor.aclose()
+        return builder, got, ticks, sensor
+
+    builder, got, ticks, sensor = run(main())
+    assert sensor.gaps == 0 and builder.late == 0
+    assert got == list(range(1, len(got) + 1))
+    assert len(got) > (blocked_s + 5) * 100
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
+    assert sensor.clock_skew_ms == pytest.approx(0, abs=1000)
+
+
+def test_a_blocked_consumer_in_a_quiet_market_causes_no_gap():
+    """No trades to follow: only the blocked time keeps this from looking like an outage."""
+    clock = Clock()
+
+    async def handler(ws):
+        await ws.send(tmsg(0, T0))
+        await ws.wait_closed()
+
+    async def main():
+        async with server(handler) as url:
+            sensor = sensor_for(url, clock=clock, queue_size=3)
+            await take(sensor, 1)
+            clock.exchange += 5 * S  # ticks fill the queue and the reader blocks on the next
+            while not sensor._queue.full():  # the reader sees the clock at its next poll
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.01)
+            clock.exchange += 90 * S
+            ticks = []
+            while not ticks or ticks[-1] < T0 + 95 * S:
+                kind, v = await anext(sensor)
+                assert kind == "tick"
+                ticks.append(v)
+            await sensor.aclose()
+            return ticks, sensor
+
+    ticks, sensor = run(main())
+    assert sensor.gaps == 0
+    assert ticks == list(range(T0 + S, T0 + 96 * S, S))
+
+
+def test_warmup_filters_the_archive_to_the_sensor_symbols(archive):
+    small = archive.filter(pl.col("ts_us") < T0 + 60 * S)
+    other = small.with_columns(pl.lit("OTHERBTC").alias("symbol"))
+    sensor = FakeSensor(live_trades(LIVE_T, 1), symbols=["TESTBTC"])
+
+    async def main():
+        return [ev async for ev in warmup_then_live(pl.concat([small, other]), sensor)]
+
+    trades = [e[1] for e in run(main()) if e[0] == "trade"]
+    assert {t.symbol for t in trades} == {"TESTBTC"}
+
+
+def test_warmup_with_none_of_the_sensor_symbols_is_just_the_sensor(archive):
+    sensor = FakeSensor(live_trades(LIVE_T, 1), symbols=["ETHUSDT"])
+
+    async def main():
+        return [ev async for ev in warmup_then_live(archive.head(10), sensor)]
+
+    assert run(main()) == sensor.events
+
+
+def test_baseline_samples_counts_only_the_window_ending_at_the_last_tick(archive, store):
+    """An archive ending 20 h before connecting: most of its samples are about to age out."""
+    chief = cheap_chief(CFG, "TESTBTC")
+    end = T0 + 7 * 3600 * S
+    connect = end + 20 * 3600 * S
+    pipe = StreamPipeline(CFG, store, chief.detectors, chief, Bus(), "live")
+    asyncio.run(pipe.run(warmup_then_live(archive, FakeSensor(live_trades(connect, 5)))))
+    b = pipe._windows["TESTBTC"].kernel.baseline
+    last_tick = connect + 5 * S + CFG.live.bar_grace_s * S  # the end of the source drains the grace
+    times = b._t.view()
+    want = int(((times >= last_tick - 86_400 * S) & (times < last_tick)).sum())
+    assert 0 < want < times.size
+    assert pipe.baseline_samples("TESTBTC") == want
+    assert want < CFG.features.min_baseline_samples
+    assert Auditor(CFG).warmup(pipe.baseline_samples("TESTBTC")).status == "warn"
+
+
+def test_late_trades_are_summed_and_kept_across_a_gap(store):
+    chief = cheap_chief(CFG, "TESTBTC")
+    pipe = StreamPipeline(CFG, store, chief.detectors, chief, Bus(), "live")
+    assert pipe.late_trades() == 0
+    ev = live_trades(T0, 1)[1]
+    old = ev[1].model_copy(update={"trade_id": 5})
+    newer = ev[1].model_copy(update={"trade_id": 6, "ts_us": T0 + 7200 * S})
+
+    async def source():
+        yield ev
+        yield "tick", T0 + 100 * S
+        yield "trade", old  # its second closed long ago
+        yield "gap", (T0 + 100 * S, T0 + 7200 * S)
+        assert pipe.late_trades() == 1
+        yield "trade", old  # older than the new origin
+        yield "trade", newer
+
+    asyncio.run(pipe.run(source()))
+    assert pipe.late_trades() == 2
 
 
 # ------------------------------------------------------------------ the guards stay

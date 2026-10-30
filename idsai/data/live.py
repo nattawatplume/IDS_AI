@@ -7,16 +7,23 @@ with a key, no credentials in the URL. The library answers pings; there is no or
 Events: `("trade", Trade)`, `("tick", t_us)`, `("preroll_done", t_us)` and `("gap", (from, to))`.
 
 Clock: ticks are wall-clock, but a local clock ahead of the exchange by more than the bar grace
-would make `BarBuilder` drop every trade as late. So ticks read `local now + offset`, with `offset`
-the largest `T - recv` of the last 1000 trades (the smallest network delay seen), and never go back.
+would make `BarBuilder` drop every trade as late. So ticks read `now + offset`. `now` is the wall
+clock at the start plus a monotonic clock since then, so stepping the wall clock changes nothing
+here (`recv_us` stays the wall clock). `offset` is the 5th-largest `T - now` of the last 1000
+trades, about the smallest network delay: a few rogue `T`s cannot push it. Ticks never go back.
 
-Start: `preroll_done` comes first and once, as soon as the clock can be trusted: at the first trade,
-in its second, so that trade is not late for a pipeline taking its origin from the marker; or
-60 s after connecting if the market is silent. Ticks start with it.
+Start: `preroll_done` comes first and once, when the clock can be trusted: at the second trade or
+5 s after the first, in the second of the earliest, so one rogue first trade cannot set the origin
+a day ahead and neither trade is late for a pipeline taking its origin from the marker. Or 60 s
+after connecting if the market is silent. Ticks start with it.
 
 Outages: no ticks while disconnected. Back within 60 s: the missed ticks follow, a short empty fill
 (the trade_id gap is the Auditor's job). Longer, however the time got lost (a sleeping laptop
 counts): `("gap", (last tick, now))` first, and ticks resume from there.
+
+A slow consumer is no outage. Time blocked on the full queue does not count toward a gap, and the
+trades that piled up in the socket meanwhile are older than the clock, so until the reader has
+caught up, ticks follow the trades it has read instead of the clock and no trade turns late.
 """
 
 import asyncio
@@ -42,6 +49,9 @@ BACKOFF_FIRST_S = 1
 BACKOFF_MAX_S = 60
 GAP_RESTART_S = 60
 SILENT_START_S = 60
+START_HOLD_S = 5  # longest wait for a second trade before the first one sets the start
+SKEW_RANK = 5  # offset = this largest skew: fewer rogue trades than this cannot move it
+EVENT_TRADE_MAX_US = 60 * S_US  # |E - T| above this: a trade time nobody can believe
 DEDUP_SIZE = 10_000
 SKEW_SAMPLES = 1000
 QUEUE_SIZE = 10_000
@@ -49,10 +59,12 @@ MAX_POLL_S = 0.25  # longest wait for a message before the clock is looked at ag
 MIN_POLL_S = 0.01
 CLOSE_TIMEOUT_S = 2
 MIN_TS_US = 10**15  # 2001 in microseconds: a smaller T is in another unit, not an old trade
+MAX_INT64 = 2**63 - 1  # the store's ids and times
 PUBLIC_HOST = "data-stream.binance.vision"
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 _FIELDS = ("e", "E", "s", "t", "p", "q", "T", "m")
 _LOST = (OSError, WebSocketException)
+_MALFORMED = (ValueError, TypeError, OverflowError, RecursionError)
 
 
 def _now_us() -> int:
@@ -62,7 +74,10 @@ def _now_us() -> int:
 def _positive(msg: dict[str, Any], key: str) -> float:
     if isinstance(msg[key], bool) or not isinstance(msg[key], str | int | float):
         raise ValueError(f"trade field {key!r} is not a number: {msg[key]!r}")
-    x = float(msg[key])  # ValueError for text that is no number
+    try:
+        x = float(msg[key])  # ValueError for text that is no number
+    except OverflowError as e:
+        raise ValueError(f"trade field {key!r} is out of range") from e
     if not (math.isfinite(x) and x > 0):
         raise ValueError(f"trade field {key!r} must be finite and > 0, got {msg[key]!r}")
     return x
@@ -71,6 +86,8 @@ def _positive(msg: dict[str, Any], key: str) -> float:
 def _integer(msg: dict[str, Any], key: str) -> int:
     if not isinstance(msg[key], int) or isinstance(msg[key], bool):
         raise ValueError(f"trade field {key!r} is not an integer: {msg[key]!r}")
+    if abs(msg[key]) > MAX_INT64:
+        raise ValueError(f"trade field {key!r} is out of range")
     return msg[key]
 
 
@@ -80,7 +97,10 @@ def parse_trade(msg: str | bytes | dict[str, Any], recv_us: int | None = None) -
     Raises ValueError for anything that is not a well-formed trade; it never guesses a field.
     """
     if isinstance(msg, str | bytes):
-        msg = json.loads(msg)  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        try:
+            msg = json.loads(msg)  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        except RecursionError as e:
+            raise ValueError("trade message is nested too deeply") from e
     if isinstance(msg, dict) and "data" in msg:
         msg = msg["data"]
     if not isinstance(msg, dict):
@@ -101,6 +121,8 @@ def parse_trade(msg: str | bytes | dict[str, Any], recv_us: int | None = None) -
     ts_us, trade_id = _integer(msg, "T"), _integer(msg, "t")
     if ts_us < MIN_TS_US:
         raise ValueError(f"trade time is not in microseconds: {ts_us}")
+    if abs(_integer(msg, "E") - ts_us) > EVENT_TRADE_MAX_US:
+        raise ValueError(f"trade time {ts_us} is too far from its event time {msg['E']}")
     if trade_id < 0:  # negative ids are the simulator's
         raise ValueError(f"trade id must be >= 0, got {trade_id}")
     return Trade(
@@ -127,7 +149,7 @@ def _check_url(url: str) -> str:
         raise ValueError(f"scheme {parts.scheme!r} not allowed for {host}")
     if parts.username or parts.password:
         raise ValueError("the URL must not carry credentials")
-    if parts.query or parts.fragment:
+    if "?" in url or "#" in url:
         raise ValueError("the URL must not carry a query: the sensor builds its own")
     return url
 
@@ -168,8 +190,10 @@ class LiveTradeSensor:
         rotate_s: float = ROTATE_S,
         *,
         clock: Callable[[], int] = _now_us,
+        monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
         queue_size: int = QUEUE_SIZE,
+        start_hold_s: float = START_HOLD_S,
     ):
         if not rotate_s > 0:
             raise ValueError(f"rotate_s must be > 0, got {rotate_s}")
@@ -182,7 +206,11 @@ class LiveTradeSensor:
         self.bad = 0
         self.gaps = 0
         self._clock = clock
+        self._monotonic = monotonic
         self._sleep = sleep
+        self._start_hold_us = start_hold_s * S_US
+        self._wall0 = 0
+        self._mono0 = 0.0
         self._loopback = urlsplit(url).hostname in LOOPBACK
         self._subscribed = frozenset(self.symbols)
         self._queue: asyncio.Queue[tuple[str, Any] | None] = asyncio.Queue(maxsize=queue_size)
@@ -194,6 +222,11 @@ class LiveTradeSensor:
         self._skews: deque[int] = deque(maxlen=SKEW_SAMPLES)
         self._offset_us = 0
         self._next_tick: int | None = None  # None until the start
+        self._held: list[Trade] = []  # trades before the start
+        self._held_since = 0
+        self._blocked_us = 0  # blocked on the queue since the last tick
+        self._catching_up = False  # the socket holds trades older than the clock
+        self._latest_ts = 0  # newest believable trade read
         self._delay_s = BACKOFF_FIRST_S
 
     @property
@@ -236,6 +269,10 @@ class LiveTradeSensor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        try:
+            self._queue.put_nowait(None)  # a `__anext__` waiting in another task ends too
+        except asyncio.QueueFull:  # then nobody is waiting
+            pass
 
     # ---- reader ----
 
@@ -248,7 +285,22 @@ class LiveTradeSensor:
             self._error = e
             await self._queue.put(None)
 
+    def _now(self) -> int:
+        return self._wall0 + round((self._monotonic() - self._mono0) * S_US)
+
+    async def _put(self, ev: tuple[str, Any]) -> None:
+        if not self._queue.full():
+            self._queue.put_nowait(ev)
+            return
+        t0 = self._monotonic()
+        await self._queue.put(ev)
+        blocked_us = round((self._monotonic() - t0) * S_US)
+        if blocked_us > 0:
+            self._blocked_us += blocked_us
+            self._catching_up = True
+
     async def _connect_forever(self) -> None:
+        self._wall0, self._mono0 = self._clock(), self._monotonic()
         lost = False
         while True:
             rotated = False
@@ -273,10 +325,12 @@ class LiveTradeSensor:
 
     async def _session(self, ws: Any) -> bool:
         """Read one connection until it is lost (raises) or due for rotation (True)."""
-        connected = self._clock()
+        connected = self._now()
         rotate_us = self.rotate_s * S_US
+        self._blocked_us = 0  # a lost connection is an outage, whatever else was going on
+        self._catching_up = False
         while True:
-            now = self._clock()
+            now = self._now()
             if now - connected >= rotate_us:
                 return True
             wait = await self._advance(now, connected)
@@ -284,15 +338,16 @@ class LiveTradeSensor:
                 async with asyncio.timeout(wait):
                     raw = await ws.recv()
             except TimeoutError:
+                self._catching_up = False  # nothing was waiting in the socket
                 continue
             self._delay_s = BACKOFF_FIRST_S
             await self._on_message(raw)
 
     async def _on_message(self, raw: str | bytes) -> None:
-        recv = self._clock()
+        now = self._now()
         try:
-            trade = parse_trade(raw, recv_us=recv)
-        except ValueError:
+            trade = parse_trade(raw, recv_us=self._clock())
+        except _MALFORMED:
             self.bad += 1
             return
         if trade.symbol not in self._subscribed:
@@ -306,32 +361,63 @@ class LiveTradeSensor:
         self._seen_order.append(key)
         if len(self._seen_order) > DEDUP_SIZE:
             self._seen.discard(self._seen_order.popleft())
-        self._skews.append(trade.ts_us - recv)
-        self._offset_us = max(self._skews)
+        if not self._catching_up:  # a trade from the backlog says how far behind we are, not skew
+            self._skews.append(trade.ts_us - now)
+            self._offset_us = sorted(self._skews)[-min(SKEW_RANK, len(self._skews))]
+        if trade.ts_us <= now + self._offset_us:
+            self._latest_ts = max(self._latest_ts, trade.ts_us)
         if self._next_tick is None:
-            await self._start(trade.ts_us)
-        await self._queue.put(("trade", trade))
+            if not self._held:
+                self._held_since = now
+            self._held.append(trade)
+            await self._start_if_due(now)
+            return
+        await self._put(("trade", trade))
+
+    async def _start_if_due(self, now: int) -> None:
+        if not self._held:
+            return
+        if len(self._held) < 2 and now - self._held_since < self._start_hold_us:
+            return
+        await self._start(min(t.ts_us for t in self._held))
+        held, self._held = sorted(self._held, key=lambda t: t.ts_us), []
+        for trade in held:
+            await self._put(("trade", trade))
 
     async def _start(self, t_us: int) -> None:
         second = t_us // S_US * S_US
         self._next_tick = second + S_US
-        await self._queue.put(("preroll_done", second))
+        await self._put(("preroll_done", second))
 
     async def _advance(self, now: int, connected: int) -> float:
         """Emit what the clock has reached; returns how long to wait for a message, in seconds."""
         t = now + self._offset_us
         if self._next_tick is None:
-            if now - connected < SILENT_START_S * S_US:
+            await self._start_if_due(now)
+        if self._next_tick is None:
+            if self._held or now - connected < SILENT_START_S * S_US:
                 return MAX_POLL_S
             await self._start(t)
+        if self._catching_up:
+            if self._latest_ts >= t - S_US:
+                self._catching_up = False
+            else:
+                t = self._latest_ts
         last_tick = self._next_tick - S_US
-        if t - last_tick > GAP_RESTART_S * S_US:
+        forgiven = self._blocked_us
+        moved = self._next_tick <= t
+        if t - last_tick - forgiven > GAP_RESTART_S * S_US:
+            moved = True
             self.gaps += 1
-            await self._queue.put(("gap", (last_tick, t)))
+            await self._put(("gap", (last_tick, t)))
             self._next_tick = t // S_US * S_US + S_US
         while self._next_tick <= t:
-            await self._queue.put(("tick", self._next_tick))
-            self._next_tick += S_US
+            tick, self._next_tick = self._next_tick, self._next_tick + S_US
+            await self._put(("tick", tick))
+        if moved:  # blocked time up to `t` is spent; what these puts blocked is behind the next `t`
+            self._blocked_us -= forgiven
+        if self._catching_up:  # a short wait says nothing about the socket being drained
+            return MAX_POLL_S
         return min(max((self._next_tick - t) / S_US, MIN_POLL_S), MAX_POLL_S)
 
 
@@ -342,12 +428,20 @@ async def warmup_then_live(
 
     The archive plays at max speed with no `preroll_done`, so nothing of it is published. Then
     `("gap", (archive end, sensor start))`, since nothing between them was observed, and the
-    sensor's events, whose own first `preroll_done` starts publishing. No archive (or an empty one):
-    just the sensor. The sensor connects only after the archive has played, and its first event
-    supplies "now", on the clock it has corrected, so a skewed local clock cannot misplace the new
-    origin. The sensor is closed with this generator.
+    sensor's events, whose own first `preroll_done` starts publishing. No archive (or an empty one,
+    or none of the sensor's symbols): just the sensor. The sensor connects only after the archive
+    has played, and its first event supplies "now", on the clock it has corrected, so a skewed local
+    clock cannot misplace the new origin. The sensor is closed with this generator.
+
+    What to expect: the first live row comes `max(W)` (1800 s) after connecting, since the kernel
+    restarts at the gap. A valid z needs `min_baseline_samples` (6 h at one per 60 s) in the 24 h
+    baseline window, so connecting more than about 17.5 h after the end of a full archive day leaves
+    it useless. Callers should pre-roll the trailing 24 h, possibly from two archive days.
     """
     events = aiter(sensor)
+    symbols = getattr(sensor, "symbols", None)
+    if archive_trades is not None and symbols is not None:
+        archive_trades = archive_trades.filter(pl.col("symbol").is_in(symbols))
     try:
         if archive_trades is not None and not archive_trades.is_empty():
             end = None

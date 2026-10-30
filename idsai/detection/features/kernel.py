@@ -273,6 +273,12 @@ class Baseline:
     def n_samples(self) -> int:
         return self._t.n - self._start
 
+    def samples_in_window(self, t_us: int) -> int:
+        """Samples a refresh at `t_us` would read: those in `[t_us - baseline_s, t_us)`."""
+        times = self._t.view()
+        lo = np.searchsorted(times, t_us - self.cfg.baseline_s * S_US, side="left")
+        return int(np.searchsorted(times, t_us, side="left") - lo)
+
     def add(self, t_us: int, xt: np.ndarray) -> None:
         """Store a transformed raw row sampled at `t_us` (NaNs kept)."""
         if self._t.n and t_us <= self._t.data[self._t.n - 1]:
