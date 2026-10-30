@@ -245,6 +245,60 @@ def test_same_data_in_two_provenances_keeps_both_rows(small, store):
     assert all(a.alert_id.startswith(f"{a.provenance}-{SYM}-") for a in al)
 
 
+def test_backward_seek_inside_the_suppress_gap_drops_the_open_episode(small, store, tmp_path):
+    """Last exceedance e, still open at e + 100 s; a seek to e + 50 s scores no row of it again."""
+    first = _closed_windows(small, tmp_path)[0]
+    e = first.window[1]
+    target = e + 50 * S
+    bus = Bus(100_000)
+    qa = bus.subscribe("alerts")
+    r = Replayer(small["trades"], speed=0)
+    asyncio.run(
+        pipe(small, store, bus).run(seek_when(r, lambda ev: ev == ("tick", e + 100 * S), target))
+    )
+    msgs = drain(qa)
+    assert store.get_alert(first.alert_id) is None
+    assert not [
+        m
+        for m in msgs
+        if isinstance(m, Alert) and m.alert_id == first.alert_id and m.status == "closed"
+    ]
+    (reset,) = [m for m in msgs if isinstance(m, dict)]
+    assert reset["deleted"] == [first.alert_id]
+    assert all(a.window[0] >= target for a in all_alerts(store))
+
+
+def test_run_closes_a_replayer_source_so_a_later_seek_raises(small, store):
+    r = Replayer(small["trades"].filter(pl.col("ts_us") < T0 + 60 * S), speed=0)
+    asyncio.run(pipe(small, store).run(r))
+    with pytest.raises(RuntimeError):
+        r.seek(T0)
+
+
+def test_run_closes_its_source_when_it_raises_and_accepts_one_without_aclose(small, store):
+    closed = []
+
+    async def bad():
+        try:
+            yield "nonsense", 1
+            yield "tick", T0
+        finally:
+            closed.append(True)
+
+    with pytest.raises(ValueError):
+        asyncio.run(pipe(small, store).run(bad()))
+    assert closed == [True]
+
+    class Plain:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    asyncio.run(pipe(small, store).run(Plain()))
+
+
 # ------------------------------------------------------------------ late-symbol backlog
 def _trade_events(n_gap_s: int):
     row = make_trades(D, 1, symbol="LATEBTC", seed=2, rate=0.01).head(1)

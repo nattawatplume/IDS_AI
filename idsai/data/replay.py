@@ -14,7 +14,7 @@ the marker comes first, so a consumer never waits for it forever.
 
 `seek(t)` restarts from `max(first second, t - 24 h)`: `("seek", t)` first, so the consumer drops
 its state, then the pre-roll, then `("preroll_done", t)`. A replay that ran out cannot be sought
-(RuntimeError): start a new Replayer.
+(RuntimeError), nor can one whose iterator was closed: start a new Replayer.
 
 Speed only changes the delays, never the events. All controls are plain synchronous calls: with a
 single event loop they always run between two events, so they cannot tear the replay state.
@@ -122,7 +122,11 @@ class Replayer:
         self._speed = _check_speed(x)
 
     def seek(self, t_us: int) -> None:
-        """Jump to `t_us` (floored to the second, clamped to the data range)."""
+        """Jump to `t_us` (floored to the second, clamped to the data range).
+
+        Raises RuntimeError once the iterator has ended or been closed. Leaving an `async for`
+        with `break` does not close it: until `aclose()` runs, the seek is accepted and never plays.
+        """
         if self._ended:
             raise RuntimeError("this replay has ended and cannot seek: start a new Replayer")
         t = self._clamp(t_us)
@@ -208,26 +212,28 @@ class Replayer:
 
     async def _events(self) -> AsyncIterator[tuple[str, Any]]:
         since_yield = 0
-        while True:
-            if self._announce_seek is not None:
-                t, self._announce_seek = self._announce_seek, None
-                yield "seek", t
-                continue
-            if self._paused:
-                await asyncio.sleep(PAUSE_POLL_S)
-                continue
-            ev = self._next_event()
-            if ev is None:
-                self._ended = True
-                return
-            kind, t = ev
-            if not self._preroll_pending and not await self._pace(t):
-                continue
-            yield kind, self._consume(kind, t)
-            since_yield += 1
-            if since_yield >= YIELD_EVERY:
-                since_yield = 0
-                await asyncio.sleep(0)
+        try:
+            while True:
+                if self._announce_seek is not None:
+                    t, self._announce_seek = self._announce_seek, None
+                    yield "seek", t
+                    continue
+                if self._paused:
+                    await asyncio.sleep(PAUSE_POLL_S)
+                    continue
+                ev = self._next_event()
+                if ev is None:
+                    return
+                kind, t = ev
+                if not self._preroll_pending and not await self._pace(t):
+                    continue
+                yield kind, self._consume(kind, t)
+                since_yield += 1
+                if since_yield >= YIELD_EVERY:
+                    since_yield = 0
+                    await asyncio.sleep(0)
+        finally:
+            self._ended = True
 
     def __aiter__(self) -> AsyncIterator[tuple[str, Any]]:
         return self._events()

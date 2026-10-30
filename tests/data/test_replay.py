@@ -393,3 +393,20 @@ def test_seek_after_the_end_raises_with_the_cursor_unchanged():
     with pytest.raises(RuntimeError):
         r.seek(T0)
     assert r.cursor_us == c
+
+
+def test_seek_after_an_abandoned_and_closed_iterator_raises_with_the_cursor_unchanged():
+    async def main():
+        r = Replayer(frame([T0 + i * S for i in range(5)]), speed=0)
+        it = aiter(r)
+        async for ev in it:
+            if ev[0] == "tick":
+                break
+        r.seek(T0)  # break alone does not close the iterator: still accepted (documented)
+        await it.aclose()
+        c = r.cursor_us
+        with pytest.raises(RuntimeError):
+            r.seek(T0 + S)
+        assert r.cursor_us == c
+
+    asyncio.run(main())

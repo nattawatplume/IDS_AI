@@ -5,8 +5,12 @@ and calibrated on those), then scored by the same `score_windows` and fused by t
 
 Parity with the batch path: bit-identical from the same first bar. Across days, batch restarts its
 kernel per day while stream runs on, so the first hour of later days differs (z-scores and F
-included) and episodes crossing midnight may merge. After a seek, rows equal a fresh run from the
-re-pre-roll point.
+included) and episodes crossing midnight may merge; after that hour only float32 rounding noise
+remains (about 3e-8). After a seek, rows equal a fresh run from the re-pre-roll point.
+
+A backward seek equals a clean run only when the target lies outside every episode's span plus
+suppress gap. A target inside drops or truncates that episode: an open episode whose last
+exceedance is before the target is discarded and not recreated, because the pre-roll is unscored.
 
 A source is an async iterable of `("trade", Trade)`, `("tick", t_us)`, `("preroll_done", t_us)` and
 `("seek", t_us)` events (`data.replay.Replayer`). The first event fixes the first second of every
@@ -28,7 +32,7 @@ import asyncio
 import math
 import time
 from collections import deque
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 
 import numpy as np
@@ -102,9 +106,22 @@ class StreamPipeline:
         return list(self._ring.get(symbol, ()))
 
     async def run(self, source: AsyncIterable[tuple[str, Any]]) -> None:
-        """Consume `source` to its end, then close the open episodes and store / publish them."""
+        """Consume `source` to its end, then close the open episodes and store / publish them.
+
+        The source's iterator is closed (`aclose`, if it has one) whenever this returns or raises,
+        so a `Replayer` that fed this run refuses a later `seek`.
+        """
+        events = aiter(source)
         try:
-            async for kind, payload in source:
+            await self._consume(events)
+        finally:
+            aclose = getattr(events, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    async def _consume(self, events: AsyncIterator[tuple[str, Any]]) -> None:
+        try:
+            async for kind, payload in events:
                 if kind == "trade":
                     self._on_trade(payload)
                 elif kind == "tick":
