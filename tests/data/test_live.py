@@ -4,8 +4,10 @@ import asyncio
 import http
 import json
 import math
+import queue
+import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date
 from typing import Any
 
@@ -1353,8 +1355,9 @@ def test_a_rogue_during_the_session_does_not_disable_catch_up(monkeypatch):
     assert builder.late == 0 and sensor.gaps == 0
 
 
-def test_a_stalled_event_loop_makes_no_trade_late(monkeypatch):
-    """`time.sleep` in the consumer: nobody blocks on the queue, the trades wait in the socket."""
+def test_a_stall_seen_between_two_reads_makes_no_trade_late(monkeypatch):
+    """Only the clock jump between reads: `SimExchange.recv` never times out, unlike a real socket
+    (see `test_a_stall_during_a_wait_for_a_message_makes_no_trade_late`)."""
     builder, got, ticks, _, sensor = sim_run(monkeypatch, stall_s=5)
     assert builder.late == 0 and sensor.gaps == 0
     assert got == list(range(1, len(got) + 1))
@@ -1648,6 +1651,163 @@ def test_late_trades_are_summed_and_kept_across_a_gap(store):
 
     asyncio.run(pipe.run(source()))
     assert pipe.late_trades() == 2
+
+
+# ------------------------------------------------------------------ a stalled loop, real sockets
+@contextmanager
+def exchange_thread(symbol: str = SYM, rate: int = 200, last: int | None = None, **kw):
+    """A real exchange on loopback with its own event loop, so it goes on while the sensor's stands
+    still, and real time stamps: trades pile up in the socket as they do on a real stall."""
+    ready: queue.Queue[tuple[asyncio.AbstractEventLoop, asyncio.Event, str]] = queue.Queue()
+    t0 = time.time_ns() // 1000
+    sent = [0]
+
+    async def handler(ws):
+        k = (time.time_ns() // 1000 - t0) * rate // S  # trades without a listener are just gone
+        while last is None or sent[0] < last:
+            now = time.time_ns() // 1000
+            while t0 + k * S // rate <= now and (last is None or sent[0] < last):
+                await ws.send(tmsg(k, t0 + k * S // rate, symbol))
+                sent[0] += 1
+                k += 1
+            await asyncio.sleep(0.005)
+        await ws.wait_closed()
+
+    async def main():
+        stop = asyncio.Event()
+        async with server(handler, **kw) as url:
+            ready.put((asyncio.get_running_loop(), stop, url))
+            await stop.wait()
+
+    thread = threading.Thread(target=asyncio.run, args=(main(),), daemon=True)
+    thread.start()
+    loop, stop, url = ready.get(timeout=LIMIT_S)
+    try:
+        yield url
+    finally:
+        loop.call_soon_threadsafe(stop.set)
+        thread.join(LIMIT_S)
+
+
+async def stalled_events(sensor, stall_s: float, after_s: float = 1.0):
+    """The sensor's events; `time.sleep` in the consumer at the first tick, as heavy sync work would
+    do, then `after_s` more. At a tick the reader is next waiting for a message, whose timeout then
+    expires during the stall although the socket fills up."""
+    end = None
+    async for ev in sensor:
+        yield ev
+        if end is None and ev[0] == "tick":
+            time.sleep(stall_s)
+            end = time.monotonic() + after_s
+        if end is not None and time.monotonic() > end:
+            return
+
+
+def stalled_run(url: str, stall_s: float, grace_s: int = 1, **kw):
+    """Through a real BarBuilder: (trade ids, ticks, gaps, trades counted late, sensor)."""
+
+    async def main():
+        sensor = LiveTradeSensor([SYM], url, start_hold_s=0, **kw)
+        builder = None
+        late = 0
+        got, ticks, gaps = [], [], []
+        async for kind, v in stalled_events(sensor, stall_s):
+            if kind == "preroll_done":
+                builder = BarBuilder(SYM, grace_s, start_us=v)
+            elif kind == "gap":
+                gaps.append(v)
+                late += builder.late
+                builder = BarBuilder(SYM, grace_s, start_us=v[1] // S * S)
+            elif kind == "tick":
+                ticks.append(v)
+                builder.on_tick(v)
+            else:
+                got.append(v.trade_id)
+                builder.on_trade(v)
+        await sensor.aclose()
+        return got, ticks, gaps, late + builder.late, sensor
+
+    return run(main())
+
+
+def test_a_stall_during_a_wait_for_a_message_makes_no_trade_late():
+    with exchange_thread() as url:
+        got, ticks, gaps, late, sensor = stalled_run(url, 2.5)
+    assert late == 0 and gaps == [] and sensor.gaps == 0
+    assert len(got) > 2.5 * 200  # the backlog did come
+    assert got == list(range(got[0], got[0] + len(got)))
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
+
+
+def test_a_stall_longer_than_the_skew_window_makes_no_false_gap(monkeypatch):
+    """The backlog alone would fill the window and drag the offset below the last tick (scaled by
+    these limits: with the real ones this takes a stall over 60 s + 1000 trades)."""
+    monkeypatch.setattr(live, "GAP_RESTART_S", 2)
+    monkeypatch.setattr(live, "SKEW_SAMPLES", 50)
+    with exchange_thread() as url:
+        got, ticks, gaps, late, sensor = stalled_run(url, 3)
+    assert gaps == [] and sensor.gaps == 0 and late == 0
+    assert sensor.clock_skew_ms == pytest.approx(0, abs=500)
+    assert got == list(range(got[0], got[0] + len(got)))
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
+
+
+def test_a_stall_leaves_a_pipeline_undisturbed(store, monkeypatch):
+    """A false gap would rebuild the kernels and close the episodes of a healthy stream."""
+    monkeypatch.setattr(live, "GAP_RESTART_S", 2)
+    monkeypatch.setattr(live, "SKEW_SAMPLES", 50)
+    chief = cheap_chief(CFG, "TESTBTC")
+    pipe = StreamPipeline(CFG, store, chief.detectors, chief, Bus(maxsize=100_000), "live")
+    seen = {}
+
+    async def main(url):
+        sensor = LiveTradeSensor(["TESTBTC"], url, start_hold_s=0)
+
+        async def source():
+            for ev in live_trades((time.time_ns() // 1000 // S - 1900) * S, 1900):
+                yield ev
+            seen["samples"] = pipe.baseline_samples("TESTBTC")
+            seen["rows"] = len(pipe.series("TESTBTC"))
+            seen["kernel"], seen["stream"] = pipe._windows["TESTBTC"], pipe._stream
+            async for ev in stalled_events(sensor, 3):
+                if ev[0] != "preroll_done":  # the pipeline has its origin
+                    yield ev
+            seen["kept"] = pipe._windows["TESTBTC"] is seen["kernel"]
+            seen["same_stream"] = pipe._stream is seen["stream"]
+
+        await pipe.run(source())
+        await sensor.aclose()
+        return sensor
+
+    with exchange_thread("TESTBTC") as url:
+        sensor = run(main(url))
+    assert seen["rows"] and seen["samples"]
+    assert sensor.gaps == 0 and pipe.late_trades() == 0
+    assert seen["kept"] and seen["same_stream"]
+    assert len(pipe.series("TESTBTC")) >= seen["rows"]
+    assert pipe.baseline_samples("TESTBTC") >= seen["samples"]
+
+
+def test_a_stall_that_costs_the_connection_is_reported_as_a_gap(monkeypatch):
+    """The exchange gives up on a client that answers no ping: what it sent after that is lost."""
+    monkeypatch.setattr(live, "GAP_RESTART_S", 2)
+    with exchange_thread(ping_interval=0.2, ping_timeout=0.2) as url:
+        got, ticks, gaps, late, sensor = stalled_run(url, 3, sleep=Sleeps())
+    assert sensor.reconnects == 1 and late == 0
+    assert len(gaps) == 1 and sensor.gaps == 1
+    frm, to = gaps[0]
+    assert to - frm > 2 * S
+    assert sorted(got) == got and got[-1] - got[0] + 1 > len(got)  # the trades lost
+    assert not [t for t in ticks if frm < t <= to]
+
+
+def test_a_stall_in_a_quiet_market_ends_with_the_first_idle_wait():
+    """Nothing to catch up on, so ticks must go back to the clock rather than wait for a trade."""
+    with exchange_thread(last=3) as url:
+        _, ticks, gaps, late, sensor = stalled_run(url, 1.5)
+    assert gaps == [] and sensor.gaps == 0 and late == 0
+    assert ticks == list(range(ticks[0], ticks[-1] + 1, S))
+    assert ticks[-1] >= time.time_ns() // 1000 - 2 * S
 
 
 # ------------------------------------------------------------------ the guards stay

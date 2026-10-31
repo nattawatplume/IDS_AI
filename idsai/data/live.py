@@ -24,7 +24,8 @@ counts): `("gap", (last tick, now))` first, and ticks resume from there.
 A slow consumer is no outage. Time blocked on the full queue does not count toward a gap, and the
 trades that piled up in the socket meanwhile are older than the clock, so until the reader has
 caught up, ticks follow the trades it has read instead of the clock and no trade turns late. The
-same goes for an event loop that stood still (the reader looked at the clock over 1 s ago).
+same goes for an event loop that stood still (the reader looked at the clock over 1 s ago, or its
+wait for a message ended over 1 s late). Only a wait that ended on time says the socket is drained.
 
 A start that was wrong: a lone rogue first trade sets ticks ahead of the true time. When the offset
 falls more than 60 s below the last tick, `("gap", (last tick, now))` runs backward and ticks
@@ -64,6 +65,7 @@ QUEUE_SIZE = 10_000
 STALL_US = S_US  # longer between two looks at the clock: the socket may hold a backlog
 MAX_POLL_S = 0.25  # longest wait for a message before the clock is looked at again
 MIN_POLL_S = 0.01
+ON_TIME_US = S_US // 10  # a wait for a message that ended this late was not disturbed
 CLOSE_TIMEOUT_S = 2
 MIN_TS_US = 10**15  # 2001 in microseconds: a smaller T is in another unit, not an old trade
 MAX_INT64 = 2**63 - 1  # the store's ids and times
@@ -365,12 +367,17 @@ class LiveTradeSensor:
                 self._catching_up = True
             looked = now
             wait = await self._advance(now, connected)
+            asked = self._now()
             try:
                 async with asyncio.timeout(wait):
                     raw = await ws.recv()
             except TimeoutError:
-                self._catching_up = False  # nothing was waiting in the socket
-                looked = self._now()  # and this wait was no stall
+                looked = self._now()
+                overrun = looked - asked - wait * S_US
+                if overrun > STALL_US:  # the loop stood still, so this says nothing of the socket
+                    self._catching_up = True
+                elif overrun <= ON_TIME_US:
+                    self._catching_up = False  # nothing was waiting in the socket
                 continue
             self._delay_s = BACKOFF_FIRST_S
             await self._on_message(raw)
