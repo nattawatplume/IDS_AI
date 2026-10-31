@@ -109,6 +109,11 @@ class Replayer:
         """Play head: no event at or after it has been delivered since the last pre-roll."""
         return max(self._pos, self._start)
 
+    @property
+    def end_us(self) -> int:
+        """Event time of the last tick: nothing is delivered after it."""
+        return self._last_tick
+
     # ---- controls ----
 
     def pause(self) -> None:
