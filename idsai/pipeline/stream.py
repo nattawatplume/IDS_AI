@@ -18,6 +18,16 @@ symbol's bars, so symbols that show up late still match a batch run over the sam
 is scored, stored or published until `preroll_done`; the pre-roll only warms up the features. A
 source that wants output must therefore send `preroll_done`.
 
+`("gap", (from_us, to_us))` says that nothing was observed in that span (a LIVE outage, or the time
+between an archive pre-roll and the first live trade). Empty bars there would enter the baseline as
+zero activity and widen its scale, hiding real anomalies. So bars and kernels restart at `to_us`
+and only the `Baseline` goes on: no rows until the new kernel has its `max(W)` bars (no measurement,
+no alert; CUSUM and the Kamps-Kleinberg history start over too). Open episodes stay open.
+
+A gap with `to_us < from_us` says the source's clock was ahead (a rogue first trade set it). What
+was measured since the new origin has wrong times: samples and series points are dropped, episodes
+are closed, and publishing starts from the new origin, since rows must go on in time order.
+
 Every default detector is row-independent (no state between `score` calls), so skipping them in
 the pre-roll cannot change a later score; CUSUM state lives in the feature kernel.
 
@@ -46,6 +56,7 @@ from idsai.contracts.detector import Detector
 from idsai.contracts.events import Trade
 from idsai.data.store import Store
 from idsai.detection.features.bars import S_US, BarBuilder
+from idsai.detection.features.kernel import Baseline
 from idsai.detection.features.streaming import StreamingWindows
 from idsai.detection.features.windows import windows_schema
 from idsai.pipeline.batch import round_f32, score_windows
@@ -98,12 +109,31 @@ class StreamPipeline:
         self._origin_us: int | None = None
         self._publish_from_us: int | None = None
         self._last_tick_us: int | None = None
+        self._latest_us: int | None = None  # the last tick or gap end, for what is in the baseline
+        self._late_before_gaps = 0
         self._ring.clear()
 
     def series(self, symbol: str) -> list[dict[str, Any]]:
         """Up to the last 24 h of `{t_end_us, close, F, lane_rule, lane_stat, lane_ai}`, oldest
         first; non-finite values are None, so the result is strict JSON."""
         return list(self._ring.get(symbol, ()))
+
+    def baseline_samples(self, symbol: str) -> int:
+        """Baseline samples of `symbol` in the window ending at the last tick (0 when unknown), for
+        `Auditor.warmup`: samples of an old archive that are about to age out do not count."""
+        w = self._windows.get(symbol)
+        if w is None:
+            return 0
+        baseline = w.kernel.baseline
+        return (
+            baseline.n_samples
+            if self._latest_us is None
+            else baseline.samples_in_window(self._latest_us)
+        )
+
+    def late_trades(self) -> int:
+        """Trades dropped as late so far, over all symbols and across gaps."""
+        return self._late_before_gaps + sum(b.late for b in self._builders.values())
 
     async def run(self, source: AsyncIterable[tuple[str, Any]]) -> None:
         """Consume `source` to its end, then close the open episodes and store / publish them.
@@ -130,6 +160,8 @@ class StreamPipeline:
                     self._on_preroll_done(payload)
                 elif kind == "seek":
                     self._on_seek(payload)
+                elif kind == "gap":
+                    await self._on_gap(payload)
                 else:
                     raise ValueError(f"unknown stream event {kind!r}")
         except asyncio.CancelledError:
@@ -144,13 +176,15 @@ class StreamPipeline:
             self._origin_us = t.ts_us // S_US * S_US
         self._builder(t.symbol).on_trade(t)
 
-    def _builder(self, symbol: str) -> BarBuilder:
+    def _builder(self, symbol: str, baseline: Baseline | None = None) -> BarBuilder:
         b = self._builders.get(symbol)
         if b is None:
             b = BarBuilder(symbol, self._grace_s, start_us=self._origin_us)
             self._builders[symbol] = b
             unit = quote_unit_for(symbol, self.cfg.features)
-            self._windows[symbol] = StreamingWindows(symbol, self.cfg.features, unit)
+            self._windows[symbol] = StreamingWindows(
+                symbol, self.cfg.features, unit, baseline=baseline
+            )
         return b
 
     async def _on_tick(self, t_us: int) -> None:
@@ -158,6 +192,7 @@ class StreamPipeline:
         if self._origin_us is None:
             self._origin_us = (t_us - 1) // S_US * S_US  # this tick closes the first second
         self._last_tick_us = t_us
+        self._latest_us = t_us
         n = 0
         for b in self._builders.values():
             for bar in b.on_tick(t_us):
@@ -165,6 +200,33 @@ class StreamPipeline:
                 n += 1
                 if n % BACKLOG_YIELD_BARS == 0:  # a late symbol catches up on many empty bars
                     await asyncio.sleep(0)
+
+    async def _on_gap(self, span: tuple[int, int]) -> None:
+        backward = span[1] < span[0]
+        if self._grace_s and self._last_tick_us is not None and not backward:
+            await self._on_tick(self._last_tick_us + self._grace_s * S_US)  # bars still in grace
+        baselines = {s: w.kernel.baseline for s, w in self._windows.items()}
+        self._late_before_gaps = self.late_trades()
+        self._builders.clear()
+        self._windows.clear()
+        self._origin_us = span[1] // S_US * S_US
+        self._last_tick_us = None
+        self._latest_us = span[1]
+        for symbol, baseline in baselines.items():
+            self._builder(symbol, baseline)
+        if backward:
+            self._undo_from(self._origin_us)
+
+    def _undo_from(self, t_us: int) -> None:
+        for w in self._windows.values():
+            w.kernel.baseline.drop_from(t_us)
+        for ring in self._ring.values():
+            while ring and ring[-1]["t_end_us"] >= t_us:
+                ring.pop()
+        self._emit(self._stream.flush())
+        self._stream = ChiefStream(self.chief, self.mode)
+        if self._publish_from_us is not None:
+            self._publish_from_us = min(self._publish_from_us, t_us)
 
     def _on_seek(self, target_us: int) -> None:
         if self.mode == "live":

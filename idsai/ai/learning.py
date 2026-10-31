@@ -20,7 +20,7 @@ import numpy as np
 import polars as pl
 
 from idsai.contracts.detector import Detector
-from idsai.eval.metrics import paired_bootstrap, significant
+from idsai.eval.metrics import MIN_EVENTS, few_events_th, paired_bootstrap, significant
 
 REQUIRED_META = ("data_hash", "config_hash", "seed", "created_at", "train_range")
 MAX_SAVE_ATTEMPTS = 100
@@ -156,9 +156,6 @@ class ModelRegistry:
         return state, meta
 
 
-MIN_EVENTS = 2  # fewer events: the paired bootstrap has no variance to measure
-
-
 @dataclass(frozen=True)
 class Decision:
     """Champion/challenger verdict: `diff_mean` and `ci` are challenger - champion recall."""
@@ -192,8 +189,9 @@ def compare(
     and seeds. Each arm is averaged over seeds per event, then events are resampled with the
     same indices for both arms (`paired_bootstrap`). Accept iff the 95 % CI lower bound of
     `challenger - champion` is > 0 and the mean difference is >= `min_effect` (`significant`).
-    No events gives a reject with diff 0 and CI (0, 0); a single event is a reject too (its
-    bootstrap has no variance, so the CI would collapse to one point and claim certainty).
+    No events gives a reject with diff 0 and CI (0, 0); fewer than `MIN_EVENTS` events is a
+    reject too, with a reason saying it cannot be decided (a CI over so few events can collapse
+    to one point and claim certainty).
     """
     if int(n_boot) < 1:
         raise ValueError(f"n_boot must be >= 1, got {n_boot}")
@@ -206,10 +204,7 @@ def compare(
     diff, ci = paired_bootstrap(b, a, n_boot, seed)
     nums = f"{diff:+.3f} (95% CI {ci[0]:.3f} ถึง {ci[1]:.3f})"
     if a.shape[1] < MIN_EVENTS:
-        reason = (
-            f"ไม่ยอมรับ challenger: มีเหตุการณ์เพียง {a.shape[1]} ครั้ง (ผลต่าง {nums}) "
-            f"ต้องมีอย่างน้อย {MIN_EVENTS} ครั้งจึงประเมินช่วงความเชื่อมั่นได้"
-        )
+        reason = f"ไม่ยอมรับ challenger: {few_events_th(a.shape[1])} (ผลต่าง {nums})"
         return Decision(False, diff, ci, reason)
     accept = significant(diff, ci, min_effect)
     if accept:

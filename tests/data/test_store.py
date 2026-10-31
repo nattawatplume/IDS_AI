@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import polars as pl
@@ -253,6 +254,27 @@ def test_alert_upsert_and_listing(store):
     assert [a.alert_id for a in store.list_alerts()] == ["a3", "a2", "a1"]  # newest first
     assert [a.alert_id for a in store.list_alerts(symbol="ETHUSDT")] == ["a2"]
     assert len(store.list_alerts(limit=2)) == 2
+
+
+@pytest.mark.parametrize("write", ["insert_alert", "upsert_alert"])
+def test_non_finite_evidence_is_dropped_on_write(store, write):
+    bad = [("nan", float("nan"), 1.0), ("inf", 1.0, float("inf")), ("ok", 2.0, 0.5)]
+    getattr(store, write)(make_alert("a1", evidence=bad))
+    assert store.get_alert("a1").evidence == [("ok", 2.0, 0.5)]
+    assert [a.alert_id for a in store.list_alerts()] == ["a1"]
+
+
+def test_unreadable_alert_row_costs_only_itself(store, caplog):
+    store.insert_alert(make_alert("good", ts=D1_US + 1))
+    bad = make_alert("bad", ts=D1_US + 2).model_dump(mode="json")
+    bad["evidence"] = [["ret_60s", None, 0.9]]
+    store._db().execute(
+        "INSERT INTO alerts(alert_id, ts_event_us, symbol, json) VALUES (?, ?, ?, ?)",
+        ["bad", D1_US + 2, "BTCUSDT", json.dumps(bad)],
+    )
+    assert [a.alert_id for a in store.list_alerts()] == ["good"]
+    assert store.get_alert("bad") is None
+    assert "unreadable alert row" in caplog.text
 
 
 def test_insert_duplicate_alert_raises(store):

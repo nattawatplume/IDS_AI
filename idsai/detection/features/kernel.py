@@ -273,6 +273,18 @@ class Baseline:
     def n_samples(self) -> int:
         return self._t.n - self._start
 
+    def samples_in_window(self, t_us: int) -> int:
+        """Samples a refresh at `t_us` would read: those in `[t_us - baseline_s, t_us)`."""
+        times = self._t.view()
+        lo = np.searchsorted(times, t_us - self.cfg.baseline_s * S_US, side="left")
+        return int(np.searchsorted(times, t_us, side="left") - lo)
+
+    def drop_from(self, t_us: int) -> None:
+        """Forget the samples at or after `t_us`: their times turned out to be wrong."""
+        keep = int(np.searchsorted(self._t.view(), t_us, side="left"))
+        self._t.n = self._x.n = keep
+        self._start = min(self._start, keep)
+
     def add(self, t_us: int, xt: np.ndarray) -> None:
         """Store a transformed raw row sampled at `t_us` (NaNs kept)."""
         if self._t.n and t_us <= self._t.data[self._t.n - 1]:
@@ -338,9 +350,12 @@ class Kernel:
     Feed contiguous 1 s bars with `push_bar` (one) or `extend` (many); every due row is computed
     once, in time order, by `_emit`. Row vectors follow `self.columns`
     (= `registry.feature_columns(cfg)`).
+
+    `baseline` continues an existing `Baseline` instead of a new one (a stream restarting its bars
+    after an outage: everything else starts over, and the samples age out by their own time).
     """
 
-    def __init__(self, cfg: FeatureCfg, quote_unit: float):
+    def __init__(self, cfg: FeatureCfg, quote_unit: float, *, baseline: Baseline | None = None):
         if CUSUM_WINDOW_S not in cfg.windows_s or KK_WINDOW_S not in cfg.windows_s:
             raise ValueError(f"windows_s must contain {CUSUM_WINDOW_S} and {KK_WINDOW_S}")
         st = cfg.stride_s
@@ -368,7 +383,9 @@ class Kernel:
             [{"log": FLOOR_LOG, "ratio": FLOOR_RATIO, "ret": np.nan}[s.floor] for s in kinds]
         )
         is_log = np.array([s.transform in ("log1p", "log1p_quote") for s in kinds])
-        self.baseline = Baseline(cfg, floors, is_log)
+        if baseline is not None and len(baseline._floors) != len(floors):
+            raise ValueError(f"baseline has {len(baseline._floors)} features, need {len(floors)}")
+        self.baseline = Baseline(cfg, floors, is_log) if baseline is None else baseline
         self._i_ret = self.raw_cols.index(f"ret_{CUSUM_WINDOW_S}")
         self._i_imb = self.raw_cols.index(f"buy_imb_{CUSUM_WINDOW_S}")
         self._i_qv = self.raw_cols.index(f"quote_vol_{KK_WINDOW_S}")

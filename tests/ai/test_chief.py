@@ -10,8 +10,10 @@ from idsai.ai.chief import CalibrationError, Chief, ChiefStream
 from idsai.config import ChiefCfg
 from idsai.contracts.alert import Alert
 from idsai.contracts.detector import Detector, Evidence
+from idsai.contracts.frames import LABELS
 from idsai.detection.rules import Condition, Signature, SignatureDetector
 from idsai.detection.stats import CusumDetector
+from idsai.eval.metrics import match_events, summarize
 
 NAN = float("nan")
 S_US = 1_000_000
@@ -359,8 +361,10 @@ def test_all_F_zero_gives_no_episodes():
     ch.calibrate(cal_with(r.name, [-1.0] * 2000))
     cal_fused = ch.fuse(cal_with(r.name, [-1.0] * 2000))
     assert cal_fused["F"].max() == 0.0
-    tau = ch.fit_threshold(cal_fused, 2.0)
+    with pytest.warns(RuntimeWarning, match="tau_saturated"):  # no candidate was over budget
+        tau = ch.fit_threshold(cal_fused, 2.0)
     assert tau > 0 and ch.tau == tau
+    assert ch.tau_saturated is True
     assert ch.episodes(cal_fused) == []
 
 
@@ -571,3 +575,170 @@ def test_stream_matches_batch_episode_ids():
     assert sorted(a.model_dump_json() for a in closed) == sorted(a.model_dump_json() for a in batch)
     # every open/updated alert id is a final episode id
     assert {a.alert_id for a in emitted} == {a.alert_id for a in batch}
+
+
+# ---------------------------------------------------------------- episode technique
+
+
+def _graded_chief(*rules: SignatureDetector) -> Chief:
+    """Each rule fires on 10 of 1000 cal rows: a fired score of 0.5 gives p = 11/1001 and 1.5 gives
+    p = 6/1001, both less extreme than `stat.a` at 5000 (the peak, p = 1/1001, no technique)."""
+    ch = chief(Stub("stat.a", "stat", requires=("fa",)), *rules)
+    fired = [-1.0] * 990 + [1.0] * 5 + [2.0] * 5
+    extra = {r.name: fired for r in rules}
+    ch.calibrate(cal_with("stat.a", range(1000), extra=extra))
+    ch.tau = 1.0
+    return ch
+
+
+def _both_paths(ch: Chief, sc: pl.DataFrame) -> tuple[Alert, list[Alert]]:
+    """The one batch episode of `sc` and every stream alert; the closed alert must be identical."""
+    (batch,) = ch.episodes(ch.fuse(sc))
+    st = ChiefStream(ch, provenance="replay")
+    emitted = [a for r in sc.to_dicts() for a in st.step(r)] + st.flush()
+    assert emitted[-1].status == "closed"
+    assert emitted[-1].model_dump_json() == batch.model_dump_json()
+    return batch, emitted
+
+
+@pytest.mark.parametrize("classified_first", [True, False])
+def test_episode_technique_comes_from_a_classified_row_not_the_peak(classified_first):
+    r = rule(501, "MM-T005.001")
+    ch = _graded_chief(r)
+    sc = frame(
+        "A",
+        [0, 100],
+        stat_a=[-1.0, 5000.0] if classified_first else [5000.0, -1.0],
+        rule_501=[0.5, -1.0] if classified_first else [-1.0, 0.5],
+    ).with_columns(pl.Series("fa", [0.1, 7.0] if classified_first else [7.0, 0.1]))
+    peak_i = 1 if classified_first else 0
+    assert ch.fuse(sc)["technique"][peak_i] == "MM-T000"  # the peak row itself says nothing
+    batch, _ = _both_paths(ch, sc)
+    assert batch.technique_id == "MM-T005"
+    assert batch.peak_technique_id == "MM-T000"
+    assert (batch.signature_id, batch.rev) == (501, 3)
+    # fused_p and evidence stay from the peak row; the window spans the whole episode
+    assert batch.fused_p == pytest.approx(1 / 1001)
+    assert batch.window == (T0_US, T0_US + 100 * S_US)
+    assert batch.evidence == [("fa", 7.0, 7.0)]
+    assert {d.name: d.p for d in batch.detectors}[r.name] == 1.0  # the peak row's rule p
+
+
+def test_episode_technique_is_the_highest_F_classified_row():
+    low, high = rule(101, "MM-T001.001"), rule(501, "MM-T005.001")
+    ch = _graded_chief(low, high)
+    sc = frame(
+        "A",
+        [0, 100, 200],
+        stat_a=[-1.0, 5000.0, -1.0],
+        rule_101=[0.5, -1.0, -1.0],  # p = 11/1001
+        rule_501=[-1.0, -1.0, 1.5],  # p = 6/1001: rarer, so it wins though it comes later
+    )
+    batch, _ = _both_paths(ch, sc)
+    assert batch.technique_id == "MM-T005" and batch.signature_id == 501
+
+
+def test_episode_technique_tie_takes_the_earliest_row():
+    first, second = rule(101, "MM-T001.001"), rule(501, "MM-T005.001")
+    ch = _graded_chief(first, second)
+    sc = frame(
+        "A",
+        [0, 100, 200],
+        stat_a=[-1.0, 5000.0, -1.0],
+        rule_101=[0.5, -1.0, -1.0],
+        rule_501=[-1.0, -1.0, 0.5],  # same p as rule 101
+    )
+    batch, emitted = _both_paths(ch, sc)
+    assert batch.technique_id == "MM-T001" and batch.signature_id == 101
+    assert all(a.technique_id == "MM-T001" for a in emitted)  # the tie changes nothing
+
+
+def test_episode_without_a_classified_row_stays_unclassified():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame("A", [0, 100], stat_a=[5000.0, 998.0], rule_501=[-1.0, -1.0])
+    batch, _ = _both_paths(ch, sc)
+    assert batch.technique_id == "MM-T000"
+    assert batch.signature_id is None and batch.rev is None
+
+
+def test_stream_updates_when_the_technique_changes_without_a_new_peak():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame(
+        "A",
+        [0, 100, 200, 300],
+        stat_a=[5000.0, -1.0, -1.0, -1.0],
+        rule_501=[-1.0, 0.5, 0.5, 1.5],
+    )
+    st = ChiefStream(ch, provenance="replay")
+    out = [st.step(r) for r in sc.to_dicts()]
+    assert [(a.status, a.technique_id) for a in out[0]] == [("open", "MM-T000")]
+    (upd,) = out[1]  # F is below the peak, but the technique is now known
+    assert (upd.status, upd.technique_id, upd.signature_id) == ("updated", "MM-T005", 501)
+    assert upd.fused_p == pytest.approx(1 / 1001)  # still the peak
+    assert upd.window == (T0_US, T0_US + 100 * S_US)
+    assert out[2] == []  # same technique, equal F: nothing new
+    assert out[3] == []  # same technique, higher F: the alert would read the same
+
+
+def test_stream_updates_when_only_the_signature_changes():
+    a, b = rule(101, "MM-T001.001"), rule(102, "MM-T001.002")
+    ch = _graded_chief(a, b)
+    sc = frame(
+        "A",
+        [0, 100, 200],
+        stat_a=[5000.0, -1.0, -1.0],
+        rule_101=[-1.0, 0.5, -1.0],
+        rule_102=[-1.0, -1.0, 1.5],
+    )
+    st = ChiefStream(ch, provenance="replay")
+    out = [st.step(r) for r in sc.to_dicts()]
+    assert [x.signature_id for x in out[1]] == [101]
+    assert [(x.status, x.signature_id) for x in out[2]] == [("updated", 102)]
+    (closed,) = st.flush()
+    assert closed.model_dump_json() == ch.episodes(ch.fuse(sc))[0].model_dump_json()
+
+
+def test_recall_correct_rises_when_the_peak_row_is_unclassified():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame("A", [0, 100], stat_a=[-1.0, 5000.0], rule_501=[0.5, -1.0])
+    labels = pl.DataFrame(
+        [("l", "hu", "A", T0_US, T0_US, "MM-T005", "wash", None, "REAL")],
+        schema=LABELS,
+        orient="row",
+    )
+    alerts = ch.episodes(ch.fuse(sc))
+    mr = match_events(alerts, labels, 120, 300)
+    assert mr.detected_any == {"l": True}
+    assert mr.detected_correct == {"l": True}  # the peak row alone would have said MM-T000
+    assert summarize(mr, 1, 1, 10)["recall_correct"] == 1.0
+
+
+# ---------------------------------------------------------------- saturation with no candidates
+
+
+def test_rule_that_never_fires_in_cal_is_saturated():
+    r = rule(101, "MM-T001.001")
+    ch = chief(r)
+    ch.calibrate(cal_with(r.name, [-1.0] * 2000))
+    with pytest.warns(RuntimeWarning, match="tau_saturated"):
+        ch.fit_threshold(ch.fuse(cal_with(r.name, [-1.0] * 2000)), 2.0)
+    assert ch.tau_saturated is True
+
+
+def test_peak_technique_is_the_peak_rows_own_in_every_stream_alert():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame("A", [0, 100], stat_a=[5000.0, -1.0], rule_501=[-1.0, 0.5])
+    batch, emitted = _both_paths(ch, sc)
+    assert [(a.technique_id, a.peak_technique_id) for a in emitted] == [
+        ("MM-T000", "MM-T000"),
+        ("MM-T005", "MM-T000"),
+        ("MM-T005", "MM-T000"),
+    ]
+    assert batch.peak_technique_id == "MM-T000"
+
+
+def test_peak_technique_equals_technique_when_the_peak_row_classifies():
+    ch = _graded_chief(rule(501, "MM-T005.001"))
+    sc = frame("A", [0], stat_a=[-1.0], rule_501=[1.5])
+    batch, _ = _both_paths(ch, sc)
+    assert batch.technique_id == batch.peak_technique_id == "MM-T005"

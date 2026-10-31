@@ -17,6 +17,9 @@ class Alert(BaseModel):
     ts_event_us: int
     symbol: str
     technique_id: str
+    # the peak row's own technique; it differs from `technique_id` when another row of the
+    # episode classified it. None on alerts written before this field existed.
+    peak_technique_id: str | None = None
     signature_id: int | None = None
     rev: int | None = None
     severity: int = Field(ge=1, le=3)

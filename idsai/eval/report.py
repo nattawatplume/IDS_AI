@@ -14,6 +14,10 @@ the same test-normal days, so they are clustered by `(symbol, day)` (`symbol-day
 `(seed, event)` pairs as independent would make the CI too narrow. Older SEMI-SYN records
 without a `day` fall back to `event (legacy, optimistic)`.
 
+Seed spread: `std` of a cell is the sample standard deviation (ddof 1) over seeds of the recall
+of each seed, None with fewer than two seeds. A cell where recall is 0 or 1 has a bootstrap CI
+of one point, so `rule_of_three` adds the bound `3 / n` over the same independent clusters.
+
 Retrain decision: `retrain_drift` records at budget 2 on the accept split give the
 champion/challenger verdict (`idsai.ai.learning.compare`, a paired event bootstrap): full stack
 `v1` vs `v2` (what would be deployed), and the AE alone `v1:ai` vs `v2:ai` as a diagnostic.
@@ -37,7 +41,13 @@ from idsai.ai.learning import compare
 from idsai.config import Settings, load_settings
 from idsai.data.store import Store
 from idsai.eval.experiments import AE, BASELINES, EXPERIMENTS
-from idsai.eval.metrics import paired_bootstrap, ratio_bootstrap_ci, significant
+from idsai.eval.metrics import (
+    MIN_EVENTS,
+    few_events_th,
+    paired_bootstrap,
+    ratio_bootstrap_ci,
+    significant,
+)
 
 CI_SEED = 0
 PAIRED_BUDGET = 2.0
@@ -72,7 +82,9 @@ NOTES_TH = [
     "precision แสดงคู่กับ prevalence (สัดส่วนหน้าต่างที่เป็นบวก) เสมอ; F1 เก็บไว้ใน JSON แต่ไม่ใช่ตัวชี้วัดหลัก",
     "คะแนนรวม (fused) คือ anomaly p-value หรือ “ความหายากเทียบตลาดปกติ” ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา",
     "ทุกการแจ้งเตือนคือความผิดปกติทางสถิติ ไม่ได้กล่าวหาบุคคลใด",
-    f"{SATURATED_MARK}: งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้ τ จึงถูกตั้งที่ค่า F บวกที่เล็กที่สุด",
+    f"{SATURATED_MARK}: งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้ τ จึงถูกตั้งที่ค่า F บวกที่เล็กที่สุด "
+    "หรือเหนือค่า F ทั้งหมดเมื่อไม่มีค่า F บวกเลย (เช่น กฎที่ไม่เคยทำงานในช่วงสอบเทียบ) "
+    "งบจึงไม่ได้ถูกทดสอบกับข้อมูลจริง",
     f"{DETERMINISTIC_NOTE}: ตัวตรวจจับที่ไม่ขึ้นกับ seed ให้ผลเหมือนกันทุก seed "
     "ช่วงความเชื่อมั่นจึงมาจากการ bootstrap ข้ามเหตุการณ์เท่านั้น",
     "ref_supervised เป็น supervised reference (uses labels) ใช้เทียบเท่านั้น",
@@ -83,6 +95,16 @@ NOTES_TH = [
     f"{UNIT_LEGACY} = ผล SEMI-SYN รุ่นเก่าที่ไม่มีวันกำกับ ช่วงความเชื่อมั่นจึงแคบเกินจริง",
     "recall และช่วงความเชื่อมั่นใช้ตัวประมาณแบบอัตราส่วนเดียวกัน: รวมจำนวนที่ตรวจพบ / จำนวนทั้งหมด "
     "ของทุก (seed, เหตุการณ์) และสุ่มซ้ำทีละกลุ่ม (cluster)",
+    "rule of three: เมื่อตรวจพบ 0 ครั้งหรือครบทุกครั้ง bootstrap CI จะแคบเหลือจุดเดียวทั้งที่ข้อมูลมีน้อย "
+    "จึงแสดงขอบเขตโดยประมาณเพิ่ม: ขอบบน 3/n เมื่อตรวจไม่พบเลย หรือขอบล่าง 1 − 3/n เมื่อตรวจพบครบ "
+    "โดย n คือจำนวนกลุ่มอิสระตามคอลัมน์ bootstrap unit (ไม่นับซ้ำข้าม seed)",
+    "± std คือส่วนเบี่ยงเบนมาตรฐานของ recall ข้าม seed (– เมื่อมี seed เดียว)",
+    f"การเปรียบเทียบสองฝั่งต้องมีอย่างน้อย {MIN_EVENTS} เหตุการณ์ ถ้าน้อยกว่านั้นจะไม่สรุปว่าดีกว่า",
+    "TTD ติดลบหมายความว่าการแจ้งเตือนเริ่มก่อนเวลาเริ่มของป้ายกำกับ (label)",
+    "งบการแจ้งเตือนเป็นเพดาน ไม่ใช่เป้าหมาย: อัตรา FA ที่วัดได้จึงอาจต่ำกว่างบที่ตั้งไว้",
+    "recall_correct นับเหตุการณ์ที่มีการแจ้งเตือนทับช่วงเหตุการณ์และระบุเทคนิคตรงกับป้ายกำกับ: "
+    "เทคนิคของการแจ้งเตือนมาจากแถวที่จัดประเภทได้และมีค่า F สูงสุดของ episode "
+    "ส่วนหลักฐานมาจากแถวจุดสูงสุดของ episode ซึ่งอาจเป็นคนละแถวกัน",
 ]
 
 
@@ -124,6 +146,31 @@ def cluster_counts(records: list[dict], key: str, unit: str) -> tuple[np.ndarray
     )
 
 
+def _rule_of_three(hits: np.ndarray, n: np.ndarray, unit: str) -> dict[str, Any] | None:
+    """Bound on a recall of 0 or 1 from `n` independent clusters; None for anything between."""
+    k = int(n.size)
+    if k == 0 or 0 < hits.sum() < n.sum():
+        return None
+    margin = min(3.0 / k, 1.0)
+    zero = hits.sum() == 0
+    return {
+        "side": "upper" if zero else "lower",
+        "bound": margin if zero else 1.0 - margin,
+        "hits": 0 if zero else k,
+        "n": k,
+        "unit": UNIT_SYMBOL_DAY if unit == UNIT_SYMBOL_DAY else UNIT_EVENT,
+    }
+
+
+def _seed_std(records: list[dict], key: str) -> float | None:
+    """Sample std over seeds of each seed's recall (its `(seed, event)` values pooled)."""
+    by_seed: dict[int, list[float]] = defaultdict(list)
+    for r in records:
+        by_seed[r["seed"]] += [float(pe[key]) for pe in r["per_event"].values()]
+    recalls = [float(np.mean(v)) for v in by_seed.values() if v]
+    return float(np.std(recalls, ddof=1)) if len(recalls) > 1 else None
+
+
 def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
     ok = [r for r in records if r.get("metrics") is not None]
     out: dict[str, Any] = {
@@ -141,21 +188,27 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
         "ci_unit": _bootstrap_unit(records),
         "mean": None,
         "ci": None,
+        "std": None,
+        "rule_of_three": None,
     }
     if ok:
         out["mean"] = {m: _finite_mean([r["metrics"].get(m) for r in ok]) for m in MEAN_METRICS}
-        ci = {}
+        ci, std, r3 = {}, {}, {}
         for metric, key in CI_METRICS.items():
             # point estimate and CI from the same cluster ratio estimator
             hits, n = cluster_counts(ok, key, out["ci_unit"])
             mean, (lo, hi) = ratio_bootstrap_ci(hits, n, n_boot, CI_SEED)
             out["mean"][metric] = mean if math.isfinite(mean) else None
             ci[metric] = [lo, hi] if math.isfinite(lo) else None
-        out["ci"] = ci
+            std[metric] = _seed_std(ok, key)
+            r3[metric] = _rule_of_three(hits, n, out["ci_unit"])
+        out["ci"], out["std"], out["rule_of_three"] = ci, std, r3
         if not out["classifies"]:  # always MM-T000: recall_correct (and F1) carry no information
             out["mean"]["recall_correct"] = None
             out["mean"]["f1"] = None
             ci["recall_correct"] = None
+            std["recall_correct"] = None
+            r3["recall_correct"] = None
     return out
 
 
@@ -240,6 +293,7 @@ def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
             return np.array([[float(arms[k][s][e]["detected_any"]) for e in events] for s in seeds])
 
         diff, (lo, hi) = paired_bootstrap(mat(AE), mat(base), n_boot, CI_SEED)
+        enough = len(events) >= MIN_EVENTS
         rows.append(
             {
                 "baseline": base,
@@ -247,7 +301,8 @@ def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
                 "n_events": len(events),
                 "diff_mean": diff,
                 "ci": [lo, hi],
-                "significant": significant(diff, (lo, hi), min_effect),
+                "significant": enough and significant(diff, (lo, hi), min_effect),
+                "reason_th": None if enough else few_events_th(len(events)),
                 "provenance": "REAL",
             }
         )
@@ -354,7 +409,8 @@ def _retrain_block(
         series=series,
         diff_mean=d.diff_mean,
         ci=list(d.ci),
-        accept=d.accept,
+        # `compare` rejects below MIN_EVENTS; the report says that nothing was decided
+        accept=None if len(events) < MIN_EVENTS else d.accept,
         reason_th=d.reason_th,
     )
     return block
@@ -450,6 +506,40 @@ def _fmt_ci(mean: float | None, ci: list[float] | None) -> str:
     return f"{s} [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci else s
 
 
+def _fmt_recall(mean: float | None, std: float | None, ci: list[float] | None) -> str:
+    if mean is None:
+        return "–"
+    s = f"{_fmt(mean)} ± {_fmt(std)}"
+    return f"{s} [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci else s
+
+
+def _rule_of_three_th(metric: str, r: dict[str, Any]) -> str:
+    unit = "เหตุการณ์" if r["unit"] == UNIT_EVENT else r["unit"]
+    reach = "สูงถึง" if r["side"] == "upper" else "ต่ำถึง"
+    return (
+        f"{metric} {r['hits']} จาก {r['n']} {unit}: ช่วงจริงอาจ{reach}ราว "
+        f"{r['bound'] * 100:.0f}% (rule of three)"
+    )
+
+
+def _mixed_notes(runs: list[dict]) -> list[str]:
+    """Thai warnings naming what differs across the runs of one report."""
+    configs = {r.get("config_hash") for r in runs} - {None}
+    notes = [MIXED_CONFIG_NOTE] if len(configs) > 1 else []
+    gits = sorted({r["git_sha"] for r in runs if r.get("git_sha")})
+    if len(gits) > 1:
+        notes.append(
+            f"ตาราง runs รวมผลจากหลาย git_sha ({', '.join(gits)}) ผลอาจมาจากโค้ดคนละรุ่น "
+            "(รุ่น -dirty นับเป็นคนละรุ่น)"
+        )
+    splits = sorted(
+        {(r.get("split_def") or {}).get("sha12") for r in runs} - {None},
+    )
+    if len(splits) > 1:
+        notes.append(f"ตาราง runs รวมผลจากหลาย split ({', '.join(splits)}) ผลอาจมาจากชุดข้อมูลคนละชุด")
+    return notes
+
+
 def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
     flags = []
     if c["tau_saturated_any"]:
@@ -461,13 +551,14 @@ def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
     if not c["classifies"]:
         flags.append(AGNOSTIC_NOTE)
     flags += [f"error: {_error_th(e)}" for e in c["errors"]]
-    m, ci = c["mean"], c["ci"] or {}
+    flags += [_rule_of_three_th(metric, r) for metric, r in (c["rule_of_three"] or {}).items() if r]
+    m, ci, std = c["mean"], c["ci"] or {}, c["std"] or {}
     if m is None:
         cells = ["–"] * 8
     else:
         cells = [
-            _fmt_ci(m["recall_any"], ci.get("recall_any")),
-            _fmt_ci(m["recall_correct"], ci.get("recall_correct")),
+            _fmt_recall(m["recall_any"], std.get("recall_any"), ci.get("recall_any")),
+            _fmt_recall(m["recall_correct"], std.get("recall_correct"), ci.get("recall_correct")),
             c["ci_unit"],
             f"{_fmt(m['precision'])} (prevalence {_fmt(m['prevalence'], 4)})",
             _fmt(m["fa_per_symbol_day"]),
@@ -543,8 +634,8 @@ def build_report(
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
     }
-    if len(data["config_hash"]) > 1:
-        data["notes"] = [MIXED_CONFIG_NOTE, *NOTES_TH]
+    mixed = _mixed_notes(runs)
+    data["notes"] = [*mixed, *NOTES_TH]
 
     lines = [
         "# รายงานผลการประเมิน Market IDS (เพื่อการศึกษา)",
@@ -567,11 +658,11 @@ def build_report(
         "",
         "ทุกตัวเลขมาจากตาราง runs ทั้งหมด; ค่าเฉลี่ยข้าม seed และช่วงความเชื่อมั่น 95 % "
         "จากการ bootstrap (หน่วยตามคอลัมน์ bootstrap unit)",
-        *(["", f"**คำเตือน:** {MIXED_CONFIG_NOTE}"] if len(data["config_hash"]) > 1 else []),
+        *[line for n in mixed for line in ("", f"**คำเตือน:** {n}")],
     ]
     cols = (
-        "| variant | budget | provenance | seeds | events | recall_any [95% CI] | "
-        "recall_correct [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | "
+        "| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | "
+        "recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | "
         "FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |"
     )
     for exp in order:
@@ -587,7 +678,7 @@ def build_report(
         "|---|---|---|---|---|---|---|",
     ]
     for row in paired["rows"]:
-        verdict = "AE ดีกว่าอย่างมีนัย" if row["significant"] else "ไม่มีนัยสำคัญ"
+        verdict = row["reason_th"] or ("AE ดีกว่าอย่างมีนัย" if row["significant"] else "ไม่มีนัยสำคัญ")
         lines.append(
             f"| {row['baseline']} | {row['provenance']} | {row['n_seeds']} | {row['n_events']} | "
             f"{_fmt(row['diff_mean'])} | [{_fmt(row['ci'][0])}, {_fmt(row['ci'][1])}] | "

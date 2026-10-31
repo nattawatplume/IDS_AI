@@ -7,15 +7,17 @@ rows are bit-identical to batch when both start at the same first bar.
 from typing import Any
 
 from idsai.config import FeatureCfg
-from idsai.detection.features.kernel import Kernel
+from idsai.detection.features.kernel import Baseline, Kernel
 
 
 class StreamingWindows:
     """Window rows for one symbol, one contiguous 1 s bar at a time."""
 
-    def __init__(self, symbol: str, cfg: FeatureCfg, quote_unit: float):
+    def __init__(
+        self, symbol: str, cfg: FeatureCfg, quote_unit: float, *, baseline: Baseline | None = None
+    ):
         self.symbol = symbol
-        self.kernel = Kernel(cfg, quote_unit)
+        self.kernel = Kernel(cfg, quote_unit, baseline=baseline)
 
     def push_bar(self, bar: dict[str, Any]) -> dict[str, Any] | None:
         """The row `{symbol, t_end_us, *feature_columns}` ending at this bar's close, if one is due.

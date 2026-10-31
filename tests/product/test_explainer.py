@@ -506,3 +506,22 @@ def test_displayed_unit_and_raw_paths():
     assert validate_numbers("1.0e-04", allowed_numbers(p))  # displayed
     assert validate_numbers("1.049e-4", allowed_numbers(p))  # raw
     assert not validate_numbers("1.2e-4", allowed_numbers(p))
+
+
+# ---------------------------------------------------------------- technique from another row
+
+OTHER_ROW_TH = "; การจัดประเภทมาจากแถวอื่นในเหตุการณ์เดียวกัน ตัวเลขข้างต้นมาจากจุดที่ผิดปกติที่สุด"
+
+
+def test_technique_from_another_row_appends_the_exact_clause():
+    plain = explain(make_alert()).text_th
+    a = make_alert(peak_technique_id="MM-T000")
+    t = explain(a).text_th
+    assert t == plain + OTHER_ROW_TH
+    assert numbers_in(OTHER_ROW_TH) == []
+    assert validate_numbers(t, allowed_numbers(a))
+
+
+@pytest.mark.parametrize("peak", [None, "MM-T001"])
+def test_same_or_unset_peak_technique_leaves_the_text_unchanged(peak):
+    assert explain(make_alert(peak_technique_id=peak)).text_th == explain(make_alert()).text_th
