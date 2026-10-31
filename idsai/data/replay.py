@@ -46,7 +46,10 @@ ORDER = ["ts_us", "trade_id", "symbol"]
 
 
 def _check_speed(x: float) -> float:
-    x = float(x)
+    try:
+        x = float(x)
+    except OverflowError:
+        raise ValueError("speed is too large") from None
     if not math.isfinite(x) or x < 0:
         raise ValueError(f"speed must be finite and >= 0 (0 = max), got {x}")
     return x
@@ -114,6 +117,16 @@ class Replayer:
         """Event time of the last tick: nothing is delivered after it."""
         return self._last_tick
 
+    @property
+    def ended(self) -> bool:
+        """The iterator ran out or was closed: nothing more will be delivered."""
+        return self._ended
+
+    @property
+    def symbols(self) -> list[str]:
+        """The symbols in the data, sorted."""
+        return self._df["symbol"].unique().sort().to_list()
+
     # ---- controls ----
 
     def pause(self) -> None:
@@ -148,7 +161,7 @@ class Replayer:
         changed after a `seek`. `symbol` is required when the input has several symbols.
         """
         assert_injection_allowed(mode)
-        symbols = self._df["symbol"].unique().sort().to_list()
+        symbols = self.symbols
         if symbol is None:
             if len(symbols) != 1:
                 raise ValueError(f"inject needs symbol= on multi-symbol input, got {symbols}")

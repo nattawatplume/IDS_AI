@@ -20,8 +20,9 @@ from idsai.pipeline.stream import MODES, StreamPipeline
 class AppState:
     """What the routes read. `pipeline` and `replayer` may be None (no stream, no time machine).
 
-    `symbols` is the set the API knows (default: the live symbols); `injected` keeps the Red-Team
-    scenarios of this app in memory, never in the store.
+    `symbols` is the set the API knows (default: the replayer's, else the live symbols); `injected`
+    keeps the Red-Team scenarios of this app in memory, never in the store. `mode` must be the
+    pipeline's: the Red-Team refusal rests on it.
     """
 
     cfg: Settings
@@ -36,10 +37,15 @@ class AppState:
     def __post_init__(self) -> None:
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}")
+        if self.pipeline is not None and self.pipeline.mode != self.mode:
+            raise ValueError(
+                f"mode {self.mode!r} differs from the pipeline's {self.pipeline.mode!r}"
+            )
         if self.auditor is None:
             self.auditor = Auditor(self.cfg)
         if self.symbols is None:
-            self.symbols = list(self.cfg.live.symbols)
+            live = self.cfg.live.symbols
+            self.symbols = list(live) if self.replayer is None else self.replayer.symbols
 
     @property
     def bus(self) -> Bus | None:

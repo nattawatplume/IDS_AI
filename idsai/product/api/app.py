@@ -2,14 +2,16 @@
 
 Every route is `async def`, so it runs on the one event loop that owns the store, the bus, the
 replayer and the pipeline. There is no login and no CORS: a POST or WebSocket whose `Origin` host
-differs from `Host` is refused, so a page on another site cannot drive a local server. A request
-without `Origin` (curl, tests) is allowed. JSON is strict: non-finite floats go out as null.
+differs from `Host` is refused, which stops an ordinary page on another site. It does not stop DNS
+rebinding, where `Origin` and `Host` agree on the attacker's name: that takes a host allowlist where
+the bind address is chosen. A request without `Origin` (curl, tests) is allowed. JSON is strict:
+non-finite floats go out as null.
 
 WebSocket messages are `{type: bar|score|alert|health, data}`. Per client and symbol, bar and score
 go out at most 4 Hz and a held value is replaced by a newer one, so the client always ends on the
 latest. Alerts bypass the throttle and have a queue per client; if the bus dropped alerts during
 the connection, `{type: "alert", data: {"event": "resync"}}` tells the client to re-read
-`GET /api/alerts`.
+`GET /api/alerts`. A client that does not take a message within `SEND_TIMEOUT_S` counts as gone.
 """
 
 import asyncio
@@ -24,7 +26,15 @@ import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StringConstraints,
+    field_validator,
+)
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
@@ -47,7 +57,9 @@ S_US = 1_000_000
 DAY_S = 86_400
 THROTTLE_S = 0.25  # bar / score: 4 Hz per client and symbol
 HEALTH_S = 1.0
+SEND_TIMEOUT_S = 10.0  # a client that stopped reading blocks its sends: it is then disconnected
 LANES = ("lane_rule", "lane_stat", "lane_ai")
+REPLAY_ENDED_TH = "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่"
 REFUSED_TH = "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง (ใช้ได้เฉพาะโหมด replay / sim)"
 
 
@@ -57,7 +69,14 @@ class _Body(BaseModel):
 
 class FeedbackIn(_Body):
     verdict: Verdict
-    analyst: str = Field(min_length=1, max_length=64)
+    analyst: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+
+    @field_validator("analyst")
+    @classmethod
+    def _printable(cls, v: str) -> str:
+        if not v.isprintable():
+            raise ValueError("analyst must not contain control characters")
+        return v
 
 
 class ControlIn(_Body):
@@ -68,8 +87,15 @@ class ControlIn(_Body):
 class InjectIn(_Body):
     family: Family
     region: Region
-    offset_s: Annotated[float, Field(gt=0, le=3600, allow_inf_nan=False)]
+    offset_s: (
+        Annotated[StrictInt, Field(gt=0, le=3600)]
+        | Annotated[StrictFloat, Field(gt=0, le=3600, allow_inf_nan=False)]
+    )
     symbol: str | None = Field(default=None, max_length=32)
+
+
+class _ClientGone(Exception):
+    """A send failed or timed out: the client is closed, vanished or no longer reading."""
 
 
 def _dumps(obj: Any) -> str:
@@ -89,7 +115,11 @@ def _cross_origin(conn: HTTPConnection) -> bool:
     origin = conn.headers.get("origin")
     if origin is None:
         return False
-    return urlsplit(origin).netloc.lower() != (conn.headers.get("host") or "").lower()
+    try:
+        netloc = urlsplit(origin).netloc
+    except ValueError:  # unparsable: it cannot be shown to be this host
+        return True
+    return netloc.lower() != (conn.headers.get("host") or "").lower()
 
 
 async def same_origin(conn: HTTPConnection) -> None:
@@ -197,6 +227,8 @@ def create_app(state: AppState) -> FastAPI:
         rp = state.replayer
         if state.mode == "live" or rp is None:
             raise HTTPException(409, "ควบคุมการเล่นย้อนหลังไม่ได้ในโหมดนี้")
+        if rp.ended:
+            raise HTTPException(409, REPLAY_ENDED_TH)
         if body.action == "pause":
             rp.pause()
         elif body.action == "play":
@@ -211,10 +243,7 @@ def create_app(state: AppState) -> FastAPI:
         else:
             if not isinstance(body.value, int):
                 raise HTTPException(422, "seek ต้องมี value เป็นจำนวนเต็ม (µs)")
-            try:
-                rp.seek(body.value)
-            except RuntimeError as e:
-                raise HTTPException(409, str(e)) from None
+            rp.seek(body.value)
         return _json({"action": body.action, "cursor_us": rp.cursor_us})
 
     @app.post("/api/redteam/inject", status_code=202, dependencies=[Depends(same_origin)])
@@ -226,9 +255,11 @@ def create_app(state: AppState) -> FastAPI:
         rp = state.replayer
         if rp is None:
             raise HTTPException(409, "ไม่มีตัวเล่นย้อนหลังสำหรับฉีดข้อมูลจำลอง")
+        if rp.ended:  # the scenario would never play
+            raise HTTPException(409, REPLAY_ENDED_TH)
         symbol = body.symbol
-        if symbol is None and len(state.symbols) == 1:
-            symbol = state.symbols[0]
+        if symbol is None and len(rp.symbols) == 1:
+            symbol = rp.symbols[0]
         if symbol is None or symbol not in state.symbols:
             raise HTTPException(422, "ต้องระบุ symbol ที่รู้จัก")
         cursor = rp.cursor_us
@@ -268,7 +299,11 @@ def create_app(state: AppState) -> FastAPI:
             async def send(kind: str, data: Any) -> None:
                 text = _dumps({"type": kind, "data": data})
                 async with lock:
-                    await ws.send_text(text)
+                    try:
+                        async with asyncio.timeout(SEND_TIMEOUT_S):
+                            await ws.send_text(text)
+                    except (WebSocketDisconnect, RuntimeError, OSError) as e:  # with TimeoutError
+                        raise _ClientGone from e
 
             async def collect(kind: str, q: asyncio.Queue) -> None:
                 while True:
@@ -282,18 +317,21 @@ def create_app(state: AppState) -> FastAPI:
                     await wake.wait()
                     now = time.monotonic()
                     for key in [k for k in latest if now >= next_ok.get(k, 0.0)]:
-                        next_ok[key] = now + THROTTLE_S
-                        await send(key[0], latest.pop(key))
+                        if key in latest:  # a reset may have dropped it during the last send
+                            next_ok[key] = now + THROTTLE_S
+                            await send(key[0], latest.pop(key))
                     if not latest:
                         wake.clear()
                     else:
-                        due = min(next_ok[k] for k in latest)
+                        due = min(next_ok.get(k, 0.0) for k in latest)
                         await asyncio.sleep(max(due - time.monotonic(), 0.0))
 
             async def alert_pump(q: asyncio.Queue) -> None:
                 seen = dropped0
                 while True:
                     m = await q.get()
+                    if isinstance(m, dict) and m.get("event") == "alerts_reset":
+                        latest.clear()  # a held value from before the seek must not follow it
                     if bus.dropped["alerts"] != seen:  # some were lost: the client must re-read
                         seen = bus.dropped["alerts"]
                         await send("alert", {"event": "resync"})
@@ -317,12 +355,8 @@ def create_app(state: AppState) -> FastAPI:
                     asyncio.create_task(alert_pump(queues["alerts"])),
                 ]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for (
-                t
-            ) in done:  # a vanished client ends a send with one of these; anything else is a bug
-                if not t.cancelled() and not isinstance(
-                    t.exception(), WebSocketDisconnect | RuntimeError | OSError | None
-                ):
+            for t in done:  # only a failed send means the client left; anything else is a bug
+                if not t.cancelled() and not isinstance(t.exception(), _ClientGone | None):
                     raise t.exception()
         finally:
             for t in tasks:  # no await here: a cancelled handler must still clean up in full

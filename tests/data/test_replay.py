@@ -38,6 +38,34 @@ def frame(ts, ids=None, symbol=SYM) -> pl.DataFrame:
     )
 
 
+def test_ended_and_symbols():
+    two = pl.concat([frame([T0 + S, T0 + 2 * S]), frame([T0 + S], symbol="OTHERBTC")])
+    assert Replayer(two).symbols == ["OTHERBTC", SYM]
+
+    async def run_out():
+        r = Replayer(frame([T0 + S]), speed=0)
+        assert not r.ended
+        async for _ in r:
+            assert not r.ended
+        assert r.ended
+
+    async def closed():
+        r = Replayer(frame([T0 + S, T0 + 2 * S]), speed=0)
+        it = aiter(r)
+        await anext(it)
+        assert not r.ended
+        await it.aclose()
+        assert r.ended
+
+    asyncio.run(run_out())
+    asyncio.run(closed())
+
+
+def test_a_huge_speed_is_a_value_error():
+    with pytest.raises(ValueError, match="too large"):
+        Replayer(frame([T0 + S])).set_speed(10**400)
+
+
 def burst(t_start: int, duration_s: float = 30.0) -> Scenario:
     return Scenario(
         family="pump_burst",

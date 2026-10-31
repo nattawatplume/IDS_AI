@@ -1,6 +1,8 @@
 """Local store: Parquet trade partitions + DuckDB tables (alerts, feedback, labels, runs)."""
 
 import json
+import logging
+import math
 import os
 import re
 import threading
@@ -16,6 +18,7 @@ from idsai.config import file_sha
 from idsai.contracts.alert import Alert
 from idsai.contracts.frames import LABELS, TRADES, conform, empty
 
+log = logging.getLogger(__name__)
 DAY_US = 86_400_000_000
 _EPOCH = date(1970, 1, 1)
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -259,7 +262,19 @@ class Store:
 
     @staticmethod
     def _alert_row(a: Alert) -> tuple:
+        # evidence is explanatory only; JSON cannot carry inf/NaN, so drop such items (as the Chief)
+        evidence = [(f, v, c) for f, v, c in a.evidence if math.isfinite(v) and math.isfinite(c)]
+        a = a.model_copy(update={"evidence": evidence})
         return (a.alert_id, a.ts_event_us, a.symbol, a.model_dump_json())
+
+    @staticmethod
+    def _read_alert(js: str) -> Alert | None:
+        """The stored alert, or None with a log line: one bad row must not cost the others."""
+        try:
+            return Alert.model_validate_json(js)
+        except ValueError as e:
+            log.warning("skipping an unreadable alert row: %s", e)
+            return None
 
     def insert_alert(self, a: Alert) -> None:
         with self._lock:
@@ -330,14 +345,16 @@ class Store:
         args.append(limit)
         with self._lock:
             rows = self._db().execute(sql, args).fetchall()
-        return [Alert.model_validate_json(r[0]) for r in rows]
+        return [a for r in rows if (a := self._read_alert(r[0])) is not None]
 
     def get_alert(self, alert_id: str) -> Alert | None:
         with self._lock:
-            row = self._db().execute(
-                "SELECT json FROM alerts WHERE alert_id = ?", [alert_id]
-            ).fetchone()
-        return Alert.model_validate_json(row[0]) if row else None
+            row = (
+                self._db()
+                .execute("SELECT json FROM alerts WHERE alert_id = ?", [alert_id])
+                .fetchone()
+            )
+        return self._read_alert(row[0]) if row else None
 
     def insert_feedback(self, alert_id: str, verdict: Verdict, analyst: str) -> None:
         if verdict not in _VERDICTS:

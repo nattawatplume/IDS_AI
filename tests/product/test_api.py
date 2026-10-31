@@ -1,5 +1,6 @@
 """REST + WebSocket API: shapes, errors, strict JSON, browser safety, stream and cleanup."""
 
+import asyncio
 import inspect
 import json
 import time
@@ -8,6 +9,8 @@ from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
+import polars as pl
 import pytest
 from fastapi.routing import APIRoute
 from starlette.testclient import TestClient
@@ -20,9 +23,12 @@ from idsai.contracts.alert import Alert, DetectorRef
 from idsai.data.replay import Replayer
 from idsai.data.store import Store
 from idsai.detection.simulator.guard import EthicsError
+from idsai.detection.simulator.scenarios import load_scenario_ranges, sample_scenario
+from idsai.pipeline.stream import StreamPipeline
 from idsai.product.api import AppState, create_app
 from idsai.product.api import app as app_mod
 from idsai.product.explainer import BANNED_TH
+from tests.pipeline.test_stream_gap import cheap_chief
 from tests.synth import day_us, make_trades
 
 S = 1_000_000
@@ -71,13 +77,14 @@ class FakePipe:
         self.latency_ms: deque[float] = deque([5.0, 8.0, 12.0])
         self.points: dict[str, list[dict]] = {}
         self.samples = 400
+        self.samples_by: dict[str, int] = {}
         self.late = 2
 
     def series(self, symbol):
         return list(self.points.get(symbol, ()))
 
     def baseline_samples(self, symbol):
-        return self.samples
+        return self.samples_by.get(symbol, self.samples)
 
     def late_trades(self):
         return self.late
@@ -99,6 +106,17 @@ def point(i: int, **kw) -> dict:
 def make_replayer() -> Replayer:
     trades = make_trades(date(2025, 3, 1), 2, symbol=SYM, seed=3, rate=0.05)
     return Replayer(trades, speed=1.0, start_us=D_US + 3600 * S)
+
+
+def finish(rp: Replayer) -> None:
+    """End `rp` the way a cancelled or crashed pipeline does: its iterator is closed."""
+
+    async def run():
+        it = aiter(rp)
+        await anext(it)
+        await it.aclose()
+
+    asyncio.run(run())
 
 
 @pytest.fixture
@@ -175,6 +193,23 @@ def test_bad_mode_is_refused(env):
         AppState(env.cfg, env.store, "paper", None, None, Auditor(env.cfg))
 
 
+@pytest.mark.parametrize("mode", ["live", "sim"])
+def test_mode_must_be_the_pipelines(env, mode):
+    with pytest.raises(ValueError, match="differs"):
+        AppState(env.cfg, env.store, mode, env.pipe, env.replayer, Auditor(env.cfg))
+
+
+def test_symbols_default_to_the_replayers(env):
+    st = AppState(env.cfg, env.store, "replay", env.pipe, env.replayer, Auditor(env.cfg))
+    with TestClient(create_app(st)) as c:
+        assert c.get("/api/symbols").json() == [SYM]
+        assert c.get(f"/api/series?symbol={SYM}").status_code == 200
+        names = {x["name"]: x["status"] for x in c.get("/api/health").json()["checks"]}
+        assert names["warmup"] == "ok"
+    no_replayer = AppState(env.cfg, env.store, "replay", env.pipe, None, Auditor(env.cfg))
+    assert no_replayer.symbols == list(env.cfg.live.symbols)
+
+
 # ---- alerts / feedback ----
 
 
@@ -215,6 +250,9 @@ def test_alert_detail_and_feedback(client, env):
         {"verdict": "maybe", "analyst": "a"},
         {"verdict": "tp", "analyst": ""},
         {"verdict": "tp", "analyst": "x" * 65},
+        {"verdict": "tp", "analyst": "   "},
+        {"verdict": "tp", "analyst": "a\u0000b"},
+        {"verdict": "tp", "analyst": "a\nb"},
         {"verdict": "tp"},
         {"verdict": "tp", "analyst": "a", "extra": 1},
     ],
@@ -267,21 +305,36 @@ def test_series_without_pipeline_is_empty(env):
 # ---- strict JSON ----
 
 
-def test_nan_in_series_and_alert_is_strict_json(client, env, monkeypatch):
+def test_nan_in_series_and_alert_is_strict_json(client, env):
     env.pipe.points[SYM] = [point(0, F=float("nan"), close=float("inf"))]
-    # the store cannot hold a NaN fact (it round-trips as null and fails to load), so hand the
-    # routes an alert that has one
-    nan_alert = make_alert(
-        "a1", evidence=[("z_quote_vol_60", float("nan"), 7.1), ("ret_60", 0.04, 0.5)]
+    env.store.upsert_alert(
+        make_alert("a1", evidence=[("z_quote_vol_60", float("nan"), 7.1), ("ret_60", 0.04, 0.5)])
     )
-    monkeypatch.setattr(env.store, "list_alerts", lambda limit=200, symbol=None: [nan_alert])
-    monkeypatch.setattr(env.store, "get_alert", lambda aid: nan_alert)
     for url in (f"/api/series?symbol={SYM}", "/api/alerts", "/api/alerts/a1"):
         r = client.get(url)
         assert r.status_code == 200, url
         strict_loads(r.text)
     b = strict_loads(client.get(f"/api/series?symbol={SYM}").text)
     assert b["F"] == [None] and b["close"] == [None]
+    assert client.get("/api/alerts/a1").json()["evidence"] == [["ret_60", 0.04, 0.5]]
+
+
+def test_an_old_invalid_row_costs_only_itself(client, env, caplog):
+    env.store.upsert_alert(make_alert("good", D_US + 100 * S))
+    bad = make_alert("bad", D_US + 200 * S).model_dump(mode="json")
+    bad["evidence"] = [["ret_60", None, 0.1]]  # how a NaN was stored before the store dropped it
+    env.store._db().execute(
+        "INSERT INTO alerts(alert_id, ts_event_us, symbol, json) VALUES (?, ?, ?, ?)",
+        ["bad", D_US + 200 * S, SYM, json.dumps(bad)],
+    )
+    r = client.get("/api/alerts")
+    assert r.status_code == 200 and [a["alert_id"] for a in r.json()] == ["good"]
+    assert "unreadable alert row" in caplog.text
+    assert client.get("/api/alerts/bad").status_code == 404
+    assert (
+        post(client, "/api/alerts/bad/feedback", {"verdict": "tp", "analyst": "a"}).status_code
+        == 404
+    )
 
 
 def test_nan_in_ws_message_is_strict_json(client, env):
@@ -335,12 +388,29 @@ def test_health_without_pipeline_is_not_ok(env):
         assert h["overall"] != "ok" and h["dropped"] == {} and h["late_trades"] is None
 
 
+def test_warmup_is_decided_by_the_slowest_symbol(client, env):
+    for slow in (SYM, "OTHERBTC"):
+        env.pipe.samples_by = {slow: 3}
+        h = client.get("/api/health").json()
+        assert {c["name"]: c["status"] for c in h["checks"]}["warmup"] == "warn", slow
+
+
 def test_ws_health_matches_rest_health(client):
     with client.websocket_connect("/ws/stream") as ws:
         msg = ws.receive_json()
     assert msg["type"] == "health"
     rest = client.get("/api/health").json()
-    assert {c["name"] for c in msg["data"]["checks"]} == {c["name"] for c in rest["checks"]}
+    assert {**msg["data"], "ts_us": 0} == {**rest, "ts_us": 0}
+
+
+def test_ws_health_comes_about_once_a_second(client):
+    with client.websocket_connect("/ws/stream") as ws:
+        assert ws.receive_json()["type"] == "health"
+        t0 = time.monotonic()
+        for _ in range(2):
+            assert ws.receive_json()["type"] == "health"
+        elapsed = time.monotonic() - t0
+    assert 1.5 < elapsed < 4.0
 
 
 # ---- replay control ----
@@ -365,6 +435,7 @@ def test_replay_control(client, env):
         {"action": "speed"},
         {"action": "speed", "value": -1},
         {"action": "speed", "value": "fast"},
+        {"action": "speed", "value": 10**400},
         {"action": "seek"},
         {"action": "seek", "value": 1.5},
         {"action": "seek", "value": "x"},
@@ -386,7 +457,8 @@ def test_replay_control_non_finite_is_422(client):
 
 
 def test_replay_control_conflicts(env):
-    live = AppState(env.cfg, env.store, "live", env.pipe, env.replayer, Auditor(env.cfg))
+    pipe = FakePipe(env.bus, "live")
+    live = AppState(env.cfg, env.store, "live", pipe, env.replayer, Auditor(env.cfg))
     none = AppState(env.cfg, env.store, "replay", env.pipe, None, Auditor(env.cfg))
     for st in (live, none):
         with TestClient(create_app(st)) as c:
@@ -394,10 +466,28 @@ def test_replay_control_conflicts(env):
     assert not env.replayer._paused
 
 
-def test_seek_on_ended_replay_is_409(client, env):
-    env.replayer._ended = True
-    r = post(client, "/api/replay/control", {"action": "seek", "value": D_US + 7200 * S})
-    assert r.status_code == 409
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "pause"},
+        {"action": "play"},
+        {"action": "speed", "value": 5},
+        {"action": "seek", "value": D_US + 7200 * S},
+    ],
+)
+def test_every_control_on_an_ended_replay_is_409(client, env, body):
+    finish(env.replayer)
+    cursor, speed = env.replayer.cursor_us, env.replayer._speed
+    assert post(client, "/api/replay/control", body).status_code == 409
+    assert env.replayer.cursor_us == cursor and env.replayer._speed == speed
+    assert not env.replayer._paused
+
+
+def test_inject_on_an_ended_replay_is_409(client, env):
+    finish(env.replayer)
+    h0 = env.replayer._df.height
+    assert post(client, "/api/redteam/inject", inject_body()).status_code == 409
+    assert env.replayer._df.height == h0 and env.state.injected == []
 
 
 # ---- red team ----
@@ -431,10 +521,64 @@ def test_inject_is_repeatable_per_app_counter(env):
     assert out[0] == out[1]
 
 
+def test_each_inject_of_an_app_draws_a_new_scenario(client):
+    a = post(client, "/api/redteam/inject", inject_body()).json()["scenario"]
+    b = post(client, "/api/redteam/inject", inject_body()).json()["scenario"]
+    assert a != b
+
+
+def test_inject_symbol_may_be_omitted_with_a_one_symbol_replayer(client, env):
+    assert len(env.state.symbols) == 2  # the replayer decides, not the known set
+    body = inject_body()
+    del body["symbol"]
+    r = post(client, "/api/redteam/inject", body)
+    assert r.status_code == 202, r.text
+    assert r.json()["label"]["symbol"] == SYM
+
+
+def test_inject_symbol_is_required_with_a_many_symbol_replayer(env):
+    two = pl.concat([make_trades(D, 1, symbol=s, seed=3, rate=0.05) for s in (SYM, "OTHERBTC")])
+    rp = Replayer(two, speed=1.0, start_us=D_US + 3600 * S)
+    st = AppState(env.cfg, env.store, "replay", env.pipe, rp, Auditor(env.cfg))
+    assert st.symbols == ["OTHERBTC", SYM]
+    body = inject_body()
+    del body["symbol"]
+    with TestClient(create_app(st)) as c:
+        assert post(c, "/api/redteam/inject", body).status_code == 422
+
+
+@pytest.mark.parametrize("mode", ["replay", "sim"])
+def test_inject_passes_the_real_mode_to_the_replayer(env, monkeypatch, mode):
+    real, seen = env.replayer.inject, []
+
+    def spy(*a, **k):
+        seen.append(k["mode"])
+        return real(*a, **k)
+
+    monkeypatch.setattr(env.replayer, "inject", spy)
+    st = AppState(env.cfg, env.store, mode, FakePipe(env.bus, mode), env.replayer, Auditor(env.cfg))
+    with TestClient(create_app(st)) as c:
+        assert post(c, "/api/redteam/inject", inject_body()).status_code == 202
+    assert seen == [mode]
+
+
+def test_replayer_itself_refuses_live_if_the_pre_check_is_gone(env, monkeypatch):
+    # the refusal rests on inject(..., mode=state.mode): a hard-coded mode would get through here
+    monkeypatch.setattr(app_mod, "assert_injection_allowed", lambda mode: None)
+    h0, c0 = env.replayer._df.height, env.replayer.cursor_us
+    pipe = FakePipe(env.bus, "live")
+    st = AppState(env.cfg, env.store, "live", pipe, env.replayer, Auditor(env.cfg), symbols=[SYM])
+    with TestClient(create_app(st)) as c:
+        assert post(c, "/api/redteam/inject", inject_body()).status_code == 403
+    assert env.replayer._df.height == h0 and env.replayer.cursor_us == c0
+    assert st.injected == []
+
+
 def test_inject_refused_in_live_leaves_everything_unchanged(env):
     h0, c0 = env.replayer._df.height, env.replayer.cursor_us
+    pipe = FakePipe(env.bus, "live")
     for replayer in (env.replayer, None):
-        st = AppState(env.cfg, env.store, "live", env.pipe, replayer, Auditor(env.cfg))
+        st = AppState(env.cfg, env.store, "live", pipe, replayer, Auditor(env.cfg))
         with TestClient(create_app(st)) as c:
             r = post(c, "/api/redteam/inject", inject_body())
             assert r.status_code == 403
@@ -463,6 +607,9 @@ def test_inject_ethics_error_from_replayer_maps_to_403(env, monkeypatch):
         inject_body(offset_s=-5),
         inject_body(offset_s=3601),
         inject_body(offset_s="soon"),
+        inject_body(offset_s="60"),
+        inject_body(offset_s=True),
+        inject_body(offset_s=10**400),
         inject_body(extra=1),
         inject_body(symbol="NOPE"),
     ],
@@ -475,7 +622,8 @@ def test_inject_bad_input_is_422(client, env, body):
 
 
 def test_inject_without_replayer_is_409(env):
-    st = AppState(env.cfg, env.store, "sim", env.pipe, None, Auditor(env.cfg), symbols=[SYM])
+    pipe = FakePipe(env.bus, "sim")
+    st = AppState(env.cfg, env.store, "sim", pipe, None, Auditor(env.cfg), symbols=[SYM])
     with TestClient(create_app(st)) as c:
         assert post(c, "/api/redteam/inject", inject_body()).status_code == 409
 
@@ -488,7 +636,7 @@ def test_cross_origin_post_is_403_and_same_or_no_origin_is_allowed(client, env):
     body = json.dumps({"verdict": "tp", "analyst": "a"})
     h = {"content-type": "application/json"}
     url = "/api/alerts/a1/feedback"
-    for origin in ("http://evil.example", "null", "http://testserver:9"):
+    for origin in ("http://evil.example", "null", "http://testserver:9", "http://[bad"):
         r = client.post(url, content=body, headers={**h, "origin": origin})
         assert r.status_code == 403, origin
     assert env.store.list_feedback("a1") == []
@@ -514,6 +662,9 @@ def test_cross_origin_control_and_inject_blocked(client, env):
 def test_cross_origin_websocket_is_refused_before_accept(client, env):
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect("/ws/stream", headers={"origin": "http://evil.example"}):
+            pass
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/stream", headers={"origin": "http://[bad"}):
             pass
     assert subs(env.bus) == 0
     with client.websocket_connect("/ws/stream", headers={"origin": "http://testserver"}) as ws:
@@ -562,30 +713,36 @@ def test_ws_overflow_sends_resync(client, env):
 
 
 def test_ws_throttles_bars_and_scores_but_ends_on_the_latest(client, env):
+    n_pub = 60
+
+    async def spaced() -> float:  # with room for the loop between publishes, or collect coalesces
+        t0 = time.monotonic()
+        for i in range(n_pub):
+            env.bus.publish("scores", {"symbol": SYM, **point(i)})
+            env.bus.publish("bars", {"symbol": SYM, "t_us": i, "close": float(i)})
+            await asyncio.sleep(0.02)
+        return time.monotonic() - t0
+
     with client.websocket_connect("/ws/stream") as ws:
         ws.receive_json()
-
-        def flood():
-            for i in range(30):
-                env.bus.publish("scores", {"symbol": SYM, **point(i)})
-                env.bus.publish("bars", {"symbol": SYM, "t_us": i, "close": float(i)})
-
-        client.portal.call(flood)
-        n, last = 0, {}
+        elapsed = client.portal.call(spaced)
+        n = {"bar": 0, "score": 0}
+        last: dict[str, dict] = {}
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             m = ws.receive_json()
             if m["type"] == "health":
                 continue
-            n += 1
+            n[m["type"]] += 1
             last[m["type"]] = m["data"]
             if (
-                last.get("score", {}).get("close") == 129.0
-                and last.get("bar", {}).get("t_us") == 29
+                last.get("score", {}).get("close") == 100.0 + n_pub - 1
+                and last.get("bar", {}).get("t_us") == n_pub - 1
             ):
                 break
-    assert last["score"]["close"] == 129.0 and last["bar"]["t_us"] == 29
-    assert n < 30  # coalesced, not one message per publish
+    assert last["score"]["close"] == 100.0 + n_pub - 1 and last["bar"]["t_us"] == n_pub - 1
+    for kind, count in n.items():  # 4 Hz over the run, plus the first and the last value
+        assert 3 <= count <= elapsed * 4 + 2, (kind, count, elapsed)
 
 
 def test_ws_throttle_is_per_symbol(client, env):
@@ -613,6 +770,94 @@ def test_ws_disconnect_leaves_no_subscriber(client, env, abrupt):
     except RuntimeError:
         pass
     assert wait_for(lambda: subs(env.bus) == base)
+
+
+def test_ws_reset_drops_the_held_values(client, env):
+    with client.websocket_connect("/ws/stream") as ws:
+        ws.receive_json()
+
+        def next_data(kind):
+            while (m := ws.receive_json())["type"] != kind:
+                pass
+            return m["data"]
+
+        client.portal.call(env.bus.publish, "scores", {"symbol": SYM, **point(1)})
+        assert next_data("score")["close"] == 101.0
+
+        def held_then_reset():  # the first score used the slot, so this one waits for the next
+            env.bus.publish("scores", {"symbol": SYM, **point(2)})
+            env.bus.publish("alerts", {"event": "alerts_reset", "t_us": 5, "deleted": []})
+
+        client.portal.call(held_then_reset)
+        assert next_data("alert")["event"] == "alerts_reset"
+        time.sleep(0.4)  # past the slot the held value would have used
+        client.portal.call(env.bus.publish, "scores", {"symbol": SYM, **point(3)})
+        assert next_data("score")["close"] == 103.0
+
+
+async def _run_ws(app, on_send) -> tuple[int, int, int]:
+    """Run the handler on this loop until it returns; `on_send(inbox)` gets every sent message.
+
+    Returns the tasks before, at the first send, and after. No client close is sent by itself.
+    """
+    inbox: asyncio.Queue = asyncio.Queue()
+    inbox.put_nowait({"type": "websocket.connect"})
+    during: list[int] = []
+
+    async def send(msg):
+        if msg["type"] != "websocket.accept":
+            during.append(len(asyncio.all_tasks()))
+            await on_send(inbox)
+
+    scope = {
+        "type": "websocket",
+        "path": "/ws/stream",
+        "raw_path": b"/ws/stream",
+        "query_string": b"",
+        "headers": [],
+        "subprotocols": [],
+        "scheme": "ws",
+        "server": ("testserver", 80),
+        "client": ("testclient", 1),
+        "app": app,
+    }
+    before = len(asyncio.all_tasks())
+    await asyncio.wait_for(app(scope, inbox.get, send), 3.0)
+    for _ in range(5):  # cancelled tasks finish on their own: give them their turn
+        await asyncio.sleep(0)
+    return before, during[0], len(asyncio.all_tasks())
+
+
+async def _client_closes(inbox) -> None:
+    inbox.put_nowait({"type": "websocket.disconnect", "code": 1000})
+
+
+async def _send_fails(inbox) -> None:
+    raise OSError("connection reset")
+
+
+async def _send_never_returns(inbox) -> None:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("on_send", [_client_closes, _send_fails, _send_never_returns])
+def test_ws_any_end_leaves_no_task_and_no_subscriber(env, monkeypatch, on_send):
+    monkeypatch.setattr(app_mod, "SEND_TIMEOUT_S", 0.05)
+    app = create_app(env.state)
+    before, during, after = asyncio.run(_run_ws(app, on_send))
+    assert during > before  # the count does see the handler's tasks
+    assert after == before
+    assert subs(env.bus) == 0
+
+
+def test_ws_real_bug_is_not_taken_for_a_disconnect(env, monkeypatch):
+    def boom(state):
+        raise RuntimeError("store is closed")
+
+    monkeypatch.setattr(app_mod, "health", boom)
+    with pytest.raises(RuntimeError, match="store is closed"):
+        asyncio.run(_run_ws(create_app(env.state), _client_closes))
+    assert subs(env.bus) == 0
 
 
 def test_ws_clients_are_independent(client, env):
@@ -647,3 +892,88 @@ def test_inject_past_the_end_of_the_data_is_422(env):
     with TestClient(create_app(st)) as c:
         assert post(c, "/api/redteam/inject", inject_body(offset_s=3600)).status_code == 422
     assert rp._df.height == h0 and st.injected == []
+
+
+def test_inject_that_starts_in_the_data_but_ends_past_it_is_422(env):
+    trades = make_trades(date(2025, 3, 1), 2, symbol=SYM, seed=3, rate=0.05)
+    end = Replayer(trades).end_us
+    rng = np.random.default_rng([env.cfg.eval.split_seed, 0])  # what the app's first inject draws
+    sc = sample_scenario("pump_burst", "train", 0, rng, load_scenario_ranges())
+    offset_s = 60
+    rp = Replayer(trades, speed=1.0, start_us=end - int((offset_s + sc.duration_s / 2) * S))
+    assert rp.cursor_us + offset_s * S < rp.end_us  # it starts before the end
+    st = AppState(env.cfg, env.store, "replay", env.pipe, rp, Auditor(env.cfg), symbols=[SYM])
+    h0 = rp._df.height
+    with TestClient(create_app(st)) as c:
+        assert post(c, "/api/redteam/inject", inject_body(offset_s=offset_s)).status_code == 422
+    assert rp._df.height == h0 and st.injected == []
+
+
+# ---- real pipeline ----
+
+
+def test_smoke_real_pipeline_store_and_replayer_through_the_routes(env):
+    trades = make_trades(D, 1, symbol=SYM, seed=4, rate=0.5).filter(
+        pl.col("ts_us") < D_US + 3600 * S
+    )
+    rp = Replayer(trades, speed=0, start_us=D_US)
+    rp.pause()
+    chief = cheap_chief(env.cfg)
+    pipe = StreamPipeline(env.cfg, env.store, chief.detectors, chief, Bus(maxsize=1000), "replay")
+    st = AppState(env.cfg, env.store, "replay", pipe, rp, Auditor(env.cfg))
+    assert st.symbols == [SYM]
+
+    with TestClient(create_app(st)) as c:
+        with c.websocket_connect("/ws/stream") as ws:
+
+            def until(cond, seconds=30.0):
+                end = time.monotonic() + seconds
+                while time.monotonic() < end:
+                    m = strict_loads(ws.receive_text())
+                    if cond(m):
+                        return m
+                raise AssertionError("no such message")
+
+            run = c.portal.start_task_soon(pipe.run, rp)
+            try:
+                assert until(lambda m: m["type"] == "health")["data"]["mode"] == "replay"
+                # paused: a seek is still delivered, and it resets what the client holds
+                seek = {"action": "seek", "value": D_US + 600 * S}
+                assert post(c, "/api/replay/control", seek).status_code == 200
+                reset = until(lambda m: m["type"] == "alert")["data"]
+                assert reset["event"] == "alerts_reset" and reset["t_us"] == D_US + 600 * S
+
+                body = {"family": "pump_burst", "region": "train", "offset_s": 1800}
+                r = post(c, "/api/redteam/inject", body)  # no symbol: the replayer has one
+                assert r.status_code == 202, r.text
+                assert env.store.read_labels().height == 0
+
+                assert post(c, "/api/replay/control", {"action": "play"}).status_code == 200
+                alert = until(lambda m: m["type"] == "alert" and "alert_id" in m["data"])["data"]
+                assert alert["explanation_th"]
+                run.result(timeout=60)
+            finally:
+                run.cancel()
+
+        assert rp.ended
+        items = c.get("/api/alerts").json()
+        assert alert["alert_id"] in [a["alert_id"] for a in items]
+        aid = alert["alert_id"]
+        fb = {"verdict": "unsure", "analyst": "a"}
+        assert post(c, f"/api/alerts/{aid}/feedback", fb).status_code == 201
+        assert len(c.get(f"/api/alerts/{aid}").json()["feedback"]) == 1
+
+        b = strict_loads(c.get(f"/api/series?symbol={SYM}").text)
+        assert b["t_end_us"] and b["t_end_us"] == sorted(b["t_end_us"])
+        keys = ("close", "F", "lane_rule", "lane_stat", "lane_ai")
+        assert all(len(b[k]) == len(b["t_end_us"]) for k in keys)
+        assert b["tau"] == chief.tau
+        assert any(x is not None for x in b["lane_stat"])
+
+        h = c.get("/api/health").json()
+        assert h["late_trades"] == 0 and h["dropped"]["alerts"] == 0
+        assert {x["name"] for x in h["checks"]} >= {"latency", "warmup"}
+
+        assert post(c, "/api/replay/control", {"action": "pause"}).status_code == 409
+        assert post(c, "/api/redteam/inject", body).status_code == 409
+    assert subs(pipe.bus) == 0
