@@ -1,0 +1,472 @@
+"""CLI: parser, exit codes, label alignment, downloads, demo pack, bundles and serve wiring.
+
+No test touches the network: downloads go through a fake `Downloader`, labels through a stub of
+`build_labels`, and `run_server` is replaced, so no socket is opened.
+"""
+
+import asyncio
+import json
+import math
+from datetime import date, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import polars as pl
+import pytest
+import yaml
+from starlette.testclient import TestClient
+
+from idsai import cli
+from idsai.ai.learning import BundleError, load_bundle
+from idsai.bus import Bus
+from idsai.config import load_settings
+from idsai.contracts.frames import LABELS, TRADES
+from idsai.data.replay import Replayer
+from idsai.data.store import Store
+from idsai.eval.experiments import fit_and_calibrate
+from idsai.eval.labels import label_id_for
+from idsai.eval.splits import SymDay
+from idsai.pipeline.stream import StreamPipeline
+from idsai.product.api import AppState, create_app
+from tests.synth import S, day_us, make_trades
+
+SYM = "AAABTC"
+PUMP = date(2025, 3, 20)  # the demo label's day
+PUMP_T0 = day_us(PUMP) + 12 * 3600 * S
+FAKE_RANGE = (PUMP - timedelta(days=30), PUMP + timedelta(days=30))
+COMMANDS = ("labels", "download", "train", "eval", "report", "demo-pack", "serve")
+
+
+def write_cfg(tmp: Path, **extra) -> Path:
+    data = {
+        "paths": {
+            "data_dir": (tmp / "data").as_posix(),
+            "models_dir": (tmp / "models").as_posix(),
+            "app_db": (tmp / "data" / "app.duckdb").as_posix(),
+            "research_db": (tmp / "data" / "research.duckdb").as_posix(),
+            "report_json": (tmp / "data" / "report.json").as_posix(),
+        },
+        **extra,
+    }
+    path = tmp / "cfg.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def label_rows(*rows: tuple[str, str, int]) -> pl.DataFrame:
+    """`(source, symbol, t_start_us)` -> REAL telegram labels."""
+    return pl.DataFrame(
+        [
+            (label_id_for(sym, t), src, sym, t, t, "MM-T001", "telegram_pump", None, "REAL")
+            for src, sym, t in rows
+        ],
+        schema=LABELS,
+        orient="row",
+    )
+
+
+class FakeDownloader:
+    """Synthetic BTC-pair trades for every day inside `lo..hi`; None (not in the archive) else."""
+
+    def __init__(self, lo: date = FAKE_RANGE[0], hi: date = FAKE_RANGE[1], rate: float = 0.2):
+        self.lo, self.hi, self.rate = lo, hi, rate
+        self.calls: list[tuple[str, date]] = []
+        self.closed = False
+
+    def fetch(self, symbol: str, day: date) -> pl.DataFrame | None:
+        self.calls.append((symbol, day))
+        if not self.lo <= day <= self.hi:
+            return None
+        k = day.toordinal()
+        return make_trades(day, 1, symbol=symbol, seed=k % 1000, rate=self.rate, first_id=k * 10**6)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+# ------------------------------------------------------------------ parser
+
+
+def test_help_lists_every_subcommand(capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--help"])
+    assert e.value.code == 0
+    out = capsys.readouterr().out
+    for c in COMMANDS:
+        assert c in out
+
+
+def test_serve_binds_loopback_port_8800_by_default():
+    args = cli.build_parser().parse_args(["serve"])
+    assert cli.resolve_bind(args, load_settings()) == ("127.0.0.1", 8800)
+    assert args.mode == "replay" and args.speed == 60.0
+    args = cli.build_parser().parse_args(["serve", "--port", "9000", "--host", "0.0.0.0"])
+    assert cli.resolve_bind(args, load_settings()) == ("0.0.0.0", 9000)
+
+
+def test_usage_errors_exit_1(capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["no-such-command"])
+    assert e.value.code == 1
+    assert cli.main(["download", "--symbols", "BTCUSDT"]) == 1  # neither --days nor --day
+    assert "--days" in capsys.readouterr().err
+
+
+def test_live_budget_is_per_symbol_day():
+    assert cli.live_budget_per_symbol_day(load_settings()) == pytest.approx(2.0 * 24 / 5)
+
+
+# ------------------------------------------------------------------ train
+
+
+def test_train_live_with_empty_symbols_exits_1(tmp_path, capsys):
+    cfg = write_cfg(tmp_path, live={"symbols": []})
+    assert cli.main(["--config", str(cfg), "train", "--profile", "live"]) == 1
+    assert "live.symbols" in capsys.readouterr().err
+
+
+def test_train_live_without_data_names_the_download(tmp_path, capsys):
+    cfg = write_cfg(tmp_path, live={"symbols": ["BTCUSDT"]})
+    assert cli.main(["--config", str(cfg), "train", "--profile", "live"]) == 1
+    assert "idsai download --symbols BTCUSDT" in capsys.readouterr().err
+
+
+def test_live_days_split_train_and_calibration(tmp_path):
+    with Store(tmp_path / "d", tmp_path / "d" / "a.duckdb") as store:
+        for k in range(9):
+            store.write_trades(make_trades(date(2025, 3, 1) + timedelta(days=k), 1, rate=0.001))
+        train, cal = cli.live_days(store, ["TESTBTC"], 7)
+    days = [date(2025, 3, 1) + timedelta(days=k) for k in range(2, 9)]  # the last 7 with a D-1
+    assert [sd.day for sd in train] == days[:5] and [sd.day for sd in cal] == days[5:]
+
+
+def test_fit_and_calibrate_refuses_overlapping_days():
+    sd = SymDay(SYM, PUMP)
+    with pytest.raises(ValueError, match="overlap"):
+        fit_and_calibrate(load_settings(), None, 0, [sd], [sd], 2.0)
+
+
+# ------------------------------------------------------------------ labels --align
+
+
+def spiked(day: date, peak_us: int, symbol: str = SYM) -> pl.DataFrame:
+    """Two days of quiet trades plus a volume spike in the minute of `peak_us`."""
+    base = make_trades(day - timedelta(days=1), 2, symbol=symbol, seed=3, rate=0.05)
+    n = 50
+    ts = peak_us + np.arange(n) * 100_000
+    spike = pl.DataFrame(
+        {
+            "ts_us": ts,
+            "recv_us": ts,
+            "symbol": [symbol] * n,
+            "price": [5e-4] * n,
+            "qty": [1e6] * n,
+            "quote_qty": [500.0] * n,
+            "taker_side": ["buy"] * n,
+            "trade_id": np.arange(10**9, 10**9 + n),
+            "n_fills": np.ones(n, dtype=np.int32),
+            "source": ["archive"] * n,
+        },
+        schema=TRADES,
+    )
+    return pl.concat([base, spike])
+
+
+class StubStore:
+    """What `run_alignment` reads: `has_day` and `read_trades`."""
+
+    def __init__(self, trades: pl.DataFrame | None):
+        self.trades = trades
+
+    def has_day(self, symbol: str, day: date) -> bool:
+        return self.trades is not None and day in {
+            date(1970, 1, 1) + timedelta(days=int(t) // (86_400 * S))
+            for t in self.trades["ts_us"].to_list()
+        }
+
+    def read_trades(self, symbol: str, start_us: int, end_us: int) -> pl.DataFrame:
+        t = self.trades.filter(pl.col("symbol") == symbol)
+        return t.filter((pl.col("ts_us") >= start_us) & (pl.col("ts_us") < end_us))
+
+
+@pytest.mark.parametrize(("lag_s", "code"), [(0, 0), (60, 0), (3600, 1), (-600, 1)])
+def test_align_exit_code_follows_the_median_lag(lag_s, code, capsys):
+    labels = label_rows(("sapienza", SYM, PUMP_T0))
+    got, lines = cli.run_alignment(StubStore(spiked(PUMP, PUMP_T0 + lag_s * S)), labels)
+    assert got == code
+    text = "\n".join(lines)
+    assert "ฮิสโทแกรม" in text and f"{lag_s:+d}" in text
+
+
+def test_align_fails_closed_when_nothing_can_be_measured():
+    labels = label_rows(("sapienza", SYM, PUMP_T0))
+    code, lines = cli.run_alignment(StubStore(None), labels)  # no data at all
+    assert code == 1 and "วัดไม่ได้" in lines[0]
+    empty = pl.DataFrame(schema={"has_data": pl.Boolean, "lag_s": pl.Float64})
+    code, lines = cli.alignment_verdict(empty)
+    assert code == 1 and "วัดไม่ได้" in lines[0]
+
+
+def test_labels_align_command_end_to_end(tmp_path, monkeypatch, capsys):
+    cfg = write_cfg(tmp_path)
+    s = load_settings(cfg)
+    other = PUMP_T0 + 5 * 86_400 * S  # a label whose day is not in the store: not measured
+    labels = label_rows(("sapienza", SYM, PUMP_T0), ("hu", SYM, other))
+    monkeypatch.setattr(cli, "build_labels", lambda c: (labels, ["sapienza", "hu"]))
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        store.write_trades(spiked(PUMP, PUMP_T0 + 30 * S))
+        store.write_labels(label_rows(("sapienza", SYM, PUMP_T0 - 3600 * S)))  # a stale offset
+    assert cli.main(["--config", str(cfg), "labels", "--align"]) == 0
+    out = capsys.readouterr().out
+    assert "วัดได้ 1 จาก 1 ป้าย" in out
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        assert sorted(store.read_labels()["t_start_us"].to_list()) == [PUMP_T0, other]
+    assert cli.main(["--config", str(cfg), "labels"]) == 0  # without --align: no check
+
+
+# ------------------------------------------------------------------ download
+
+
+def test_ingest_skips_days_already_stored(tmp_path):
+    dl = FakeDownloader()
+    days = [(SYM, PUMP), (SYM, PUMP - timedelta(days=1)), (SYM, date(2020, 1, 1))]
+    with Store(tmp_path / "d", tmp_path / "d" / "a.duckdb") as store:
+        c = cli.ingest(store, dl, days)
+        assert (c.downloaded, c.skipped, c.missing) == (2, 0, 1)
+        again = cli.ingest(store, dl, days)
+    assert (again.downloaded, again.skipped, again.missing) == (0, 2, 1)
+    assert len(dl.calls) == 4  # only the missing day was asked again
+
+
+def test_download_last_days_moves_back_when_yesterday_is_unpublished(tmp_path, monkeypatch):
+    cfg = write_cfg(tmp_path)
+    dl = FakeDownloader(hi=PUMP - timedelta(days=1))  # "today" is PUMP + 1: yesterday is missing
+    monkeypatch.setattr(cli, "make_downloader", lambda c: dl)
+    monkeypatch.setattr(cli, "_today", lambda: PUMP + timedelta(days=1))
+    assert cli.main(["--config", str(cfg), "download", "--symbols", SYM, "--days", "2"]) == 0
+    s = load_settings(cfg)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        have = store.days(SYM)
+    assert have == [PUMP - timedelta(days=k) for k in (3, 2, 1)]  # 2 days + the first one's D-1
+    assert dl.closed
+
+
+def test_download_one_day_takes_its_previous_day(tmp_path, monkeypatch):
+    cfg = write_cfg(tmp_path)
+    dl = FakeDownloader()
+    monkeypatch.setattr(cli, "make_downloader", lambda c: dl)
+    assert cli.main(["--config", str(cfg), "download", "--symbols", SYM, "--day", str(PUMP)]) == 0
+    assert sorted(dl.calls) == [(SYM, PUMP - timedelta(days=1)), (SYM, PUMP)]
+
+
+def test_research_symdays_cover_events_and_spaced_normal_candidates():
+    cfg = load_settings(
+        overrides={
+            "splits": {
+                "train": ["2025-01-01", "2025-01-31"],
+                "cal": ["2025-02-01", "2025-02-28"],
+                "accept": ["2025-03-01", "2025-03-31"],
+                "test": ["2025-04-01", "2025-04-30"],
+                "normal_days_per_symbol": 2,
+                "min_gap_days": 2,
+                "drift_v1": None,
+                "drift_v2": None,
+            }
+        }
+    )
+    late = day_us(date(2025, 4, 10)) + 86_400 * S - 5 * 60 * S  # 23:55: needs D+1
+    cal_label = day_us(date(2025, 2, 10)) + 3600 * S
+    want = set(cli.research_symdays(cfg, label_rows(("hu", SYM, late), ("hu", SYM, cal_label))))
+    assert {(SYM, date(2025, 4, 9)), (SYM, date(2025, 4, 10)), (SYM, date(2025, 4, 11))} <= want
+    assert (SYM, date(2025, 2, 10)) not in want  # the cal period has no events
+    events = {date(2025, 4, 9), date(2025, 4, 10), date(2025, 4, 11)}
+    labels = [date(2025, 4, 10), date(2025, 2, 10)]
+
+    def gap(d: date) -> int:
+        return min(abs((d - ld).days) for ld in labels)
+
+    normal = {d for _, d in want} - events
+    # a normal day keeps the gap from every label, or is the D-1 of one that does
+    assert all(gap(d) >= 2 or gap(d + timedelta(days=1)) >= 2 for d in normal)
+    anchors = sorted(d for d in normal if gap(d) >= 2 and d - timedelta(days=1) in normal)
+    for period in ("train", "cal", "accept", "test"):
+        lo, hi = getattr(cfg.splits, period)
+        mine = [d for d in anchors if lo <= d <= hi]
+        assert 1 <= len(mine) <= 2 * 2  # normal_days_per_symbol x RESEARCH_CANDIDATE_FACTOR
+
+
+# ------------------------------------------------------------------ host allowlist
+
+
+@pytest.fixture
+def bare_state(tmp_path):
+    cfg = load_settings(
+        overrides={"paths": {"data_dir": str(tmp_path / "d"), "app_db": str(tmp_path / "a.db")}}
+    )
+    with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
+        yield AppState(cfg, store, "replay", None, None, symbols=[SYM])
+
+
+def test_host_allowlist_rejects_a_foreign_host_and_accepts_loopback(bare_state):
+    app = create_app(bare_state, allowed_hosts=cli.allowed_hosts("127.0.0.1"))
+    with TestClient(app, base_url="http://127.0.0.1:8800") as c:
+        assert c.get("/api/symbols").status_code == 200
+        for host in ("localhost:8800", "[::1]:8800", "127.0.0.1"):
+            assert c.get("/api/symbols", headers={"host": host}).status_code == 200
+        assert c.get("/api/symbols", headers={"host": "evil.example"}).status_code == 400
+        assert c.get("/api/symbols", headers={"host": "evil.example:8800"}).status_code == 400
+        with pytest.raises(Exception):  # noqa: B017 - the handshake is refused before accept
+            with c.websocket_connect("/ws/stream", headers={"host": "evil.example"}):
+                pass
+
+
+def test_allowlist_adds_the_bound_host_and_default_app_checks_none(bare_state):
+    assert "192.168.1.5" in cli.allowed_hosts("192.168.1.5")
+    assert "[::1]" in cli.allowed_hosts("::1")
+    with TestClient(create_app(bare_state)) as c:  # existing behaviour: no host check
+        assert c.get("/api/symbols", headers={"host": "evil.example"}).status_code == 200
+
+
+# ------------------------------------------------------------------ serve errors
+
+
+def test_serve_replay_without_previous_day_exits_1_in_thai(tmp_path, capsys):
+    cfg = write_cfg(tmp_path)
+    s = load_settings(cfg)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        store.write_trades(make_trades(PUMP, 1, symbol=SYM, rate=0.01))  # D only, no D-1
+    argv = ["--config", str(cfg), "serve", "--mode", "replay", "--symbol", SYM, "--day", str(PUMP)]
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "ไม่มีข้อมูล" in err and f"idsai download --symbols {SYM} --day {PUMP}" in err
+
+
+def test_serve_without_demo_pack_or_live_bundle_exits_1(tmp_path, capsys):
+    cfg = write_cfg(tmp_path)
+    assert cli.main(["--config", str(cfg), "serve"]) == 1
+    assert "idsai demo-pack" in capsys.readouterr().err
+    assert cli.main(["--config", str(cfg), "serve", "--mode", "live"]) == 1
+    assert "idsai train --profile live" in capsys.readouterr().err
+    assert cli.main(["--config", str(cfg), "serve", "--symbol", SYM]) == 1  # --day missing
+
+
+def test_report_without_runs_exits_1(tmp_path, capsys):
+    assert cli.main(["--config", str(write_cfg(tmp_path)), "report"]) == 1
+    assert "idsai eval" in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ demo pack + bundle
+
+
+@pytest.fixture(scope="module")
+def demo(tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("demo")
+    cfg_path = write_cfg(
+        tmp,
+        ae={"epochs": 2, "hidden": 8, "bottleneck": 4, "patience": 1},
+        chief={"budget_per_symbol_day": 10.0},
+    )
+    cfg = load_settings(cfg_path)
+    # one Sapienza pump, one older Sapienza label (blocks days 8..12 before the pump) and a Hu
+    # label of another symbol (not a demo pump: only Sapienza labels are)
+    labels = label_rows(
+        ("sapienza", SYM, PUMP_T0),
+        ("sapienza", SYM, PUMP_T0 - 10 * 86_400 * S),
+        ("hu", "BBBBTC", PUMP_T0 + 86_400 * S),
+    )
+    dl = FakeDownloader()
+    mp = pytest.MonkeyPatch()
+    mp.setattr(cli, "build_labels", lambda c: (labels, ["sapienza", "hu"]))
+    mp.setattr(cli, "make_downloader", lambda c: dl)
+    try:
+        code = cli.main(
+            ["--config", str(cfg_path), "demo-pack", "--pumps", "1", "--normal-days", "3"]
+        )
+    finally:
+        mp.undo()
+    return SimpleNamespace(code=code, cfg=cfg, cfg_path=cfg_path, dl=dl, dir=cli.demo_dir(cfg))
+
+
+def test_demo_pack_builds_a_manifest_and_bundle(demo):
+    assert demo.code == 0
+    man = json.loads((demo.dir / "manifest.json").read_text(encoding="utf-8"))
+    assert man["symbols"] == [SYM]
+    assert man["pump_days"] == [
+        {
+            "symbol": SYM,
+            "day": str(PUMP),
+            "label_id": label_id_for(SYM, PUMP_T0),
+            "source": "sapienza",
+            "t_start_us": PUMP_T0,
+        }
+    ]
+    train = [date.fromisoformat(d) for _, d in man["normal_days"]["train"]]
+    cal = [date.fromisoformat(d) for _, d in man["normal_days"]["cal"]]
+    assert len(train) == 2 and len(cal) == 1 and max(train) < min(cal)  # cal = the most recent
+    labels = [PUMP, PUMP - timedelta(days=10)]
+    for d in train + cal:
+        assert min(abs((d - ld).days) for ld in labels) >= 2
+    assert demo.dl.closed
+    doc = json.loads((demo.dir / "bundle.json").read_text(encoding="utf-8"))
+    assert doc["profile"] == "demo" and doc["symbols"] == [SYM]
+    assert doc["registry_versions"] == {"ai.autoencoder_trade": "v1"}
+    assert doc["model_versions"]["ai.autoencoder_trade"].startswith("demo-")
+    assert doc["cal_days"] == man["normal_days"]["cal"]
+    assert math.isfinite(doc["tau"])
+
+
+def test_bundle_round_trip_runs_in_a_stream_pipeline(demo):
+    dets, chief, doc = load_bundle(demo.dir, demo.cfg)
+    assert chief.tau == doc["tau"] and chief.model_versions == doc["model_versions"]
+    d0 = day_us(PUMP)
+    with Store(demo.cfg.paths.data_dir, demo.cfg.paths.app_db) as store:
+        trades = store.read_trades(SYM, d0 - 8 * 3600 * S, d0 + 1800 * S)
+        rp = Replayer(trades, speed=0, start_us=d0, preroll_from_us=d0 - 8 * 3600 * S)
+        pipe = StreamPipeline(demo.cfg, store, dets, chief, Bus(), "replay")
+        asyncio.run(pipe.run(rp))
+    pts = pipe.series(SYM)
+    assert pts and pts[0]["t_end_us"] >= d0
+    # the loaded AE scores finite rows: some are rarer than its calibration minimum (p < 1)
+    assert any(p["lane_ai"] > 0 for p in pts) and all(p["F"] is not None for p in pts)
+
+
+def test_bundle_refuses_another_config_or_a_missing_dir(demo, tmp_path):
+    other = load_settings(demo.cfg_path)
+    other = other.model_copy(update={"chief": other.chief.model_copy(update={"suppress_for_s": 1})})
+    with pytest.raises(BundleError, match="config_hash"):
+        load_bundle(demo.dir, other)
+    with pytest.raises(BundleError, match="ไม่พบชุดโมเดล"):
+        load_bundle(tmp_path / "nothing", demo.cfg)
+
+
+def test_serve_replay_wires_the_demo_pack(demo, monkeypatch, capsys):
+    seen = {}
+
+    def fake_run_server(app, host, port, background):
+        seen.update(host=host, port=port)
+        coro = background()
+        coro.close()  # never started: the replay is not played here
+        with TestClient(app, base_url="http://127.0.0.1:8800") as c:
+            seen["symbols"] = c.get("/api/symbols").json()
+            seen["health"] = c.get("/api/health").json()["mode"]
+            seen["foreign"] = c.get("/api/symbols", headers={"host": "evil.example"}).status_code
+
+    monkeypatch.setattr(cli, "run_server", fake_run_server)
+    assert cli.main(["--config", str(demo.cfg_path), "serve"]) == 0
+    assert seen == {
+        "host": "127.0.0.1",
+        "port": 8800,
+        "symbols": [SYM],
+        "health": "replay",
+        "foreign": 400,
+    }
+    out = capsys.readouterr().out
+    assert "11:30 UTC" in out  # 30 min before the 12:00 label
+
+
+def test_serve_on_another_host_warns_about_no_login(demo, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "run_server", lambda app, host, port, bg: bg().close())
+    argv = ["--config", str(demo.cfg_path), "serve", "--host", "0.0.0.0", "--port", "9001"]
+    assert cli.main(argv) == 0
+    assert "ไม่มีการล็อกอิน" in capsys.readouterr().err
