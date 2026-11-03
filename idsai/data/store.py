@@ -246,6 +246,35 @@ class Store:
                 con.execute("ROLLBACK")
                 raise
 
+    def replace_labels(self, df: pl.DataFrame, provenance: str = "REAL") -> int:
+        """Replace every label of `provenance` by `df` (whose rows must all carry it), in one
+        transaction; returns the number of rows removed.
+
+        Label ids depend on the label time, so a changed offset gives new ids: an upsert would
+        keep the old rows next to the new ones.
+        """
+        df = conform(df, LABELS)
+        other = df.filter(pl.col("provenance") != provenance)
+        if other.height:
+            raise ValueError(f"replace_labels({provenance!r}) got rows of another provenance")
+        cols = ", ".join(LABELS.names())
+        marks = ", ".join("?" for _ in LABELS)
+        with self._lock:
+            con = self._db()
+            con.execute("BEGIN")
+            try:
+                n_old = con.execute(
+                    "SELECT count(*) FROM labels WHERE provenance = ?", [provenance]
+                ).fetchone()[0]
+                con.execute("DELETE FROM labels WHERE provenance = ?", [provenance])
+                if df.height:
+                    con.executemany(f"INSERT INTO labels({cols}) VALUES ({marks})", df.rows())
+                con.execute("COMMIT")
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+        return int(n_old)
+
     def read_labels(self, symbol: str | None = None) -> pl.DataFrame:
         cols = ", ".join(LABELS.names())
         sql = f"SELECT {cols} FROM labels"

@@ -19,6 +19,9 @@ dependencies = [
     "websockets>=17.3",
 ]
 
+[project.scripts]
+idsai = "idsai.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -227,6 +227,23 @@ def test_labels_roundtrip_filter_and_idempotent(store):
     assert store.read_labels("NOPE").schema == LABELS
 
 
+def test_replace_labels_swaps_only_that_provenance(store):
+    store.write_labels(make_labels())  # l1, l2 REAL + l3 SYN
+    new = make_labels(ids=("n1",)).filter(pl.col("provenance") == "REAL")
+    assert store.replace_labels(new) == 2
+    out = store.read_labels()
+    assert sorted(out["label_id"].to_list()) == ["l3", "n1"]  # old REAL ids are gone, SYN stays
+    assert store.replace_labels(new.clear()) == 1
+    assert store.read_labels()["label_id"].to_list() == ["l3"]
+
+
+def test_replace_labels_refuses_other_provenance(store):
+    store.write_labels(make_labels())
+    with pytest.raises(ValueError, match="another provenance"):
+        store.replace_labels(make_labels())  # carries a SYN row
+    assert store.read_labels().height == 3  # nothing changed
+
+
 def test_read_labels_empty(store):
     out = store.read_labels()
     assert out.schema == LABELS and out.height == 0

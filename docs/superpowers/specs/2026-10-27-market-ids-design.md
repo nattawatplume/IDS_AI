@@ -90,18 +90,30 @@ API/UI ─── FastAPI (REST + WebSocket) + static HTML/JS + lightweight-chart
 - Feature registry (`idsai/detection/features/registry.py`) ประกาศชื่อ, หน่วย, คำอธิบายภาษาไทย, track — Explainer ใช้ข้อมูลนี้แปลเป็นข้อความ
 
 ### 3.3 Detector
+ทำงานกับ "เฟรม" (polars DataFrame ของแถว window ทีละหลายแถว) ไม่ใช่ทีละ object — ตรงกับโค้ดใน `idsai/contracts/detector.py`
 ```python
-class Detector(Protocol):
+class Detector(ABC):
     name: str                 # "ai.autoencoder_trade"
     layer: Literal["rule", "stat", "ai", "baseline"]
-    track: Literal["T", "B"]
-    technique_ids: list[str]  # ที่ detector นี้ให้หลักฐานได้
-    def fit(self, normal: Iterable[FeatureWindow]) -> None: ...
-    def score(self, w: FeatureWindow) -> DetectorResult: ...
-    def state_dict(self) -> dict: ...        # สำหรับ versioning
+    track: Literal["T", "B"] = "T"
+    technique_ids: list[str]  # ที่ detector นี้ให้หลักฐานได้; ["ANY"] = ไม่ระบุ technique
+    requires: list[str]       # คอลัมน์ feature ที่ต้องใช้
+    signature_id: int | None = None   # เฉพาะกฎ (sid ใน signatures.yaml)
+    rev: int | None = None
+
+    def fit(self, normal: pl.DataFrame) -> None: ...          # แถวช่วงปกติ (ค่าเริ่มต้น: ไม่ทำอะไร)
+    @abstractmethod
+    def score(self, windows: pl.DataFrame) -> np.ndarray: ...  # float64 หนึ่งค่าต่อแถว สูง = ผิดปกติมาก
+    def fired(self, scores: np.ndarray) -> np.ndarray: ...     # แถวไหนนับว่า "เข้าเงื่อนไข" (มีแต่กฎที่ override)
+    @abstractmethod
+    def evidence(self, row: dict) -> Evidence: ...             # feature ที่มีส่วนมากที่สุด ≤ 5 รายการ
+    def state_dict(self) -> dict: ...                          # สำหรับ versioning (ModelRegistry)
+    def load_state_dict(self, d: dict) -> None: ...
 ```
-- `DetectorResult`: `detector, t_end_us, symbol, score (สูง = ผิดปกติมาก), evidence: dict[str, float], top_features: list[(name, contribution)], technique_ids`
-- เพิ่ม detector ใหม่ = เขียน class + ใส่ชื่อใน `configs/*.yaml` — ไม่ต้องแก้ Chief/API/UI (registry ค้นจากชื่อ)
+- แถว window: `symbol, t_end_us` + คอลัมน์ feature (`feature_columns(cfg)`); `score` คืน NaN เมื่อ feature ที่ต้องใช้เป็น NaN แล้ว Chief ถือว่า p = 1
+- `Evidence.top`: `[(feature, value, contribution)]` เรียงจาก contribution มากไปน้อย ไม่เกิน 5 รายการ ไม่มี NaN
+- คะแนนของทุก detector อยู่ในคอลัมน์ `score__<name>` (`score_windows`) แล้ว Chief แปลงเป็น anomaly p-value และรวมผล — ชุดเดียวกันใช้ทั้ง batch และ stream
+- เพิ่ม detector ใหม่ = เขียน class + `register(name, factory)` ใน `idsai/detection/registry.py` + ใส่ชื่อใน `detectors:` ของ `configs/default.yaml` — ไม่ต้องแก้ Chief/API/UI
 
 ### 3.4 Alert (ยึดโครง Suricata EVE + Zeek notice)
 `alert_id, ts_event_us, symbol, technique_id, signature_id, rev, severity (1–3), status ("open"|"updated"|"closed"), fused_p, detectors: [{name, p, score}], agreement (จำนวน layer ที่เห็นด้วย), evidence, window, dedup_key, suppress_for_s, config_hash, model_versions, provenance ("live"|"replay"|"sim")`

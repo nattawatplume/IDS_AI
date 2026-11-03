@@ -1,11 +1,12 @@
-"""Model lifecycle: label-only training mask, the versioned on-disk model registry, and the
-champion/challenger decision.
+"""Model lifecycle: label-only training mask, the versioned on-disk model registry, model
+bundles (what `serve` loads), and the champion/challenger decision.
 
 This is the one `ai/` module allowed to read labels: it uses them only to keep labeled periods
 (± a margin) out of the normal training data, never as training targets. Alerts are never used
 to mask training data (no feedback loop from the detector's own output).
 """
 
+import hashlib
 import json
 import os
 import pickle
@@ -19,6 +20,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from idsai.ai.chief import Chief
+from idsai.config import Settings, config_hash
 from idsai.contracts.detector import Detector
 from idsai.eval.metrics import MIN_EVENTS, few_events_th, paired_bootstrap, significant
 
@@ -27,6 +30,10 @@ MAX_SAVE_ATTEMPTS = 100
 RENAME_RETRY_S = 0.05
 _VERSION_RE = re.compile(r"^v([1-9]\d*)$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+BUNDLE_VERSION = 1
+BUNDLE_JSON = "bundle.json"
+CHIEF_FILE = "chief.pkl"
+REGISTRY_DIR = "registry"
 
 
 def training_mask(
@@ -154,6 +161,121 @@ class ModelRegistry:
             state = pickle.load(f)
         meta = json.loads((vdir / "meta.json").read_text(encoding="utf-8"))
         return state, meta
+
+
+class BundleError(RuntimeError):
+    """A model bundle is missing, incomplete, or was made for another config (Thai message)."""
+
+
+def _state_sha(det: Detector) -> str:
+    blob = pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL)
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def save_bundle(
+    root: str | Path,
+    build: list[str],
+    detectors: list[Detector],
+    chief: Chief,
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Write a model bundle into `root`: what `serve` needs to score without refitting.
+
+    Layout: `registry/` (a `ModelRegistry` holding every detector the Chief has a model version
+    for, i.e. the fitted ones), `chief.pkl` (`Chief.state_dict()`) and `bundle.json`, written
+    last. `build` are the registry names the detectors were built from (`build_detectors`);
+    `meta` must hold `REQUIRED_META` and `seed`, and goes into `bundle.json` with the detector
+    names, registry versions, state hashes, model versions and `tau`. Returns that document.
+    Re-saving into the same `root` adds registry versions and replaces the two files.
+    Like the registry, a bundle is pickle: only load bundles this project made locally.
+    """
+    missing = [k for k in REQUIRED_META if k not in meta]
+    if missing:
+        raise ValueError(f"bundle meta is missing required keys: {missing}")
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    reg = ModelRegistry(root / REGISTRY_DIR)
+    registry, shas = {}, {}
+    for d in detectors:
+        if d.name in chief.model_versions:
+            mv = chief.model_versions[d.name]
+            registry[d.name] = reg.save(d, {**meta, "model_version": mv})
+            shas[d.name] = _state_sha(d)
+    state = pickle.dumps(chief.state_dict(), protocol=pickle.HIGHEST_PROTOCOL)
+    _write_atomic(root / CHIEF_FILE, state)
+    doc = {
+        **meta,
+        "bundle_version": BUNDLE_VERSION,
+        "build": list(build),
+        "detectors": [d.name for d in detectors],
+        "registry_versions": registry,
+        "state_sha": shas,
+        "model_versions": dict(chief.model_versions),
+        "chief_sha": hashlib.sha256(state).hexdigest()[:12],
+        "tau": chief.tau,
+        "tau_saturated": chief.tau_saturated,
+    }
+    text = json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=False, default=str)
+    _write_atomic(root / BUNDLE_JSON, text.encode("utf-8"))
+    return doc
+
+
+def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief, dict[str, Any]]:
+    """`(detectors, chief, bundle.json)` of the bundle in `root`, ready for `StreamPipeline`.
+
+    Raises `BundleError` (Thai) when the bundle is missing or incomplete, a stored model or the
+    Chief state changed on disk, or it was made with another config (`config_hash`).
+    """
+    from idsai.detection.registry import build_detectors  # lazy: keeps detectors off import
+
+    root = Path(root)
+    path = root / BUNDLE_JSON
+    if not path.is_file():
+        raise BundleError(f"ไม่พบชุดโมเดลที่ {root} (ไม่มี {BUNDLE_JSON})")
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise BundleError(f"อ่าน {path} ไม่ได้: {e}") from e
+    if not isinstance(doc, dict) or doc.get("bundle_version") != BUNDLE_VERSION:
+        raise BundleError(f"{path} ไม่ใช่ชุดโมเดลรุ่นที่รองรับ (bundle_version {BUNDLE_VERSION})")
+    want = config_hash(cfg)
+    if doc.get("config_hash") != want:
+        raise BundleError(
+            f"ชุดโมเดลที่ {root} สร้างด้วยค่าตั้งอื่น (config_hash {doc.get('config_hash')} "
+            f"ไม่ตรงกับค่าตั้งตอนนี้ {want}) ต้อง train ใหม่ด้วยค่าตั้งปัจจุบัน"
+        )
+    try:
+        dets = build_detectors(list(doc["build"]), cfg, int(doc["seed"]))
+        names = [d.name for d in dets]
+        if names != list(doc["detectors"]):
+            raise BundleError(f"รายชื่อตัวตรวจจับ {names} ไม่ตรงกับชุดโมเดล {doc['detectors']}")
+        reg = ModelRegistry(root / REGISTRY_DIR)
+        for d in dets:
+            version = doc["registry_versions"].get(d.name)
+            if version is None:
+                continue
+            state, _ = reg.load(d.name, version)
+            d.load_state_dict(state)
+            if _state_sha(d) != doc["state_sha"][d.name]:
+                raise BundleError(f"โมเดล {d.name} {version} ใน {root} ไม่ตรงกับที่บันทึกไว้")
+        state_bytes = (root / CHIEF_FILE).read_bytes()
+        if hashlib.sha256(state_bytes).hexdigest()[:12] != doc["chief_sha"]:
+            raise BundleError(f"{CHIEF_FILE} ใน {root} ไม่ตรงกับ {BUNDLE_JSON} ต้อง train ใหม่")
+        chief = Chief(dets, cfg.chief, want, dict(doc["model_versions"]))
+        chief.load_state_dict(pickle.loads(state_bytes))
+    except BundleError:
+        raise
+    except (KeyError, ValueError, TypeError, OSError, pickle.UnpicklingError) as e:
+        raise BundleError(f"ชุดโมเดลที่ {root} ไม่ครบหรือเสีย: {e}") from e
+    if chief.tau is None:
+        raise BundleError(f"Chief ในชุดโมเดลที่ {root} ยังไม่มีเกณฑ์ (tau)")
+    return dets, chief, doc
 
 
 @dataclass(frozen=True)

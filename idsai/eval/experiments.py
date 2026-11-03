@@ -202,9 +202,10 @@ def stable_int(symbol: str, day: Any) -> int:
     return int.from_bytes(digest, "big")
 
 
-def model_version(det: Detector) -> str:
+def model_version(det: Detector, prefix: str = "eval") -> str:
+    """`prefix-` + 12-hex sha256 of the pickled `state_dict` (a content address of the model)."""
     blob = pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL)
-    return "eval-" + hashlib.sha256(blob).hexdigest()[:12]
+    return f"{prefix}-" + hashlib.sha256(blob).hexdigest()[:12]
 
 
 def _json_float(x: Any) -> Any:
@@ -261,22 +262,27 @@ def _labels_on_days(labels: pl.DataFrame, days: Iterable[SymDay]) -> pl.DataFram
 
 
 class _Ctx:
-    """Per-call state: split, labels, run metadata, and lazily loaded train frames."""
+    """Per-call state: split, labels, run metadata, and lazily loaded train frames.
 
-    def __init__(self, cfg: Settings, store: Store, seed: int):
+    `with_split=False` skips the evaluation split (and its `split_def` in `meta`): enough to fit
+    and calibrate on given days (`fit_and_calibrate`), without reading every labeled symbol.
+    """
+
+    def __init__(self, cfg: Settings, store: Store, seed: int, with_split: bool = True):
         self.cfg = cfg
         self.store = store
         self.seed = int(seed)
         labels = conform(store.read_labels(), LABELS)
         self.real = labels.filter(pl.col("provenance") == REAL)
-        self.split = make_split(self.real, store, cfg)
+        self.split = make_split(self.real, store, cfg) if with_split else None
         self.config_hash = config_hash(cfg)
         self.meta = {
             "git_sha": git_sha(),
             "config_hash": self.config_hash,
             "signatures_sha": file_sha(SIGNATURES_PATH),
-            "split_def": split_def(self.split, cfg),
         }
+        if self.split is not None:
+            self.meta["split_def"] = split_def(self.split, cfg)
         self._train: dict[tuple[SymDay, ...], tuple[pl.DataFrame, float, Counter]] = {}
 
     # ---- day loading
@@ -873,3 +879,64 @@ def run_experiment(
     for r in records:
         sink.insert_run(r)
     return records
+
+
+@dataclass
+class Fitted:
+    """Detectors fitted on normal days and a Chief calibrated on other normal days (see
+    `fit_and_calibrate`)."""
+
+    detectors: list[Detector]
+    chief: Chief
+    model_versions: dict[str, str]
+    info: dict[str, Any]
+
+
+def fit_and_calibrate(
+    cfg: Settings,
+    store: Store,
+    seed: int,
+    train_days: list[SymDay],
+    cal_days: list[SymDay],
+    budget_per_symbol_day: float,
+    names: list[str] | None = None,
+    version_prefix: str = "model",
+) -> Fitted:
+    """The experiments' protocol for one deployable model set: build `names` (default
+    `cfg.detectors`), fit them on the masked, grid-thinned rows of `train_days` (`_Ctx.fit`),
+    calibrate the Chief on `cal_days` and fit `tau` for the budget.
+
+    `train_days` and `cal_days` must not share a symbol-day. Raises ValueError when nothing can be
+    fitted or calibrated (no rows, a failed fit) and `CalibrationError` when the calibration set
+    cannot honour the budget. Model versions are content addresses (`model_version`).
+    """
+    overlap = {(sd.symbol, sd.day) for sd in train_days} & {(sd.symbol, sd.day) for sd in cal_days}
+    if overlap:
+        raise ValueError(f"train and calibration days overlap: {sorted(overlap)}")
+    ctx = _Ctx(cfg, store, seed, with_split=False)
+    groups = ctx.build(names if names is not None else cfg.detectors)
+    dets = _flatten(groups, groups)
+    try:
+        _, info = ctx.fit(dets, train_days)
+    except _VariantError as e:
+        raise ValueError(str(e)) from e
+    mv = {d.name: model_version(d, version_prefix) for d in dets if _needs_fit(d)}
+    cal = ctx.clean(cal_days, dets)
+    if cal.frame.height == 0:
+        raise ValueError(f"no calibration rows from {len(cal_days)} day(s): {dict(cal.skipped)}")
+    cols = ["symbol", "t_end_us", *[f"score__{d.name}" for d in dets]]
+    chief = Chief(dets, cfg.chief, ctx.config_hash, mv)
+    chief.calibrate(cal.frame.select(cols))
+    chief.fit_threshold(chief.fuse(cal.frame.select(cols)), budget_per_symbol_day)
+    info = {k: v for k, v in info.items() if not k.startswith("_")}
+    info |= {
+        "train_skipped": dict(ctx.train_frame(train_days)[2]) if mv else {},
+        "cal_rows": cal.frame.height,
+        "cal_days": len(cal.days),
+        "cal_skipped": dict(cal.skipped),
+        "tau": chief.tau,
+        "tau_saturated": chief.tau_saturated,
+        "n_cal": chief.n_cal,
+        "budget_per_symbol_day": float(budget_per_symbol_day),
+    }
+    return Fitted(dets, chief, mv, info)
