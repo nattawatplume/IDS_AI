@@ -24,15 +24,18 @@ from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import polars as pl
 
 from idsai.config import Settings, config_hash, load_settings
-from idsai.data.store import DAY_US, Store
+
+if TYPE_CHECKING:  # the store pulls in DuckDB: imported only where a command needs it
+    from idsai.data.store import Store
 
 S_US = 1_000_000
+DAY_US = 86_400 * S_US
 DEFAULT_HOST = "127.0.0.1"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")  # as Starlette parses the Host header
 DEFAULT_SPEED = 60.0
@@ -52,6 +55,18 @@ LIVE_STALE_S = 17.5 * 3600  # older pre-roll data leaves the baseline under 6 h 
 LIVE_PUBLISHED_LOOKBACK = 5
 RESEARCH_CANDIDATE_FACTOR = 2  # normal-day candidates downloaded per day make_split samples
 RESEARCH_CANDIDATE_SPACING = 7  # days between two downloaded candidates of one symbol-period
+# = idsai.eval.experiments.EXPERIMENTS (a test checks it); kept here so `--help` imports no models
+EXPERIMENT_NAMES = (
+    "real_t001",
+    "semisyn",
+    "ablation",
+    "baselines",
+    "ref_supervised",
+    "retrain_drift",
+)
+LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1", "[::1]")
+WILDCARD_BINDS = ("0.0.0.0", "::", "[::]")
+LIVE_STALE_DAYS = 2  # train --profile live warns when a symbol's newest usable day is older
 HU_FILE = Path("labels") / "hu_pd_logs.tsv"  # under data_dir; written by scripts/fetch_labels.py
 
 
@@ -83,8 +98,10 @@ def _day_of_us(t_us: int) -> date:
     return date(1970, 1, 1) + timedelta(days=int(t_us) // DAY_US)
 
 
-def _app_store(cfg: Settings) -> Store:
-    return Store(cfg.paths.data_dir, cfg.paths.app_db)
+def _app_store(cfg: Settings, db: Path | None = None) -> "Store":
+    from idsai.data.store import Store
+
+    return Store(cfg.paths.data_dir, db if db is not None else cfg.paths.app_db)
 
 
 # ------------------------------------------------------------------ downloads
@@ -152,7 +169,7 @@ class Counts:
         )
 
 
-def ingest(store: Store, dl: Downloader, symdays: Iterable[tuple[str, date]]) -> Counts:
+def ingest(store: "Store", dl: Downloader, symdays: Iterable[tuple[str, date]]) -> Counts:
     """Download every `(symbol, day)` the store lacks; days already stored are skipped (they were
     verified when ingested). A day the archive does not have is counted, not an error."""
     c = Counts()
@@ -362,7 +379,7 @@ def live_budget_per_symbol_day(cfg: Settings) -> float:
     return cfg.live.budget_per_hour * 24.0 / cfg.live.universe_size
 
 
-def _data_hash(store: Store, days: Iterable[Any]) -> str:
+def _data_hash(store: "Store", days: Iterable[Any]) -> str:
     import hashlib
 
     parts = sorted(
@@ -377,7 +394,7 @@ def _days_json(days: Iterable[Any]) -> list[list[str]]:
 
 def train_and_save(
     cfg: Settings,
-    store: Store,
+    store: "Store",
     out_dir: Path,
     profile: str,
     seed: int,
@@ -431,7 +448,7 @@ def train_and_save(
     return doc
 
 
-def live_days(store: Store, symbols: list[str], n: int) -> tuple[list[Any], list[Any]]:
+def live_days(store: "Store", symbols: list[str], n: int) -> tuple[list[Any], list[Any]]:
     """`(train, cal)`: per symbol the last `n` stored days that have their D-1; the last
     `LIVE_CAL_DAYS` of them calibrate the Chief, the earlier ones train the detectors."""
     from idsai.eval.splits import SymDay
@@ -453,6 +470,16 @@ def cmd_train(args: argparse.Namespace, cfg: Settings) -> int:
                 raise CliError("live.symbols ใน configs/default.yaml ว่าง: ใส่สัญลักษณ์อย่างน้อย 1 ตัว")
             n = cfg.live.train_days
             train, cal = live_days(store, symbols, n)
+            for s in symbols:
+                newest = max((sd.day for sd in [*train, *cal] if sd.symbol == s), default=None)
+                if newest is None:
+                    _warn(f"คำเตือน: {s} ไม่มีข้อมูลที่ใช้ได้ จึงไม่อยู่ในโมเดลโหมดสด")
+                elif (_today() - newest).days > LIVE_STALE_DAYS:
+                    _warn(
+                        f"คำเตือน: ข้อมูลล่าสุดของ {s} คือวันที่ {newest} เก่ากว่า {LIVE_STALE_DAYS} วัน "
+                        f"โมเดลโหมดสดอาจไม่ตรงกับตลาดตอนนี้ ให้รัน `uv run idsai download "
+                        f"--symbols {s} --days {n}` ก่อน"
+                    )
             if not train or not cal:
                 raise CliError(
                     f"ข้อมูลไม่พอสำหรับโมเดลโหมดสด (ต้องมีอย่างน้อย {LIVE_CAL_DAYS + 1} วันต่อสัญลักษณ์ "
@@ -495,12 +522,12 @@ def _seeds(text: str) -> list[int]:
 
 def cmd_eval(args: argparse.Namespace, cfg: Settings) -> int:
     from idsai.detection.simulator.guard import EthicsError
-    from idsai.eval.experiments import EXPERIMENTS, run_experiment
+    from idsai.eval.experiments import run_experiment
 
-    names = list(EXPERIMENTS) if args.experiment == "all" else [args.experiment]
+    names = list(EXPERIMENT_NAMES) if args.experiment == "all" else [args.experiment]
     seeds = args.seeds if args.seeds is not None else list(cfg.eval.seeds)
     n_err = 0
-    with _app_store(cfg) as app, Store(cfg.paths.data_dir, cfg.paths.research_db) as research:
+    with _app_store(cfg) as app, _app_store(cfg, cfg.paths.research_db) as research:
         for name in names:
             for seed in seeds:
                 try:
@@ -534,13 +561,13 @@ def demo_dir(cfg: Settings) -> Path:
     return cfg.paths.data_dir / DEMO_DIR
 
 
-def _have_day(store: Store, sym: str, day: date) -> bool:
+def _have_day(store: "Store", sym: str, day: date) -> bool:
     return store.has_day(sym, day) and store.has_day(sym, day - timedelta(days=1))
 
 
 def build_demo_pack(
     cfg: Settings,
-    store: Store,
+    store: "Store",
     dl: Downloader,
     labels: pl.DataFrame,
     n_pumps: int,
@@ -722,7 +749,7 @@ def _missing_day_error(symbol: str, day: date) -> CliError:
 
 
 def _replay_target(
-    args: argparse.Namespace, cfg: Settings, store: Store
+    args: argparse.Namespace, cfg: Settings, store: "Store"
 ) -> tuple[str, date, int, Path]:
     """`(symbol, day, start_us, bundle dir)` of a replay, or CliError."""
     demo = demo_dir(cfg)
@@ -769,7 +796,7 @@ def _load(models: Path, cfg: Settings) -> tuple[list[Any], Any, dict[str, Any]]:
 
 
 def prepare_replay(
-    args: argparse.Namespace, cfg: Settings, store: Store
+    args: argparse.Namespace, cfg: Settings, store: "Store"
 ) -> tuple[Any, Callable[[], Coroutine[Any, Any, None]]]:
     """The app state and the pipeline coroutine of `serve --mode replay`."""
     from idsai.bus import Bus
@@ -793,7 +820,7 @@ def prepare_replay(
 
 
 def _live_preroll(
-    cfg: Settings, store: Store, symbols: list[str], now_us: int
+    cfg: Settings, store: "Store", symbols: list[str], now_us: int
 ) -> pl.DataFrame | None:
     """The trailing 24 h of the two most recent published archive days of every symbol."""
     dl = make_downloader(cfg)
@@ -814,7 +841,7 @@ def _live_preroll(
 
 
 def prepare_live(
-    args: argparse.Namespace, cfg: Settings, store: Store
+    args: argparse.Namespace, cfg: Settings, store: "Store"
 ) -> tuple[Any, Callable[[], Coroutine[Any, Any, None]]]:
     """The app state and the pipeline coroutine of `serve --mode live`."""
     from idsai.bus import Bus
@@ -854,11 +881,16 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     from idsai.product.api import create_app
 
     host, port = resolve_bind(args, cfg)
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    if host.lower() not in LOOPBACK_BINDS:
         _warn(
             f"คำเตือน: เปิดให้เครื่องอื่นเข้าถึงที่ {host} ได้ แต่ระบบนี้ไม่มีการล็อกอิน "
             "ใครที่เข้าถึงเครือข่ายนี้ได้จะเห็นและกดปุ่มต่างๆ ได้ทั้งหมด"
         )
+        if host in WILDCARD_BINDS:
+            _warn(
+                f"หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ {', '.join(allowed_hosts(host))} "
+                "ถ้าให้เครื่องอื่นเรียก ให้เปิดด้วย --host <IP ของเครื่องนี้> แล้วเรียกผ่าน IP นั้น"
+            )
     with _app_store(cfg) as store:
         if args.mode == "live":
             state, background = prepare_live(args, cfg, store)
@@ -884,6 +916,16 @@ def _day_arg(text: str) -> date:
         return date.fromisoformat(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"วันที่ต้องเป็นรูปแบบ YYYY-MM-DD: {text!r}") from None
+
+
+def _speed(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"ความเร็วต้องเป็นตัวเลข: {text!r}") from None
+    if not (math.isfinite(x) and x > 0):
+        raise argparse.ArgumentTypeError(f"ความเร็วต้องเป็นตัวเลขจำกัดที่มากกว่า 0: {text!r}")
+    return x
 
 
 def _positive(text: str) -> int:
@@ -913,8 +955,6 @@ DOWNLOAD_HELP = """\
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from idsai.eval.experiments import EXPERIMENTS
-
     p = _Parser(
         prog="idsai",
         description=(
@@ -958,7 +998,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     s = sub.add_parser("eval", help="รันการทดลองและบันทึกผลลง data/research.duckdb")
-    s.add_argument("--experiment", choices=[*EXPERIMENTS, "all"], default="all", metavar="NAME|all")
+    s.add_argument(
+        "--experiment", choices=[*EXPERIMENT_NAMES, "all"], default="all", metavar="NAME|all"
+    )
     s.add_argument("--seeds", type=_seeds, default=None, help="เช่น 0,1,2,3,4 (ค่าเริ่มต้นจากค่าตั้ง)")
 
     sub.add_parser("report", help="สร้างรายงานจากผลการทดลองทุกครั้ง (data/report.json และ .md)")
@@ -978,7 +1020,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--models", default=None, help="โฟลเดอร์ชุดโมเดล (ค่าเริ่มต้นตามโหมด)")
     s.add_argument("--host", default=DEFAULT_HOST, help="ค่าเริ่มต้น 127.0.0.1 (เฉพาะเครื่องนี้)")
     s.add_argument("--port", type=int, default=None, help="ค่าเริ่มต้น 8800")
-    s.add_argument("--speed", type=float, default=DEFAULT_SPEED, help="replay: เท่าของเวลาจริง (60)")
+    s.add_argument("--speed", type=_speed, default=DEFAULT_SPEED, help="replay: เท่าของเวลาจริง (60)")
     return p
 
 

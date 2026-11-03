@@ -17,6 +17,7 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
+import idsai.eval.experiments as ex
 from idsai import cli
 from idsai.ai.learning import BundleError, load_bundle
 from idsai.bus import Bus
@@ -190,7 +191,10 @@ class StubStore:
         return t.filter((pl.col("ts_us") >= start_us) & (pl.col("ts_us") < end_us))
 
 
-@pytest.mark.parametrize(("lag_s", "code"), [(0, 0), (60, 0), (3600, 1), (-600, 1)])
+@pytest.mark.parametrize(
+    # lags are whole minutes (bucket start - label): 120 s is the first failing value
+    ("lag_s", "code"), [(0, 0), (60, 0), (-60, 0), (120, 1), (-120, 1), (3600, 1), (-600, 1)]
+)
 def test_align_exit_code_follows_the_median_lag(lag_s, code, capsys):
     labels = label_rows(("sapienza", SYM, PUMP_T0))
     got, lines = cli.run_alignment(StubStore(spiked(PUMP, PUMP_T0 + lag_s * S)), labels)
@@ -314,7 +318,8 @@ def test_host_allowlist_rejects_a_foreign_host_and_accepts_loopback(bare_state):
         assert c.get("/api/symbols").status_code == 200
         for host in ("localhost:8800", "[::1]:8800", "127.0.0.1"):
             assert c.get("/api/symbols", headers={"host": host}).status_code == 200
-        assert c.get("/api/symbols", headers={"host": "evil.example"}).status_code == 400
+        bad = c.get("/api/symbols", headers={"host": "evil.example"})
+        assert bad.status_code == 400 and "--host <IP" in bad.text  # a Thai hint, not a bare 400
         assert c.get("/api/symbols", headers={"host": "evil.example:8800"}).status_code == 400
         with pytest.raises(Exception):  # noqa: B017 - the handshake is refused before accept
             with c.websocket_connect("/ws/stream", headers={"host": "evil.example"}):
@@ -376,16 +381,33 @@ def demo(tmp_path_factory):
         ("hu", "BBBBTC", PUMP_T0 + 86_400 * S),
     )
     dl = FakeDownloader()
+    seen = {}
+    real = ex.fit_and_calibrate
+
+    def spy(cfg, store, seed, train_days, cal_days, budget, *a, **k):
+        seen.update(train=train_days, cal=cal_days, budget=budget)
+        seen["fitted"] = real(cfg, store, seed, train_days, cal_days, budget, *a, **k)
+        return seen["fitted"]
+
     mp = pytest.MonkeyPatch()
     mp.setattr(cli, "build_labels", lambda c: (labels, ["sapienza", "hu"]))
     mp.setattr(cli, "make_downloader", lambda c: dl)
+    mp.setattr(ex, "fit_and_calibrate", spy)
     try:
         code = cli.main(
             ["--config", str(cfg_path), "demo-pack", "--pumps", "1", "--normal-days", "3"]
         )
     finally:
         mp.undo()
-    return SimpleNamespace(code=code, cfg=cfg, cfg_path=cfg_path, dl=dl, dir=cli.demo_dir(cfg))
+    return SimpleNamespace(
+        code=code,
+        cfg=cfg,
+        cfg_path=cfg_path,
+        dl=dl,
+        dir=cli.demo_dir(cfg),
+        seen=seen,
+        labels=labels,
+    )
 
 
 def test_demo_pack_builds_a_manifest_and_bundle(demo):
@@ -416,19 +438,55 @@ def test_demo_pack_builds_a_manifest_and_bundle(demo):
     assert math.isfinite(doc["tau"])
 
 
-def test_bundle_round_trip_runs_in_a_stream_pipeline(demo):
-    dets, chief, doc = load_bundle(demo.dir, demo.cfg)
-    assert chief.tau == doc["tau"] and chief.model_versions == doc["model_versions"]
-    d0 = day_us(PUMP)
+def test_demo_pack_writes_its_labels_to_the_store(demo):
+    # training_mask reads labels from the store: without them nothing would be masked
     with Store(demo.cfg.paths.data_dir, demo.cfg.paths.app_db) as store:
+        stored = store.read_labels()
+    assert sorted(stored["label_id"].to_list()) == sorted(demo.labels["label_id"].to_list())
+    assert "train_excluded_frac" in demo.seen["fitted"].info
+
+
+def test_chief_is_calibrated_on_the_held_out_days_only(demo):
+    train, cal = demo.seen["train"], demo.seen["cal"]
+    assert len(train) == 2 and len(cal) == 1 and not set(train) & set(cal)
+    info = demo.seen["fitted"].info
+    assert info["cal_days"] == 1  # one held-out symbol-day, not the two training days
+    assert info["cal_rows"] == 8640  # one day of 10 s rows
+    assert demo.seen["fitted"].chief.n_cal <= 8640
+    assert demo.seen["budget"] == 10.0  # chief.budget_per_symbol_day of the config
+
+
+def _series(cfg, dets, chief) -> list[dict]:
+    d0 = day_us(PUMP)
+    with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
         trades = store.read_trades(SYM, d0 - 8 * 3600 * S, d0 + 1800 * S)
         rp = Replayer(trades, speed=0, start_us=d0, preroll_from_us=d0 - 8 * 3600 * S)
-        pipe = StreamPipeline(demo.cfg, store, dets, chief, Bus(), "replay")
+        pipe = StreamPipeline(cfg, store, dets, chief, Bus(), "replay")
         asyncio.run(pipe.run(rp))
-    pts = pipe.series(SYM)
-    assert pts and pts[0]["t_end_us"] >= d0
+    return pipe.series(SYM)
+
+
+def test_bundle_round_trip_scores_like_the_fitted_models(demo):
+    dets, chief, doc = load_bundle(demo.dir, demo.cfg)
+    assert chief.tau == doc["tau"] and chief.model_versions == doc["model_versions"]
+    loaded = _series(demo.cfg, dets, chief)
+    fitted = demo.seen["fitted"]
+    direct = _series(demo.cfg, fitted.detectors, fitted.chief)
+    assert loaded and loaded[0]["t_end_us"] >= day_us(PUMP)
+    assert loaded == direct  # every row, F and lane identical
     # the loaded AE scores finite rows: some are rarer than its calibration minimum (p < 1)
-    assert any(p["lane_ai"] > 0 for p in pts) and all(p["F"] is not None for p in pts)
+    assert any(p["lane_ai"] > 0 for p in loaded)
+
+
+def test_prepare_replay_prerolls_the_previous_day_and_starts_before_the_label(demo):
+    args = cli.build_parser().parse_args(["serve"])
+    with Store(demo.cfg.paths.data_dir, demo.cfg.paths.app_db) as store:
+        state, background = cli.prepare_replay(args, demo.cfg, store)
+        background().close()
+    rp = state.replayer
+    assert rp._pos == day_us(PUMP) - 86_400 * S  # pre-roll origin: D-1 00:00
+    assert rp._start == PUMP_T0 - 1800 * S  # 30 min before the label
+    assert rp._speed == 60.0
 
 
 def test_bundle_refuses_another_config_or_a_missing_dir(demo, tmp_path):
@@ -470,3 +528,88 @@ def test_serve_on_another_host_warns_about_no_login(demo, monkeypatch, capsys):
     argv = ["--config", str(demo.cfg_path), "serve", "--host", "0.0.0.0", "--port", "9001"]
     assert cli.main(argv) == 0
     assert "ไม่มีการล็อกอิน" in capsys.readouterr().err
+
+
+def test_run_server_cancels_the_pipeline_and_bounds_the_shutdown(monkeypatch):
+    import uvicorn
+    from fastapi import FastAPI
+
+    seen = {}
+    init = uvicorn.Server.__init__
+
+    def spy_init(self, config):
+        seen.update(server=self, grace=config.timeout_graceful_shutdown)
+        init(self, config)
+
+    monkeypatch.setattr(uvicorn.Server, "__init__", spy_init)
+
+    async def background():
+        try:
+            await asyncio.sleep(0.3)
+            seen["server"].should_exit = True  # what Ctrl+C does
+            await asyncio.sleep(60)  # a pipeline that would never end on its own
+        except asyncio.CancelledError:
+            seen["cancelled"] = True
+            raise
+
+    cli.run_server(FastAPI(), "127.0.0.1", 0, background)  # loopback, port 0: no fixed socket
+    assert seen.get("cancelled") is True and seen["grace"] == 5
+
+
+def test_train_live_uses_the_live_budget_and_dir_and_warns_on_stale_data(
+    tmp_path, monkeypatch, capsys
+):
+    cfg = write_cfg(tmp_path, live={"symbols": ["TESTBTC"], "train_days": 4})
+    s = load_settings(cfg)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        for k in range(5):
+            store.write_trades(make_trades(date(2025, 3, 1) + timedelta(days=k), 1, rate=0.001))
+    seen = {}
+
+    def fake_train_and_save(cfg, store, out, profile, seed, train, cal, budget, extra=None):
+        seen.update(out=out, profile=profile, budget=budget, train=train, cal=cal)
+
+    monkeypatch.setattr(cli, "train_and_save", fake_train_and_save)
+    monkeypatch.setattr(cli, "_today", lambda: date(2025, 3, 6))  # newest day is yesterday
+    assert cli.main(["--config", str(cfg), "train", "--profile", "live"]) == 0
+    assert seen["budget"] == pytest.approx(9.6) and seen["profile"] == "live"
+    assert seen["out"] == s.paths.models_dir / "live"
+    assert len(seen["train"]) == 2 and len(seen["cal"]) == 2
+    assert "เก่ากว่า" not in capsys.readouterr().err
+    monkeypatch.setattr(cli, "_today", lambda: date(2025, 3, 20))
+    assert cli.main(["--config", str(cfg), "train", "--profile", "live"]) == 0
+    assert "เก่ากว่า" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("speed", ["0", "-1", "nan", "inf", "fast"])
+def test_bad_speed_exits_1_in_thai(speed, capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["serve", "--speed", speed])
+    assert e.value.code == 1 and "ความเร็ว" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]"])
+def test_loopback_hosts_do_not_warn(host, demo, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "run_server", lambda app, h, port, bg: bg().close())
+    assert cli.main(["--config", str(demo.cfg_path), "serve", "--host", host]) == 0
+    assert "ไม่มีการล็อกอิน" not in capsys.readouterr().err
+
+
+def test_wildcard_bind_explains_which_hosts_are_accepted(demo, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "run_server", lambda app, h, port, bg: bg().close())
+    assert cli.main(["--config", str(demo.cfg_path), "serve", "--host", "0.0.0.0"]) == 0
+    assert "--host <IP" in capsys.readouterr().err
+
+
+def test_help_imports_no_models_and_names_every_experiment():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, idsai.cli as c; c.build_parser(); "
+        "print([m for m in ('torch', 'sklearn', 'idsai.eval.experiments', "
+        "'idsai.pipeline.stream', 'duckdb') if m in sys.modules])"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]"
+    assert cli.EXPERIMENT_NAMES == ex.EXPERIMENTS

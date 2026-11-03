@@ -35,8 +35,10 @@ from pydantic import (
     StringConstraints,
     field_validator,
 )
-from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette._utils import parse_host_header
 from starlette.requests import HTTPConnection
+from starlette.responses import PlainTextResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 
 from idsai.contracts.alert import Alert
@@ -128,13 +130,39 @@ async def same_origin(conn: HTTPConnection) -> None:
         raise HTTPException(403, "คำขอจากเว็บไซต์อื่นถูกปฏิเสธ (cross-origin)")
 
 
+BAD_HOST_TH = (
+    "ชื่อเครื่อง (Host) ที่ใช้เรียกไม่อยู่ในรายการที่อนุญาต (กันการโจมตีแบบ DNS rebinding) "
+    "ให้เรียกด้วย 127.0.0.1 หรือ localhost หรือเปิด serve ด้วย --host <IP ของเครื่องนี้> "
+    "แล้วเรียกผ่าน IP นั้น"
+)
+
+
+class HostAllowlist:
+    """ASGI middleware: HTTP and WebSocket requests whose `Host` (port ignored, IPv6 in brackets)
+    is not in `allowed` get 400 with a Thai hint; a WebSocket is refused before it is accepted."""
+
+    def __init__(self, app: ASGIApp, allowed: list[str]):
+        self.app = app
+        self.allowed = {h.lower() for h in allowed}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] in ("http", "websocket"):
+            raw = dict(scope.get("headers") or []).get(b"host", b"").decode("latin-1")
+            parsed = parse_host_header(raw)
+            if parsed is None or parsed.host.lower() not in self.allowed:
+                response = PlainTextResponse(BAD_HOST_TH, status_code=400)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastAPI:
     """The app over `state`. `allowed_hosts` (e.g. loopback names plus the bound host) turns on a
     `Host` header allowlist against DNS rebinding: any other host gets 400, HTTP and WebSocket
     alike. None (the default) checks no host."""
     app = FastAPI(title="Market IDS", docs_url=None, redoc_url=None, openapi_url=None)
     if allowed_hosts is not None:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
+        app.add_middleware(HostAllowlist, allowed=list(allowed_hosts))
 
     @app.exception_handler(RequestValidationError)
     async def _invalid(request: Request, exc: RequestValidationError) -> Response:
