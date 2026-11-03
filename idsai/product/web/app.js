@@ -7,12 +7,13 @@
  */
 "use strict";
 
-const LWC = window.LightweightCharts;
+const LWC = typeof window === "undefined" ? undefined : window.LightweightCharts;
 const S_US = 1e6;
 const DAY_US = 86400 * S_US;
 const AGREEMENT_P = 0.01;
 const MATCH_BEFORE_US = 120 * S_US; // eval match rule: [t_start - 120 s, t_end + 300 s]
 const MATCH_AFTER_US = 300 * S_US;
+const MARKER_SLACK_S = 10; // an alert further than this outside the plotted range gets no marker
 const FUSION_LAYERS = ["rule", "stat", "ai"];
 const LANES = [
   ["lane_rule", "L1 กฎ (rule)", "--line-l1"],
@@ -450,8 +451,13 @@ function renderMarkers() {
   const items = [...state.alerts.values()]
     .filter((a) => a.symbol === state.symbol)
     .sort((a, b) => a.ts_event_us - b.ts_event_us);
+  const arr = chart.priceTimes;
   for (const a of items) {
-    const t = nearestTime(toSec(a.ts_event_us));
+    const ts = toSec(a.ts_event_us);
+    if (!arr.length || ts < arr[0] - MARKER_SLACK_S || ts > arr[arr.length - 1] + MARKER_SLACK_S) {
+      continue; // outside the plotted range: never pinned onto its edge
+    }
+    const t = nearestTime(ts);
     if (t === null || seen.has(t)) continue;
     seen.add(t);
     markers.push({
@@ -555,6 +561,7 @@ function onAlert(data) {
   }
   if (data.event === "alerts_reset") {
     for (const id of data.deleted || []) state.alerts.delete(id);
+    if (resetRuns(state.injections, data.deleted || [])) renderInjections();
     alertsChanged();
     loadSeries();
     return;
@@ -914,10 +921,11 @@ function bindRedTeam() {
     };
     status.textContent = "กำลังฉีด…";
     $("rt-submit").disabled = true;
+    const known = snapshotAlerts(state.alerts.values()); // before the click: never a detection
     try {
       const r = await postJson("/api/redteam/inject", body);
       status.textContent = "ฉีดแล้ว กำลังจับเวลา";
-      addInjection(r, body);
+      addInjection(r, body, known);
     } catch (e) {
       status.textContent = e.message;
     } finally {
@@ -926,9 +934,12 @@ function bindRedTeam() {
   });
 }
 
-function addInjection(r, body) {
+function addInjection(r, body, known) {
   const label = r.label || {};
   const run = {
+    // the server starts the scenario at its cursor + offset_s, so this is the cursor at the click
+    cursor_us: isNum(label.t_start_us) ? label.t_start_us - body.offset_s * S_US : null,
+    known,
     family: body.family,
     region: body.region,
     symbol: label.symbol || body.symbol,
@@ -944,21 +955,59 @@ function addInjection(r, body) {
   checkInjections();
 }
 
+// ---- time-to-detect (pure: exercised by tests/product/test_web_static.py through node) ----
+
+function snapshotAlerts(alerts) {
+  // alert_id -> window end, of every alert on screen when Red-Team was clicked
+  const known = new Map();
+  for (const a of alerts) known.set(a.alert_id, a.window[1]);
+  return known;
+}
+
 function matchesInjection(a, run) {
   if (a.symbol !== run.symbol || !isNum(run.t_start_us) || !isNum(run.t_end_us)) return false;
   const [w0, w1] = a.window;
   return w1 >= run.t_start_us - MATCH_BEFORE_US && w0 <= run.t_end_us + MATCH_AFTER_US;
 }
 
+function eligibleForRun(a, run) {
+  // new since the click, or one that existed and has grown past both its old end and the cursor
+  const known = run.known || new Map();
+  if (!known.has(a.alert_id)) return true;
+  const floor = Math.max(known.get(a.alert_id), isNum(run.cursor_us) ? run.cursor_us : -Infinity);
+  return a.window[1] > floor;
+}
+
+function firstDetection(run, alerts) {
+  let best = null;
+  for (const a of alerts) {
+    if (!eligibleForRun(a, run) || !matchesInjection(a, run)) continue;
+    if (best === null || a.window[0] < best.window[0]) best = a;
+  }
+  return best;
+}
+
+function resetRuns(runs, deleted) {
+  // after a seek: a deleted alert no longer counts (the timer re-arms, the injected trades stay)
+  // and a deleted id that comes back is a new alert
+  const gone = new Set(deleted);
+  let changed = false;
+  for (const run of runs) {
+    for (const id of gone) if (run.known) run.known.delete(id);
+    if (run.detected && gone.has(run.detected.alert_id)) {
+      run.detected = null;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function checkInjections() {
   let changed = false;
   for (const run of state.injections) {
     if (run.detected) continue;
-    const hits = [...state.alerts.values()]
-      .filter((a) => matchesInjection(a, run))
-      .sort((x, y) => x.window[0] - y.window[0]);
-    if (hits.length) {
-      const a = hits[0];
+    const a = firstDetection(run, state.alerts.values());
+    if (a) {
       run.detected = {
         alert_id: a.alert_id,
         eventS: (a.window[0] - run.t_start_us) / S_US,
@@ -1032,15 +1081,15 @@ function tickInjections() {
 async function showEval() {
   const box = clear($("eval-body"));
   box.appendChild(el("p", { class: "muted" }, "กำลังโหลด…"));
-  let r;
+  let report;
   try {
-    r = await api("/api/experiments");
+    report = await api("/api/experiments");
   } catch (e) {
     clear(box).appendChild(el("p", { class: "empty" }, e.message));
     return;
   }
   clear(box);
-  if (!r || !r.runs || !r.experiments) {
+  if (!report || !report.runs || !report.experiments) {
     box.appendChild(
       el(
         "div",
@@ -1055,7 +1104,7 @@ async function showEval() {
     el(
       "p",
       { class: "small muted" },
-      `ทั้งหมด ${r.runs} run · git ${(r.git_sha || []).join(", ") || "–"} · config ${(r.config_hash || []).join(", ") || "–"} · signatures ${(r.signatures_sha || []).join(", ") || "–"}`,
+      `ทั้งหมด ${report.runs} run · git ${(report.git_sha || []).join(", ") || "–"} · config ${(report.config_hash || []).join(", ") || "–"} · signatures ${(report.signatures_sha || []).join(", ") || "–"}`,
     ),
   );
   box.appendChild(
@@ -1067,7 +1116,7 @@ async function showEval() {
   );
 
   const budgets = new Set();
-  for (const variants of Object.values(r.experiments)) {
+  for (const variants of Object.values(report.experiments)) {
     for (const cells of Object.values(variants)) Object.keys(cells).forEach((b) => budgets.add(b));
   }
   const sorted = [...budgets].sort((a, b) => Number(a) - Number(b));
@@ -1082,20 +1131,20 @@ async function showEval() {
   box.appendChild(tables);
   const draw = () => {
     clear(tables);
-    for (const [exp, variants] of Object.entries(r.experiments)) {
+    for (const [exp, variants] of Object.entries(report.experiments)) {
       tables.appendChild(experimentTable(exp, variants, select.value));
     }
   };
   select.addEventListener("change", draw);
   draw();
 
-  if (r.paired_bootstrap) box.appendChild(pairedCard(r.paired_bootstrap));
-  if (r.retrain_decision) {
-    box.appendChild(retrainCard("Champion / challenger (full stack)", r.retrain_decision));
-    if (r.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", r.retrain_decision.ai_only));
+  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
+  if (report.retrain_decision) {
+    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
+    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
   }
-  if ((r.notes || []).length) {
-    box.appendChild(el("div", { class: "card" }, el("h3", {}, "หมายเหตุ"), el("ul", { class: "small" }, r.notes.map((n) => el("li", {}, n)))));
+  if ((report.notes || []).length) {
+    box.appendChild(el("div", { class: "card" }, el("h3", {}, "หมายเหตุ"), el("ul", { class: "small" }, report.notes.map((n) => el("li", {}, n)))));
   }
 }
 
@@ -1105,33 +1154,43 @@ function ciText(mean, ci) {
   return Array.isArray(ci) && isNum(ci[0]) && isNum(ci[1]) ? `${base} [${ci[0].toFixed(3)}, ${ci[1].toFixed(3)}]` : base;
 }
 
+function ruleOfThreeText(metric, r3) {
+  // recall 0 or 1 has a one-point bootstrap CI: the report's 3/n bound says how far it may be off
+  if (!r3 || !isNum(r3.bound)) return null;
+  const unit = r3.unit === "event" ? "เหตุการณ์" : r3.unit;
+  const reach = r3.side === "upper" ? "สูงถึง" : "ต่ำถึง";
+  return `${metric} ${r3.hits} จาก ${r3.n} ${unit}: ช่วงจริงอาจ${reach}ราว ${Math.round(r3.bound * 100)}% (rule of three)`;
+}
+
 function experimentTable(exp, variants, budget) {
   const rows = [];
   for (const [variant, cells] of Object.entries(variants)) {
-    const c = cells[budget];
-    if (!c) continue;
-    const m = c.mean || {};
-    const ci = c.ci || {};
+    const cell = cells[budget];
+    if (!cell) continue;
+    const m = cell.mean || {};
+    const ci = cell.ci || {};
+    const r3 = cell.rule_of_three || {};
     const flags = [
-      c.tau_saturated_any ? "τ saturated" : null,
-      c.deterministic ? "deterministic" : null,
-      c.note,
-      ...(c.errors || []),
+      ...["recall_any", "recall_correct"].map((k) => ruleOfThreeText(k, r3[k])),
+      cell.tau_saturated_any ? "τ saturated" : null,
+      cell.deterministic ? "deterministic" : null,
+      cell.note,
+      ...(cell.errors || []),
     ].filter(Boolean);
     rows.push(
       el(
         "tr",
         {},
         el("td", { class: "mono" }, variant),
-        el("td", {}, provenanceBadges(c.provenance)),
-        el("td", { class: "num" }, `${c.n_runs} (${c.n_seeds} seed)`),
+        el("td", {}, provenanceBadges(cell.provenance)),
+        el("td", { class: "num" }, `${cell.n_runs} (${cell.n_seeds} seed)`),
         el("td", { class: "num mono" }, ciText(m.recall_any, ci.recall_any)),
         el("td", { class: "num mono" }, ciText(m.recall_correct, ci.recall_correct)),
         el("td", { class: "num mono" }, fmtNum(m.fa_per_symbol_day, 2)),
         el("td", { class: "num mono" }, fmtNum(m.fa_per_symbol_day_hard, 2)),
         el("td", { class: "num mono" }, `${fmtNum(m.precision, 3)} (prevalence ${fmtNum(m.prevalence, 4)})`),
         el("td", { class: "num mono" }, fmtNum(m.ttd_median_s, 0)),
-        el("td", { class: "num" }, c.n_events),
+        el("td", { class: "num" }, cell.n_events),
         el("td", { class: "small muted" }, flags.join(" · ")),
       ),
     );
@@ -1166,18 +1225,18 @@ function experimentTable(exp, variants, budget) {
   return card;
 }
 
-function pairedCard(p) {
-  const card = el("div", { class: "card" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${p.budget} · ${p.metric}`));
-  const rows = (p.rows || []).map((x) =>
+function pairedCard(paired) {
+  const card = el("div", { class: "card" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
+  const rows = (paired.rows || []).map((row) =>
     el(
       "tr",
       {},
-      el("td", { class: "mono" }, `ai.autoencoder_trade vs ${x.baseline || "–"}`),
-      el("td", {}, provenanceBadges(x.provenance)),
-      el("td", { class: "num mono" }, ciText(x.diff_mean, x.ci)),
-      el("td", { class: "num" }, x.n_events),
-      el("td", {}, x.significant ? "ผ่านเกณฑ์" : "ไม่ผ่านเกณฑ์"),
-      el("td", { class: "small muted" }, x.reason_th || ""),
+      el("td", { class: "mono" }, `ai.autoencoder_trade vs ${row.baseline || "–"}`),
+      el("td", {}, provenanceBadges(row.provenance)),
+      el("td", { class: "num mono" }, ciText(row.diff_mean, row.ci)),
+      el("td", { class: "num" }, row.n_events),
+      el("td", {}, row.significant ? "ผ่านเกณฑ์" : "ไม่ผ่านเกณฑ์"),
+      el("td", { class: "small muted" }, row.reason_th || ""),
     ),
   );
   if (rows.length) {
@@ -1194,9 +1253,9 @@ function pairedCard(p) {
       ),
     );
   } else {
-    card.appendChild(el("p", { class: "muted small" }, "ยังไม่มีผล"));
+    card.appendChild(el("paired", { class: "muted small" }, "ยังไม่มีผล"));
   }
-  if ((p.notes || []).length) card.appendChild(el("ul", { class: "small" }, p.notes.map((n) => el("li", {}, n))));
+  if ((paired.notes || []).length) card.appendChild(el("ul", { class: "small" }, paired.notes.map((n) => el("li", {}, n))));
   return card;
 }
 
@@ -1242,30 +1301,30 @@ function whiskerChart(series, order) {
   return root;
 }
 
-function retrainCard(title, b) {
+function retrainCard(title, block) {
   const card = el(
     "div",
     { class: "card" },
-    el("div", { class: "detail-head" }, el("h3", {}, title), provenanceBadges(b.provenance)),
+    el("div", { class: "detail-head" }, el("h3", {}, title), provenanceBadges(block.provenance)),
     el(
       "p",
       { class: "small muted" },
-      `${b.champion} → ${b.challenger} · ${b.metric} · งบ ${b.budget} · split ${b.split} · ${b.n_seeds} seed · ${b.n_events} เหตุการณ์`,
+      `${block.champion} → ${block.challenger} · ${block.metric} · งบ ${block.budget} · split ${block.split} · ${block.n_seeds} seed · ${block.n_events} เหตุการณ์`,
     ),
   );
-  if (b.series) card.appendChild(whiskerChart(b.series, [b.champion, b.challenger]));
+  if (block.series) card.appendChild(whiskerChart(block.series, [block.champion, block.challenger]));
   const verdict =
-    b.accept === true ? "ยอมรับ challenger" : b.accept === false ? "คง champion ไว้" : "ยังตัดสินไม่ได้";
+    block.accept === true ? "ยอมรับ challenger" : block.accept === false ? "คง champion ไว้" : "ยังตัดสินไม่ได้";
   card.appendChild(
     el(
       "p",
-      { class: `decision ${b.accept === true ? "accept" : b.accept === false ? "reject" : ""}` },
+      { class: `decision ${block.accept === true ? "accept" : block.accept === false ? "reject" : ""}` },
       `Decision: ${verdict}`,
     ),
   );
-  if (isNum(b.diff_mean)) card.appendChild(el("p", { class: "small mono" }, `ผลต่าง ${ciText(b.diff_mean, b.ci)}`));
-  if (b.reason_th) card.appendChild(el("p", { class: "small" }, b.reason_th));
-  if ((b.notes || []).length) card.appendChild(el("ul", { class: "small muted" }, b.notes.map((n) => el("li", {}, n))));
+  if (isNum(block.diff_mean)) card.appendChild(el("p", { class: "small mono" }, `ผลต่าง ${ciText(block.diff_mean, block.ci)}`));
+  if (block.reason_th) card.appendChild(el("p", { class: "small" }, block.reason_th));
+  if ((block.notes || []).length) card.appendChild(el("ul", { class: "small muted" }, block.notes.map((n) => el("li", {}, n))));
   return card;
 }
 
@@ -1445,4 +1504,9 @@ async function boot() {
   setInterval(safely(tickInjections), 1000);
 }
 
-boot().catch((e) => console.warn("dashboard boot:", e));
+if (typeof document !== "undefined") {
+  boot().catch((e) => console.warn("dashboard boot:", e));
+} else if (typeof module !== "undefined") {
+  // node (tests only): the pure helpers
+  module.exports = { snapshotAlerts, matchesInjection, eligibleForRun, firstDetection, resetRuns };
+}

@@ -819,6 +819,14 @@ def prepare_replay(
         symbols=[symbol],
         budget_per_symbol_day=doc.get("budget_per_symbol_day"),
     )
+    # alerts a previous session raised at or after the start would be shown as "future" ones and
+    # be raised again: drop them as a seek to `start` does (feedback rows stay)
+    stale = store.delete_alerts_from("replay", start)
+    if stale:
+        _say(
+            f"ลบการแจ้งเตือน replay เดิม {len(stale)} รายการที่อยู่หลังจุดเริ่มเล่น "
+            "(ผลการตรวจของผู้วิเคราะห์ยังเก็บไว้)"
+        )
     when = datetime.fromtimestamp(start / S_US, UTC).strftime("%Y-%m-%d %H:%M UTC")
     _say(
         f"เล่นย้อนหลัง {symbol} วันที่ {day} เริ่มที่ {when} ความเร็ว {args.speed:g} เท่า "
