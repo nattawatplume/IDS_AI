@@ -23,7 +23,7 @@
 
 ## TradingView Lightweight Charts
 
-- ใช้วาดกราฟในหน้า Dashboard (จะนำมาเก็บไว้ในโปรเจกต์ในขั้นทำ Dashboard)
+- ใช้วาดกราฟในหน้า Dashboard เวอร์ชัน 5.2.1 เก็บไว้ที่ `idsai/product/web/vendor/` (ค่า sha256 อยู่ใน `vendor/VERSION` และ NOTICE อยู่ใน `vendor/NOTICE-lightweight-charts`)
 - Copyright TradingView, Inc. สัญญาอนุญาต Apache License 2.0
 - หน้าจอต้องแสดงข้อความ attribution และลิงก์ https://www.tradingview.com/ ตามที่สัญญากำหนด
 

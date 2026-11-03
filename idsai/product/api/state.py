@@ -22,7 +22,8 @@ class AppState:
 
     `symbols` is the set the API knows (default: the replayer's, else the live symbols); `injected`
     keeps the Red-Team scenarios of this app in memory, never in the store. `mode` must be the
-    pipeline's: the Red-Team refusal rests on it.
+    pipeline's: the Red-Team refusal rests on it. `budget_per_symbol_day` is the alert budget the
+    loaded Chief was fitted to (the dashboard's budget meter); None falls back to the config's.
     """
 
     cfg: Settings
@@ -33,6 +34,7 @@ class AppState:
     auditor: Auditor | None = None
     symbols: list[str] | None = None
     injected: list[dict[str, Any]] = field(default_factory=list)
+    budget_per_symbol_day: float | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -74,7 +76,11 @@ def _no_data(name: str, what: str) -> Check:
 
 
 def health(state: AppState) -> dict[str, Any]:
-    """Auditor checks over what the app really has; a check without data is `warn`, never `ok`."""
+    """Auditor checks over what the app really has; a check without data is `warn`, never `ok`.
+
+    For the dashboard's top bar it also carries `event_us` (the replayer's cursor; None without
+    one, where the bars carry the clock) and `budget_per_symbol_day`.
+    """
     pipe = state.pipeline
     inputs: dict[str, dict[str, Any]] = {}
     missing: list[Check] = []
@@ -98,5 +104,11 @@ def health(state: AppState) -> dict[str, Any]:
             "checks": [c.model_dump() for c in full.checks],
             "late_trades": None if pipe is None else pipe.late_trades(),
             "dropped": {} if state.bus is None else dict(state.bus.dropped),
+            "event_us": None if state.replayer is None else state.replayer.cursor_us,
+            "budget_per_symbol_day": (
+                state.cfg.chief.budget_per_symbol_day
+                if state.budget_per_symbol_day is None
+                else state.budget_per_symbol_day
+            ),
         }
     )

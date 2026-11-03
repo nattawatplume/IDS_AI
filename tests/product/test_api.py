@@ -388,6 +388,17 @@ def test_health_without_pipeline_is_not_ok(env):
         assert h["overall"] != "ok" and h["dropped"] == {} and h["late_trades"] is None
 
 
+def test_health_carries_event_clock_and_budget_for_the_top_bar(client, env):
+    h = client.get("/api/health").json()
+    assert h["event_us"] == env.replayer.cursor_us
+    assert h["budget_per_symbol_day"] == env.cfg.chief.budget_per_symbol_day
+    env.state.budget_per_symbol_day = 9.6  # the loaded bundle's budget wins over the config
+    assert client.get("/api/health").json()["budget_per_symbol_day"] == 9.6
+    st = AppState(env.cfg, env.store, "live", None, None, Auditor(env.cfg), symbols=[SYM])
+    with TestClient(create_app(st)) as c:
+        assert c.get("/api/health").json()["event_us"] is None  # live: the bars carry the clock
+
+
 def test_warmup_is_decided_by_the_slowest_symbol(client, env):
     for slow in (SYM, "OTHERBTC"):
         env.pipe.samples_by = {slow: 3}

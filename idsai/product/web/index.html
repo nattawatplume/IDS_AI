@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Market IDS</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-name">Market IDS</span>
+      <span id="mode-badge" class="badge badge-mode">…</span>
+    </div>
+    <div class="topbar-stats">
+      <div class="stat">
+        <span class="stat-label">เวลาเหตุการณ์</span>
+        <span id="event-clock" class="stat-value mono">–</span>
+      </div>
+      <details id="auditor" class="stat auditor">
+        <summary>
+          <span class="stat-label">Auditor</span>
+          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text">กำลังโหลด…</span></span>
+        </summary>
+        <ul id="auditor-checks" class="auditor-checks"></ul>
+      </details>
+      <div class="stat budget">
+        <span class="stat-label">งบการแจ้งเตือน (24 ชม.ล่าสุด)</span>
+        <span class="stat-value">
+          <span class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
+          <span id="budget-text" class="mono">–</span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="หน้า">
+    <a href="#/monitor" data-route="monitor">Monitor</a>
+    <a href="#/alerts" data-route="alerts">Alerts</a>
+    <a href="#/redteam" data-route="redteam">Red-Team</a>
+    <a href="#/eval" data-route="eval">Eval</a>
+    <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
+    <a href="#/about" data-route="about">About</a>
+  </nav>
+
+  <div id="ws-banner" class="banner banner-warn" role="status" hidden></div>
+
+  <main>
+    <!-- Monitor -->
+    <section id="page-monitor" class="page" hidden>
+      <div class="toolbar">
+        <label class="field">
+          <span>สัญลักษณ์</span>
+          <select id="symbol-select"></select>
+        </label>
+        <div id="replay-controls" class="replay" hidden>
+          <button id="btn-play" type="button">▶ เล่น</button>
+          <button id="btn-pause" type="button">❚❚ หยุด</button>
+          <label class="field">
+            <span>ความเร็ว</span>
+            <select id="speed-select">
+              <option value="" selected disabled>เลือก…</option>
+              <option value="1">1×</option>
+              <option value="10">10×</option>
+              <option value="60">60×</option>
+              <option value="300">300×</option>
+              <option value="0">เร็วสุด</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>ไปที่เวลา (UTC)</span>
+            <input id="seek-input" type="datetime-local" step="1">
+          </label>
+          <button id="btn-seek" type="button">ไป</button>
+          <span id="replay-status" class="muted small"></span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div id="chart" class="chart"></div>
+        <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+      </div>
+      <p class="legend small muted">
+        บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
+        F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
+        L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
+      </p>
+    </section>
+
+    <!-- Alerts triage -->
+    <section id="page-alerts" class="page" hidden>
+      <h1>การแจ้งเตือน</h1>
+      <p class="muted small">ทุกรายการคือช่วงเวลาที่พบความผิดปกติทางสถิติเมื่อเทียบกับตลาดปกติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร</p>
+      <div class="table-wrap">
+        <table class="table" id="alerts-table">
+          <thead>
+            <tr><th>ระดับ</th><th>เทคนิค</th><th>สัญลักษณ์</th><th>เวลา (UTC)</th><th>ค่า p รวม</th><th>เห็นพ้อง</th><th>สถานะ</th></tr>
+          </thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+      </div>
+      <p id="alerts-empty" class="empty" hidden>ยังไม่มีการแจ้งเตือน</p>
+    </section>
+
+    <!-- Alert detail -->
+    <section id="page-alert" class="page" hidden>
+      <p><a href="#/alerts" class="back">‹ กลับไปรายการแจ้งเตือน</a></p>
+      <div id="alert-detail"></div>
+    </section>
+
+    <!-- Red-Team -->
+    <section id="page-redteam" class="page" hidden>
+      <h1>Red-Team</h1>
+      <p class="muted small">ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่กำลังเล่นย้อนหลัง (เฉพาะสำเนาในหน่วยความจำ) แล้วจับเวลาจนระบบพบความผิดปกติทางสถิติ</p>
+      <div id="redteam-refused" class="banner banner-fail" hidden></div>
+      <form id="redteam-form" class="card form-grid">
+        <label class="field">
+          <span>รูปแบบ (family)</span>
+          <select id="rt-family">
+            <option value="pump_burst">pump_burst (พุ่งเร็ว)</option>
+            <option value="pump_stealth">pump_stealth (ค่อยเป็นค่อยไป)</option>
+            <option value="wash_pingpong">wash_pingpong (คล้าย wash)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>ช่วงพารามิเตอร์ (region)</span>
+          <select id="rt-region">
+            <option value="test">test</option>
+            <option value="train">train</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>เริ่มหลังเวลาปัจจุบัน (วินาที)</span>
+          <input id="rt-offset" type="number" min="1" max="3600" step="1" value="60">
+        </label>
+        <label class="field">
+          <span>สัญลักษณ์</span>
+          <select id="rt-symbol"></select>
+        </label>
+        <div class="form-actions">
+          <button id="rt-submit" type="submit" class="primary">ฉีดสถานการณ์จำลอง</button>
+          <span id="rt-status" class="small"></span>
+        </div>
+      </form>
+      <div id="rt-runs"></div>
+    </section>
+
+    <!-- Eval -->
+    <section id="page-eval" class="page" hidden>
+      <h1>ผลการประเมิน</h1>
+      <div id="eval-body"></div>
+    </section>
+
+    <!-- Taxonomy -->
+    <section id="page-taxonomy" class="page" hidden>
+      <h1>ATT&amp;CK for Markets</h1>
+      <p class="muted small">กรอบเทคนิคที่ทีมสร้างขึ้นเพื่อการศึกษา (ไม่ใช่มาตรฐานทางการ)</p>
+      <div id="taxonomy-body" class="cards"></div>
+    </section>
+
+    <!-- About -->
+    <section id="page-about" class="page prose" hidden>
+      <h1>เกี่ยวกับ Market IDS</h1>
+      <p>Market IDS เป็นต้นแบบเพื่อการศึกษาในวิชา CPE102 ใช้แนวคิดของระบบตรวจจับการบุกรุก (IDS) กับข้อมูลการซื้อขายคริปโตสาธารณะ
+        ระบบหาช่วงเวลาที่ตลาดผิดปกติทางสถิติเมื่อเทียบกับ 24 ชั่วโมงก่อนหน้า แล้วให้คนตรวจต่อ</p>
+
+      <h2>ระบบไม่ได้ทำอะไร</h2>
+      <ul>
+        <li>ไม่ซื้อขาย ไม่มีโค้ดส่งคำสั่ง ไม่มีที่ใส่ API key และไม่ใช่คำแนะนำการลงทุน</li>
+        <li>การแจ้งเตือนทุกครั้งคือ "พบความผิดปกติทางสถิติ" ไม่ได้บอกว่ามีการปั่นราคา และไม่ได้บอกว่าใครทำ ข้อมูลสาธารณะไม่มีตัวตนของผู้ซื้อขาย</li>
+        <li>ค่า p รวม (F) คือความหายากเทียบตลาดปกติ บอกแค่ว่าช่วงนั้นหายากแค่ไหน ไม่ได้บอกว่าเกิดการปั่นราคาขึ้นจริง</li>
+        <li>Red-Team ใช้ได้เฉพาะโหมด replay และ sim ในโหมด LIVE ระบบปฏิเสธเสมอ</li>
+      </ul>
+
+      <h2>ข้อจำกัดของข้อมูล</h2>
+      <ul>
+        <li>คลังข้อมูลย้อนหลังของ Binance spot มีแค่การซื้อขาย ไม่มีสมุดคำสั่ง (order book) จึงตรวจ spoofing / layering จากข้อมูลจริงไม่ได้</li>
+        <li>ป้ายเหตุการณ์จริงมาจากประกาศใน Telegram เป็นคู่เหรียญกับ BTC ช่วงปี 2018–2022 เท่านั้น และไม่ครบทุกเหตุการณ์</li>
+        <li>ผล SEMI-SYN มาจากเหตุการณ์จำลองที่ใส่ลงในวันปกติจริง บอกได้แค่ว่าจับรูปแบบที่จำลองได้แค่ไหน</li>
+        <li>precision แสดงคู่กับ prevalence เสมอ และทุกตัวเลขมีป้ายที่มา REAL / SEMI-SYN / SYN</li>
+        <li>ชุดเดโมมีแค่ไม่กี่วัน ใช้สาธิตการทำงาน ไม่ใช้วัดผล</li>
+      </ul>
+      <p class="muted small">รายละเอียดอยู่ใน docs/ETHICS.md และ docs/DATA_LIMITATIONS.md ของโปรเจกต์</p>
+
+      <h2>ที่มาของข้อมูลและซอฟต์แวร์</h2>
+      <ul>
+        <li>ข้อมูลการซื้อขาย: <a href="https://data.binance.vision/" rel="noopener noreferrer" target="_blank">Binance Vision</a>
+          (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" rel="noopener noreferrer" target="_blank">CC BY-NC-SA 4.0</a>) ใช้แบบไม่แสวงหากำไร</li>
+        <li>กราฟ: <a href="https://www.tradingview.com/" rel="noopener noreferrer" target="_blank">TradingView</a> Lightweight Charts™ 5.2.1
+          (<a href="https://github.com/tradingview/lightweight-charts" rel="noopener noreferrer" target="_blank">ซอร์สโค้ด</a>,
+          <a href="https://www.apache.org/licenses/LICENSE-2.0" rel="noopener noreferrer" target="_blank">Apache License 2.0</a>)
+          Copyright TradingView, Inc. ไฟล์ NOTICE อยู่ที่ <a href="vendor/NOTICE-lightweight-charts">vendor/NOTICE-lightweight-charts</a></li>
+        <li>บันทึกเหตุการณ์ปั่นราคา: SystemsLab-Sapienza (MIT) และ Hu et al. (ผู้ใช้ดาวน์โหลดเอง ไม่แจกจ่ายต่อ)</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="footer small muted">
+    ข้อมูล: Binance Vision (CC BY-NC-SA 4.0) · กราฟ: TradingView Lightweight Charts™ ·
+    เพื่อการศึกษาเท่านั้น ไม่ใช่คำแนะนำการลงทุน · <a href="#/about">ที่มาและข้อจำกัด</a>
+  </footer>
+
+  <script src="vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

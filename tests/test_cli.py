@@ -487,6 +487,7 @@ def test_prepare_replay_prerolls_the_previous_day_and_starts_before_the_label(de
     assert rp._pos == day_us(PUMP) - 86_400 * S  # pre-roll origin: D-1 00:00
     assert rp._start == PUMP_T0 - 1800 * S  # 30 min before the label
     assert rp._speed == 60.0
+    assert state.budget_per_symbol_day == 10.0  # the bundle's budget (None if not passed)
 
 
 def test_bundle_refuses_another_config_or_a_missing_dir(demo, tmp_path):
