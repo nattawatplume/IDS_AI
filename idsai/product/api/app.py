@@ -4,8 +4,8 @@ Every route is `async def`, so it runs on the one event loop that owns the store
 replayer and the pipeline. There is no login and no CORS: a POST or WebSocket whose `Origin` host
 differs from `Host` is refused, which stops an ordinary page on another site. It does not stop DNS
 rebinding, where `Origin` and `Host` agree on the attacker's name: that takes a host allowlist where
-the bind address is chosen. A request without `Origin` (curl, tests) is allowed. JSON is strict:
-non-finite floats go out as null.
+the bind address is chosen (`create_app(allowed_hosts=...)`, which `idsai serve` sets). A request
+without `Origin` (curl, tests) is allowed. JSON is strict: non-finite floats go out as null.
 
 WebSocket messages are `{type: bar|score|alert|health, data}`. Per client and symbol, bar and score
 go out at most 4 Hz and a held value is replaced by a newer one, so the client always ends on the
@@ -35,6 +35,7 @@ from pydantic import (
     StringConstraints,
     field_validator,
 )
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocketDisconnect
 
@@ -127,8 +128,13 @@ async def same_origin(conn: HTTPConnection) -> None:
         raise HTTPException(403, "คำขอจากเว็บไซต์อื่นถูกปฏิเสธ (cross-origin)")
 
 
-def create_app(state: AppState) -> FastAPI:
+def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastAPI:
+    """The app over `state`. `allowed_hosts` (e.g. loopback names plus the bound host) turns on a
+    `Host` header allowlist against DNS rebinding: any other host gets 400, HTTP and WebSocket
+    alike. None (the default) checks no host."""
     app = FastAPI(title="Market IDS", docs_url=None, redoc_url=None, openapi_url=None)
+    if allowed_hosts is not None:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
 
     @app.exception_handler(RequestValidationError)
     async def _invalid(request: Request, exc: RequestValidationError) -> Response:
