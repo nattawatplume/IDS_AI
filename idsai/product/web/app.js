@@ -13,6 +13,7 @@ const DAY_US = 86400 * S_US;
 const AGREEMENT_P = 0.01;
 const MATCH_BEFORE_US = 120 * S_US; // eval match rule: [t_start - 120 s, t_end + 300 s]
 const MATCH_AFTER_US = 300 * S_US;
+const MISSED_GRACE_US = 30 * S_US; // pipeline lag allowed past the matching window
 const MARKER_SLACK_S = 10; // an alert further than this outside the plotted range gets no marker
 const FUSION_LAYERS = ["rule", "stat", "ai"];
 const LANES = [
@@ -26,6 +27,9 @@ const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail
 const VERDICT_TH = { tp: "ผิดปกติจริง (TP)", fp: "แจ้งเตือนผิด (FP)", unsure: "ไม่แน่ใจ" };
 const REFUSED_TH =
   "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง (ใช้ได้เฉพาะโหมด replay / sim)";
+const UNKNOWN_MODE_TH =
+  "Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)";
+const RED_TEAM_MODES = ["replay", "sim"];
 const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
 const state = {
@@ -219,6 +223,12 @@ function renderHealth(h) {
     list.appendChild(el("li", { class: "muted" }, `การซื้อขายที่มาช้า: ${h.late_trades}`));
   }
   renderBudget();
+  tickInjections(); // the Red-Team card moves with the clock above it
+}
+
+function redTeamAllowed(mode) {
+  // fail closed: only a mode the server confirmed as replay / sim enables injection
+  return RED_TEAM_MODES.includes(mode);
 }
 
 function setMode(mode) {
@@ -229,11 +239,12 @@ function setMode(mode) {
   badge.className = `badge badge-mode ${mode}`;
   const live = mode === "live";
   $("replay-controls").hidden = live;
+  const allowed = redTeamAllowed(mode);
   const refused = $("redteam-refused");
-  refused.hidden = !live;
-  refused.textContent = live ? REFUSED_TH : "";
+  refused.hidden = allowed;
+  refused.textContent = allowed ? "" : live ? REFUSED_TH : UNKNOWN_MODE_TH;
   for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
-    node.disabled = live;
+    node.disabled = !allowed;
   }
 }
 
@@ -906,7 +917,7 @@ async function drawDetailChart(node, a) {
 function bindRedTeam() {
   $("redteam-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    if (state.mode === "live") return;
+    if (!redTeamAllowed(state.mode)) return;
     const status = $("rt-status");
     const offset = Number($("rt-offset").value);
     if (!Number.isFinite(offset) || offset <= 0 || offset > 3600) {
@@ -929,7 +940,7 @@ function bindRedTeam() {
     } catch (e) {
       status.textContent = e.message;
     } finally {
-      $("rt-submit").disabled = state.mode === "live";
+      $("rt-submit").disabled = !redTeamAllowed(state.mode);
     }
   });
 }
@@ -1002,6 +1013,16 @@ function resetRuns(runs, deleted) {
   return changed;
 }
 
+function injectionStatus(run, nowUs) {
+  // "detected" wins whenever it comes; "missed" once the eval matching window (scenario end +
+  // 300 s) plus a grace has passed without a qualifying alert; it follows the clock, so a seek
+  // back makes the run "waiting" again
+  if (run.detected) return "detected";
+  if (!isNum(nowUs) || !isNum(run.t_start_us)) return "waiting";
+  if (isNum(run.t_end_us) && nowUs > run.t_end_us + MATCH_AFTER_US + MISSED_GRACE_US) return "missed";
+  return nowUs < run.t_start_us ? "pending" : "waiting";
+}
+
 function checkInjections() {
   let changed = false;
   for (const run of state.injections) {
@@ -1060,7 +1081,11 @@ function tickInjections() {
   for (const run of state.injections) {
     if (!run.node) continue;
     clear(run.node);
-    if (run.detected) {
+    const status = injectionStatus(run, now);
+    if (status === "missed") {
+      run.node.textContent =
+        "ไม่พบความผิดปกติทางสถิติภายในช่วงที่นับตามเกณฑ์ประเมิน (ถึงสิ้นสุดเหตุการณ์ + 300 s) · นับเป็นการตรวจไม่พบ";
+    } else if (status === "detected") {
       const d = run.detected;
       append(run.node, [
         `ตรวจพบความผิดปกติทางสถิติ: ${d.eventS >= 0 ? "+" : ""}${d.eventS.toFixed(0)} s (เวลาเหตุการณ์) · ${d.wallS.toFixed(1)} s (เวลาจริง) `,
@@ -1508,5 +1533,13 @@ if (typeof document !== "undefined") {
   boot().catch((e) => console.warn("dashboard boot:", e));
 } else if (typeof module !== "undefined") {
   // node (tests only): the pure helpers
-  module.exports = { snapshotAlerts, matchesInjection, eligibleForRun, firstDetection, resetRuns };
+  module.exports = {
+    snapshotAlerts,
+    matchesInjection,
+    eligibleForRun,
+    firstDetection,
+    resetRuns,
+    injectionStatus,
+    redTeamAllowed,
+  };
 }

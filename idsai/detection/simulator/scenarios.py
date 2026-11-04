@@ -1,5 +1,6 @@
 """Scenario definition, sampling from configured ranges, and the base volume rate."""
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -51,6 +52,11 @@ def sample_scenario(
 
     `rush_size` is an integer (both ends inclusive). Fields the family does not configure take
     neutral values: impact 0, dump_tau_s 0, rush_size 1.
+
+    A float field may instead be written `{log: [lo, hi]}` (lo > 0): log-uniform, i.e.
+    `exp(uniform(log lo, log hi))`, for heavy-tailed quantities such as a real pump's vol_mult.
+    It consumes the generator exactly like a plain range, so the draws of other fields and the
+    seed are unchanged.
     """
     if family not in TECHNIQUES:
         raise ValueError(f"unknown scenario family {family!r}")
@@ -59,7 +65,15 @@ def sample_scenario(
     def uniform(key: str, neutral: float) -> float:
         if key not in rg:
             return neutral
-        lo, hi = rg[key]
+        spec = rg[key]
+        if isinstance(spec, dict):
+            if set(spec) != {"log"}:
+                raise ValueError(f"{family}.{region}.{key}: only the form {{log: [lo, hi]}}")
+            lo, hi = (float(v) for v in spec["log"])
+            if not 0.0 < lo <= hi:
+                raise ValueError(f"{family}.{region}.{key}: log range needs 0 < lo <= hi")
+            return float(min(max(math.exp(rng.uniform(math.log(lo), math.log(hi))), lo), hi))
+        lo, hi = spec
         return float(rng.uniform(lo, hi))
 
     duration_s = uniform("duration_s", 0.0)

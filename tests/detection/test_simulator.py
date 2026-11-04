@@ -140,7 +140,8 @@ def test_base_quote_rate_no_trades_raises():
 # ------------------------------------------------------------------ sampling
 def test_ranges_file_values():
     r = RANGES
-    assert r["pump_burst"]["train"]["impact"] == [0.05, 0.30]
+    assert r["pump_burst"]["train"]["impact"] == [0.0499, 0.7946]  # Task 20 measurement
+    assert r["pump_burst"]["train"]["vol_mult"] == {"log": [45.39, 6694.89]}
     assert r["pump_burst"]["test"]["impact"] == [0.03, 0.05]
     assert r["pump_stealth"]["test"]["duration_s"] == [5400, 7200]
     assert r["wash_pingpong"]["test"]["vol_mult"] == [1.5, 2]
@@ -156,7 +157,8 @@ def test_sampled_scenarios_inside_ranges(family, region):
         assert sc.family == family and sc.region == region and sc.t_start_us == T_START
         lo, hi = rg["duration_s"]
         assert lo <= sc.duration_s <= hi
-        lo, hi = rg["vol_mult"]
+        vm = rg["vol_mult"]
+        lo, hi = vm["log"] if isinstance(vm, dict) else vm
         assert lo <= sc.vol_mult <= hi
         if "impact" in rg:
             lo, hi = rg["impact"]
@@ -190,6 +192,48 @@ def test_sampling_deterministic_and_technique_ids():
         "pump_stealth": ("MM-T001", "MM-T001.002"),
         "wash_pingpong": ("MM-T005", "MM-T005.001"),
     }
+
+
+def _with_vol(spec) -> dict:
+    out = {f: {k: dict(v) for k, v in RANGES[f].items()} for f in RANGES}
+    out["pump_burst"]["train"]["vol_mult"] = spec
+    return out
+
+
+def test_log_uniform_vol_mult():
+    ranges = _with_vol({"log": [10, 1000]})
+    rng = np.random.default_rng(3)
+    v = np.array(
+        [sample_scenario("pump_burst", "train", T_START, rng, ranges).vol_mult for _ in range(4000)]
+    )
+    assert v.min() >= 10 and v.max() <= 1000
+    assert np.median(v) == pytest.approx(100, rel=0.1)  # geometric midpoint, not 505
+    assert np.mean(v < 100) == pytest.approx(0.5, abs=0.03)
+
+
+def test_log_form_keeps_other_draws_and_plain_form_unchanged():
+    lo, hi = 5.0, 30.0
+    plain = sample_scenario(
+        "pump_burst", "train", T_START, np.random.default_rng(5), _with_vol([lo, hi])
+    )
+    logged = sample_scenario(
+        "pump_burst", "train", T_START, np.random.default_rng(5), _with_vol({"log": [lo, hi]})
+    )
+    assert dataclasses.replace(logged, vol_mult=plain.vol_mult) == plain
+    assert logged.vol_mult != plain.vol_mult and lo <= logged.vol_mult <= hi
+    # the plain form is a single rng.uniform per field, in field order
+    rng = np.random.default_rng(5)
+    rg = _with_vol([lo, hi])["pump_burst"]["train"]
+    want = [float(rng.uniform(*rg[k])) for k in ("duration_s", "impact", "vol_mult")]
+    assert [plain.duration_s, plain.impact, plain.vol_mult] == want
+
+
+@pytest.mark.parametrize(
+    "spec", [{"log": [0, 10]}, {"log": [-1, 10]}, {"log": [5, 2]}, {"lin": [1, 2]}]
+)
+def test_log_form_validation(spec):
+    with pytest.raises(ValueError):
+        sample_scenario("pump_burst", "train", T_START, np.random.default_rng(0), _with_vol(spec))
 
 
 # ------------------------------------------------------------------ injection: general

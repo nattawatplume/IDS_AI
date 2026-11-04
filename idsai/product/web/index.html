@@ -112,11 +112,12 @@
     <section id="page-redteam" class="page" hidden>
       <h1>Red-Team</h1>
       <p class="muted small">ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่กำลังเล่นย้อนหลัง (เฉพาะสำเนาในหน่วยความจำ) แล้วจับเวลาจนระบบพบความผิดปกติทางสถิติ</p>
-      <div id="redteam-refused" class="banner banner-fail" hidden></div>
+      <!-- fail closed: disabled until /api/health confirms replay or sim (app.js setMode) -->
+      <div id="redteam-refused" class="banner banner-fail">Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)</div>
       <form id="redteam-form" class="card form-grid">
         <label class="field">
           <span>รูปแบบ (family)</span>
-          <select id="rt-family">
+          <select id="rt-family" disabled>
             <option value="pump_burst">pump_burst (พุ่งเร็ว)</option>
             <option value="pump_stealth">pump_stealth (ค่อยเป็นค่อยไป)</option>
             <option value="wash_pingpong">wash_pingpong (คล้าย wash)</option>
@@ -124,21 +125,21 @@
         </label>
         <label class="field">
           <span>ช่วงพารามิเตอร์ (region)</span>
-          <select id="rt-region">
+          <select id="rt-region" disabled>
             <option value="test">test</option>
             <option value="train">train</option>
           </select>
         </label>
         <label class="field">
           <span>เริ่มหลังเวลาปัจจุบัน (วินาที)</span>
-          <input id="rt-offset" type="number" min="1" max="3600" step="1" value="60">
+          <input id="rt-offset" disabled type="number" min="1" max="3600" step="1" value="60">
         </label>
         <label class="field">
           <span>สัญลักษณ์</span>
-          <select id="rt-symbol"></select>
+          <select id="rt-symbol" disabled></select>
         </label>
         <div class="form-actions">
-          <button id="rt-submit" type="submit" class="primary">ฉีดสถานการณ์จำลอง</button>
+          <button id="rt-submit" type="submit" class="primary" disabled>ฉีดสถานการณ์จำลอง</button>
           <span id="rt-status" class="small"></span>
         </div>
       </form>
