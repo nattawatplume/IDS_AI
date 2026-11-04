@@ -212,10 +212,30 @@ def test_live_mode_gates_replay_and_red_team():
     body = js[js.index("function setMode(") : js.index("function eventNowUs(")]
     assert 'const live = mode === "live";' in body
     assert '$("replay-controls").hidden = live;' in body
-    assert "refused.hidden = !live;" in body and "REFUSED_TH" in body
-    assert 'querySelectorAll("select, input, button")' in body and "node.disabled = live;" in body
+    assert "const allowed = redTeamAllowed(mode);" in body
+    assert "refused.hidden = allowed;" in body and "REFUSED_TH" in body
+    assert 'querySelectorAll("select, input, button")' in body
+    assert "node.disabled = !allowed;" in body
     submit = js[js.index('$("redteam-form").addEventListener') :]
-    assert submit.index('if (state.mode === "live") return;') < submit.index("postJson(")
+    assert submit.index("if (!redTeamAllowed(state.mode)) return;") < submit.index("postJson(")
+    assert 'const RED_TEAM_MODES = ["replay", "sim"];' in js
+
+
+def test_red_team_form_starts_disabled_until_health_confirms_the_mode():
+    html = text("index.html")
+    form = html[html.index('<form id="redteam-form"') : html.index("</form>")]
+    controls = re.findall(r"<(?:select|input|button)\b[^>]*>", form)
+    assert len(controls) == 5
+    for tag in controls:
+        assert re.search(r"\sdisabled[\s>]", tag), tag  # fail closed before any health
+    banner = re.search(r'<div id="redteam-refused"[^>]*>([^<]*)</div>', html)
+    assert banner and "hidden" not in banner.group(0) and "LIVE" in banner.group(1)
+
+
+def test_top_bar_clock_moves_the_red_team_card():
+    js = text("app.js")
+    body = js[js.index("function renderHealth(") : js.index("function redTeamAllowed(")]
+    assert "tickInjections();" in body
 
 
 # ---- time-to-detect logic, run in node ----
@@ -249,6 +269,27 @@ assert.strictEqual(m.resetRuns([r], ["new", "old"]), true);
 assert.strictEqual(r.detected, null);
 assert.strictEqual(m.firstDetection(r, [alert("old", 1040, 1100)]).alert_id, "old");
 assert.strictEqual(m.resetRuns([r], ["unrelated"]), false);
+
+// not detected: once the clock passes scenario end + 300 s + 30 s grace with nothing qualifying
+r = run(m.snapshotAlerts([]));
+assert.strictEqual(m.injectionStatus(r, 1010 * S), "pending");
+assert.strictEqual(m.injectionStatus(r, 1200 * S), "waiting");
+assert.strictEqual(m.injectionStatus(r, (1150 + 300 + 29) * S), "waiting");
+assert.strictEqual(m.injectionStatus(r, (1150 + 300 + 31) * S), "missed");
+assert.strictEqual(m.injectionStatus(r, null), "waiting"); // no clock yet: no verdict
+// a late qualifying alert still turns it into a detection; a seek back re-arms the wait
+const late = m.firstDetection(r, [alert("late", 1440, 1460)]);
+assert.strictEqual(late.alert_id, "late");
+r.detected = { alert_id: late.alert_id };
+assert.strictEqual(m.injectionStatus(r, 5000 * S), "detected");
+r.detected = null;
+assert.strictEqual(m.injectionStatus(r, 1100 * S), "waiting");
+
+// red team is allowed only in a confirmed replay / sim mode
+for (const mode of [null, undefined, "", "live", "LIVE", "other"]) {
+  assert.strictEqual(m.redTeamAllowed(mode), false, String(mode));
+}
+assert.strictEqual(m.redTeamAllowed("replay") && m.redTeamAllowed("sim"), true);
 console.log("ok");
 """
 
