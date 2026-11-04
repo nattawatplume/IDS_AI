@@ -487,6 +487,29 @@ def test_prepare_replay_prerolls_the_previous_day_and_starts_before_the_label(de
     assert rp._pos == day_us(PUMP) - 86_400 * S  # pre-roll origin: D-1 00:00
     assert rp._start == PUMP_T0 - 1800 * S  # 30 min before the label
     assert rp._speed == 60.0
+    assert state.budget_per_symbol_day == 10.0  # the bundle's budget (None if not passed)
+
+
+def test_prepare_replay_drops_alerts_of_earlier_sessions_from_the_start_on(demo):
+    from tests.product.test_api import make_alert
+
+    start = PUMP_T0 - 1800 * S  # where the demo replay starts
+    before = make_alert("r-before", ts=start - 600 * S, symbol=SYM)  # window ends 600 s before
+    at = make_alert("r-at", ts=start, symbol=SYM)  # window ends at the start
+    ahead = make_alert("r-ahead", ts=start + 3600 * S, symbol=SYM)
+    sim = make_alert("s-ahead", ts=start + 3600 * S, symbol=SYM, prov="sim")
+    args = cli.build_parser().parse_args(["serve"])
+    with Store(demo.cfg.paths.data_dir, demo.cfg.paths.app_db) as store:
+        for a in (before, at, ahead, sim):
+            store.upsert_alert(a)
+        store.insert_feedback("r-ahead", "tp", "analyst")
+        _, background = cli.prepare_replay(args, demo.cfg, store)
+        background().close()
+        left = {a.alert_id for a in store.list_alerts(1000)}
+        assert {"r-before", "s-ahead"} <= left and not {"r-at", "r-ahead"} & left
+        assert [f["verdict"] for f in store.list_feedback("r-ahead")] == ["tp"]  # kept
+        store.delete_alerts("replay", ["r-before"])
+        store.delete_alerts("sim", ["s-ahead"])
 
 
 def test_bundle_refuses_another_config_or_a_missing_dir(demo, tmp_path):

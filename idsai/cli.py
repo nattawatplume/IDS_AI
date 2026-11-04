@@ -805,12 +805,28 @@ def prepare_replay(
     from idsai.product.api import AppState
 
     symbol, day, start, models = _replay_target(args, cfg, store)
-    dets, chief, _ = _load(models, cfg)
+    dets, chief, doc = _load(models, cfg)
     d0 = _day_start_us(day)
     trades = store.read_trades(symbol, d0 - DAY_US, d0 + DAY_US)
     replayer = Replayer(trades, speed=args.speed, start_us=start, preroll_from_us=d0 - DAY_US)
     pipeline = StreamPipeline(cfg, store, dets, chief, Bus(), "replay")
-    state = AppState(cfg, store, "replay", pipeline, replayer, symbols=[symbol])
+    state = AppState(
+        cfg,
+        store,
+        "replay",
+        pipeline,
+        replayer,
+        symbols=[symbol],
+        budget_per_symbol_day=doc.get("budget_per_symbol_day"),
+    )
+    # alerts a previous session raised at or after the start would be shown as "future" ones and
+    # be raised again: drop them as a seek to `start` does (feedback rows stay)
+    stale = store.delete_alerts_from("replay", start)
+    if stale:
+        _say(
+            f"ลบการแจ้งเตือน replay เดิม {len(stale)} รายการที่อยู่หลังจุดเริ่มเล่น "
+            "(ผลการตรวจของผู้วิเคราะห์ยังเก็บไว้)"
+        )
     when = datetime.fromtimestamp(start / S_US, UTC).strftime("%Y-%m-%d %H:%M UTC")
     _say(
         f"เล่นย้อนหลัง {symbol} วันที่ {day} เริ่มที่ {when} ความเร็ว {args.speed:g} เท่า "
@@ -873,7 +889,15 @@ def prepare_live(
         _warn(f"คำเตือน: {age} (เกิน 17.5 ชม.) ค่า z จะยังใช้ไม่ได้จนประมาณ +6.6 ชม. หลังเชื่อมต่อ")
     sensor = LiveTradeSensor(symbols, cfg.live.ws_url)
     pipeline = StreamPipeline(cfg, store, dets, chief, Bus(), "live")
-    state = AppState(cfg, store, "live", pipeline, None, symbols=symbols)
+    state = AppState(
+        cfg,
+        store,
+        "live",
+        pipeline,
+        None,
+        symbols=symbols,
+        budget_per_symbol_day=doc.get("budget_per_symbol_day"),
+    )
     return state, lambda: pipeline.run(warmup_then_live(archive, sensor))
 
 
