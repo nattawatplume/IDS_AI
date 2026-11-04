@@ -1,14 +1,17 @@
-# Red-Team scenario ranges, sampled uniformly (rush_size as an integer, both ends inclusive).
-# train ranges are re-fit from train-period real pumps in Task 20 Step 3.
+# Red-Team scenario ranges, sampled uniformly (rush_size as an integer, both ends inclusive);
+# `{log: [lo, hi]}` samples log-uniformly.
 # Fields a family does not use (impact for wash_pingpong, dump_tau_s for pump_stealth,
 # rush_size for wash_pingpong) are omitted and take neutral values in sample_scenario.
 pump_burst:
+  # train: 10-90 % of 159 train-period real pumps (scripts/measure_pumps.py,
+  # data/pump_measurements.json, 2026-11-04). test stays as designed: harder, out of distribution.
   train:
-    duration_s: [30, 180]
-    impact: [0.05, 0.30]
-    vol_mult: [5, 30]
-    rush_size: [3, 8]
-    dump_tau_s: [120, 600]
+    duration_s: [7, 284]
+    impact: [0.0499, 0.7946]
+    vol_mult:
+      log: [45.39, 6694.89]
+    rush_size: [4, 27]
+    dump_tau_s: [35, 1075]
   test:
     duration_s: [30, 180]
     impact: [0.03, 0.05]

@@ -140,7 +140,8 @@ def test_base_quote_rate_no_trades_raises():
 # ------------------------------------------------------------------ sampling
 def test_ranges_file_values():
     r = RANGES
-    assert r["pump_burst"]["train"]["impact"] == [0.05, 0.30]
+    assert r["pump_burst"]["train"]["impact"] == [0.0499, 0.7946]  # Task 20 measurement
+    assert r["pump_burst"]["train"]["vol_mult"] == {"log": [45.39, 6694.89]}
     assert r["pump_burst"]["test"]["impact"] == [0.03, 0.05]
     assert r["pump_stealth"]["test"]["duration_s"] == [5400, 7200]
     assert r["wash_pingpong"]["test"]["vol_mult"] == [1.5, 2]
@@ -156,7 +157,8 @@ def test_sampled_scenarios_inside_ranges(family, region):
         assert sc.family == family and sc.region == region and sc.t_start_us == T_START
         lo, hi = rg["duration_s"]
         assert lo <= sc.duration_s <= hi
-        lo, hi = rg["vol_mult"]
+        vm = rg["vol_mult"]
+        lo, hi = vm["log"] if isinstance(vm, dict) else vm
         assert lo <= sc.vol_mult <= hi
         if "impact" in rg:
             lo, hi = rg["impact"]
@@ -210,8 +212,10 @@ def test_log_uniform_vol_mult():
 
 
 def test_log_form_keeps_other_draws_and_plain_form_unchanged():
-    plain = sample_scenario("pump_burst", "train", T_START, np.random.default_rng(5), RANGES)
-    lo, hi = RANGES["pump_burst"]["train"]["vol_mult"]
+    lo, hi = 5.0, 30.0
+    plain = sample_scenario(
+        "pump_burst", "train", T_START, np.random.default_rng(5), _with_vol([lo, hi])
+    )
     logged = sample_scenario(
         "pump_burst", "train", T_START, np.random.default_rng(5), _with_vol({"log": [lo, hi]})
     )
@@ -219,7 +223,7 @@ def test_log_form_keeps_other_draws_and_plain_form_unchanged():
     assert logged.vol_mult != plain.vol_mult and lo <= logged.vol_mult <= hi
     # the plain form is a single rng.uniform per field, in field order
     rng = np.random.default_rng(5)
-    rg = RANGES["pump_burst"]["train"]
+    rg = _with_vol([lo, hi])["pump_burst"]["train"]
     want = [float(rng.uniform(*rg[k])) for k in ("duration_s", "impact", "vol_mult")]
     assert [plain.duration_s, plain.impact, plain.vol_mult] == want
 
