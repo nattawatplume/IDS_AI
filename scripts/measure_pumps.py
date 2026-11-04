@@ -20,25 +20,43 @@ that parameter reads back as (about) the same value. For a label at time `t0` on
   `ws = t0 - SEARCH_BEFORE_S`; inject's `impact` multiplies the unmodified real price, which this
   stands for.
 - `impact`: `max trade price in [ws, t0 + SEARCH_AFTER_S) / p_ref - 1`; the time of that trade is
-  `t_peak` (inject's price peaks at `t_start + duration_s`). Labels with `impact < MIN_IMPACT`
-  show no pump in the price and are excluded (`no_rise`).
+  `t_peak` (inject's price peaks at `t_start + duration_s`). A label without a real rise is
+  excluded: `impact < MIN_IMPACT` (`no_rise`; one tick of an illiquid BTC pair is already ~1 %)
+  or a peak more than `PEAK_MAX_AFTER_S` after `t0` (`late_peak`, a later noise high).
 - `duration_s`: inject ramps the price linearly from `p_ref` to `p_ref * (1 + impact)` over
   `duration_s`. `t10` is the last trade in `[ws, t_peak)` priced at or below
-  `p_ref * (1 + RAMP_FRAC * impact)` (`ws` if there is none), and
-  `duration_s = max((t_peak - t10) / (1 - RAMP_FRAC), MIN_DURATION_S)`, the linear-ramp
-  extrapolation; the estimated pump start is `t_s = t_peak - duration_s`.
-- `vol_mult`: inject adds `vol_mult * base` quote per second during the ramp on top of the real
-  flow, so `vol_mult = (quote volume of trades in [t_s, t_peak] / duration_s - background) / base`
-  where `background` is the quote volume per second of the reference window.
-- `rush_size`: inject places taker-buy fills in clusters of `rush_size` sharing one millisecond.
-  Taker buys in `[t_s, t_peak]` are grouped by millisecond (`ts_us // 1000`) and `rush_size` is
-  the median group size.
+  `p_ref * (1 + RAMP_FRAC * impact)`, and `duration_s = max((t_peak - t10) / (1 - RAMP_FRAC),
+  MIN_DURATION_S)`, the linear-ramp extrapolation; the estimated pump start is
+  `t_s = t_peak - duration_s`. With no such trade the price was already up at `ws`, so the
+  ramp start is not seen: `t10 = ws`, the label is flagged `duration_censored` and its duration
+  is left out of the `duration_s` quantiles (`duration_s_incl_censored` keeps it).
+- `vol_mult`: inject adds `vol_mult * base` of taker-BUY quote per second during the ramp on top
+  of the real flow, so `vol_mult = (taker-buy quote in [t_s, t_peak] / duration_s - buy_bg) / base`.
+  `buy_bg = min(taker-buy quote/s of the reference hour, taker-buy quote/s of day D-1)`: the real
+  buy flow inject's pump sits on (the hour before a pump is often already elevated, and taking
+  the smaller of the two keeps that from eating the pump). `vol_mult <= 0` means no buying
+  above the normal flow: excluded (`no_volume`).
+- `rush_size`: inject places all its taker-buy quote in clusters of exactly `rush_size` fills
+  sharing one millisecond. Taker buys in `[t_s, t_peak]` are grouped by millisecond
+  (`ts_us // 1000`) and `rush_size` is the quote-weighted median group size (each group weighs
+  its quote sum), i.e. the cluster size that carries the median unit of buy volume. Counting
+  groups instead would let many small retail single fills hide the market orders that sweep
+  the book (the store holds raw trades, one row per fill).
 - `dump_tau_s`: after the peak inject decays the excess as `impact * exp(-(t - t_peak) / tau)`.
   Trades in `(t_peak, t_peak + POST_S]` are bucketed into `DUMP_BUCKET_S` buckets from `t_peak`;
   `dump_tau_s` is the midpoint of the first bucket whose median price is at or below
-  `p_ref * (1 + impact / e)`. If no bucket gets there, it is not measurable (None) for that label.
+  `p_ref * (1 + impact / e)`. If no bucket gets there it is None (right-censored, counted as
+  `n_dump_censored`; the tau quantiles are biased short by that many).
+- `overlaps_label`: another REAL label of the same symbol lies within the read span
+  `[ws - REF_S, t0 + SEARCH_AFTER_S + POST_S]`; flagged and counted, not excluded.
+- `vol_quote_base_s = vol_mult * duration_s` (uncensored only): injected volume in seconds of
+  base. vol_mult and duration are anti-correlated in real pumps, so independent draws from both
+  ranges overshoot this; the suggested block therefore samples vol_mult log-uniformly
+  (`{log: [lo, hi]}`, see `sample_scenario`).
 
     uv run python scripts/measure_pumps.py [--config configs/default.yaml] [--out PATH]
+
+Do not run it with the default `--out` (inside `data/`) while a download is writing there.
 """
 
 import argparse
@@ -67,10 +85,12 @@ REF_S = 3600  # reference window: the hour before the search window
 POST_S = 3600  # dump search after the peak
 DUMP_BUCKET_S = 10
 RAMP_FRAC = 0.1  # price level (fraction of the impact) that marks the ramp start
-MIN_IMPACT = 0.01  # below this the label shows no pump in the price
+MIN_IMPACT = 0.03  # below this the label shows no pump in the price
+PEAK_MAX_AFTER_S = 600  # a peak later than this after the label is not the announced pump
 MIN_DURATION_S = 1.0
 QUANTILES = (0.1, 0.5, 0.9)
 PARAMS = ("duration_s", "impact", "vol_mult", "rush_size", "dump_tau_s")
+EXTRA_QUANTILES = ("duration_s_incl_censored", "vol_quote_base_s")
 # lower bounds of a suggested range, so every sampled scenario is a valid injection
 FLOORS = {
     "duration_s": 1.0,
@@ -88,6 +108,8 @@ EXCLUDE_REASONS = (
     "no_reference_trades",
     "no_window_trades",
     "no_rise",
+    "late_peak",
+    "no_volume",
 )
 
 
@@ -165,12 +187,35 @@ def load_labels(cfg: Settings, source: str, db_path: Path) -> tuple[pl.DataFrame
 
 
 # ------------------------------------------------------------------ measurement
+def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Smallest value whose cumulative weight (values ascending) reaches half the total."""
+    order = np.argsort(values, kind="stable")
+    v, w = values[order], weights[order]
+    cum = np.cumsum(w)
+    return float(v[np.searchsorted(cum, 0.5 * cum[-1], side="left")])
+
+
+def rush_cluster_size(buys: pl.DataFrame) -> float | None:
+    """Quote-weighted median number of taker-buy fills per millisecond (None without buys)."""
+    if buys.height == 0:
+        return None
+    groups = buys.group_by(pl.col("ts_us") // 1000).agg(
+        pl.len().alias("n"), pl.col("quote_qty").sum().alias("q")
+    )
+    n = groups["n"].to_numpy().astype(np.float64)
+    q = groups["q"].to_numpy().astype(np.float64)
+    if not q.sum() > 0:
+        return float(np.median(n))
+    return weighted_median(n, q)
+
+
 def measure_window(
-    trades: pl.DataFrame, t0: int, base: float, p_ref: float, background: float
+    trades: pl.DataFrame, t0: int, base: float, p_ref: float, buy_bg: float
 ) -> dict[str, Any]:
     """Measure one pump in `trades` (which must cover `[t0 - SEARCH_BEFORE_S, peak + POST_S]`).
 
-    Returns the measured fields, or `{"status": reason}` when nothing can be measured.
+    `buy_bg` is the real taker-buy quote per second the pump sits on. Returns the measured
+    fields with `status == "measured"`, or a status naming the exclusion reason.
     """
     ts = trades["ts_us"].to_numpy()
     price = trades["price"].to_numpy().astype(np.float64)
@@ -185,25 +230,26 @@ def measure_window(
     out: dict[str, Any] = {"t_peak_us": t_peak, "impact": impact}
     if impact < MIN_IMPACT:
         return {"status": "no_rise", **out}
+    if t_peak - t0 > PEAK_MAX_AFTER_S * S_US:
+        return {"status": "late_peak", **out}
 
     level = p_ref * (1.0 + RAMP_FRAC * impact)
     below = np.nonzero(price[lo:i_peak] <= level)[0]
-    t10 = int(ts[lo + below[-1]]) if below.size else ws
+    censored = below.size == 0
+    t10 = ws if censored else int(ts[lo + below[-1]])
     duration_s = max((t_peak - t10) / S_US / (1.0 - RAMP_FRAC), MIN_DURATION_S)
     t_s = t_peak - int(round(duration_s * S_US))
-
-    in_pump = (ts >= t_s) & (ts <= t_peak)
-    rate = float(trades["quote_qty"].to_numpy()[in_pump].sum()) / duration_s
-    vol_mult = (rate - background) / base
+    out.update(t_start_est_us=t_s, duration_s=duration_s, duration_censored=bool(censored))
 
     buys = trades.filter(
         (pl.col("ts_us") >= t_s) & (pl.col("ts_us") <= t_peak) & (pl.col("taker_side") == "buy")
     )
-    if buys.height:
-        sizes = buys.group_by(pl.col("ts_us") // 1000).len()["len"].to_numpy()
-        rush_size = float(np.median(sizes))
-    else:
-        rush_size = None
+    buy_rate = float(buys["quote_qty"].sum()) / duration_s
+    vol_mult = (buy_rate - buy_bg) / base
+    out["vol_mult"] = vol_mult
+    if not vol_mult > 0:
+        return {"status": "no_volume", **out}
+    rush_size = rush_cluster_size(buys)
 
     post = trades.filter((pl.col("ts_us") > t_peak) & (pl.col("ts_us") <= t_peak + POST_S * S_US))
     dump_tau_s = None
@@ -218,15 +264,7 @@ def measure_window(
         if hit.height:
             dump_tau_s = (int(hit["b"][0]) + 0.5) * DUMP_BUCKET_S
 
-    return {
-        "status": "measured",
-        **out,
-        "t_start_est_us": t_s,
-        "duration_s": duration_s,
-        "vol_mult": vol_mult,
-        "rush_size": rush_size,
-        "dump_tau_s": dump_tau_s,
-    }
+    return {"status": "measured", **out, "rush_size": rush_size, "dump_tau_s": dump_tau_s}
 
 
 def measure_label(data_dir: Path, symbol: str, t0: int) -> dict[str, Any]:
@@ -250,9 +288,32 @@ def measure_label(data_dir: Path, symbol: str, t0: int) -> dict[str, Any]:
     if ref.height == 0:
         return {"status": "no_reference_trades", "base_quote_per_s": base}
     p_ref = float(ref["price"].median())
-    background = float(ref["quote_qty"].sum()) / REF_S
-    res = measure_window(trades.filter(pl.col("ts_us") >= ws), t0, base, p_ref, background)
-    return {"base_quote_per_s": base, "p_ref": p_ref, "background_quote_per_s": background, **res}
+    is_buy = pl.col("taker_side") == "buy"
+    ref_buy = float(ref.filter(is_buy)["quote_qty"].sum()) / REF_S
+    prev_buy = float(prev_trades.filter(is_buy)["quote_qty"].sum()) / 86_400
+    buy_bg = min(ref_buy, prev_buy)
+    res = measure_window(trades.filter(pl.col("ts_us") >= ws), t0, base, p_ref, buy_bg)
+    return {
+        "base_quote_per_s": base,
+        "p_ref": p_ref,
+        "ref_buy_quote_per_s": ref_buy,
+        "prev_day_buy_quote_per_s": prev_buy,
+        "buy_bg_quote_per_s": buy_bg,
+        **res,
+    }
+
+
+def overlap_flags(labels: pl.DataFrame) -> dict[str, bool]:
+    """label_id -> whether another label of the same symbol lies inside its read span."""
+    before = (SEARCH_BEFORE_S + REF_S) * S_US
+    after = (SEARCH_AFTER_S + POST_S) * S_US
+    flags: dict[str, bool] = {}
+    for _, grp in labels.partition_by("symbol", as_dict=True).items():
+        t = grp["t_start_us"].to_numpy()
+        for lid, t0 in zip(grp["label_id"].to_list(), t, strict=True):
+            others = np.delete(t, np.flatnonzero(t == t0)[:1])
+            flags[lid] = bool(((others >= t0 - before) & (others <= t0 + after)).any())
+    return flags
 
 
 # ------------------------------------------------------------------ summary
@@ -270,14 +331,15 @@ def _num(x: float, decimals: int) -> float | int:
 
 def suggest_train(qs: dict[str, dict[str, Any]], current: dict[str, Any]) -> tuple[dict, list]:
     """Suggested `pump_burst.train` block (10-90 % ranges) and the parameters kept as they are
-    because nothing could be measured for them."""
-    block: dict[str, list] = {}
+    because nothing could be measured for them. vol_mult uses the log-uniform form
+    `{log: [lo, hi]}`, so its sampled median sits near the real one."""
+    block: dict[str, Any] = {}
     kept = []
     for p in PARAMS:
         q = qs[p]
         if q["n"] == 0:
             if p in current:
-                block[p] = list(current[p])
+                block[p] = current[p]
             kept.append(p)
             continue
         floor = FLOORS[p]
@@ -288,7 +350,7 @@ def suggest_train(qs: dict[str, dict[str, Any]], current: dict[str, Any]) -> tup
             d = DECIMALS[p]
             lo = _num(max(floor, q["q10"]), d)
             hi = _num(max(lo, q["q90"]), d)
-        block[p] = [lo, hi]
+        block[p] = {"log": [lo, hi]} if p == "vol_mult" else [lo, hi]
     return block, kept
 
 
@@ -300,6 +362,7 @@ def run(cfg: Settings, labels: pl.DataFrame, label_source: str) -> dict[str, Any
     data_dir = Path(cfg.paths.data_dir)
     excluded = dict.fromkeys(EXCLUDE_REASONS, 0)
     not_train_by_period: dict[str, int] = {}
+    overlaps = overlap_flags(labels)
     records = []
     for lab in labels.iter_rows(named=True):
         t0 = int(lab["t_start_us"])
@@ -319,13 +382,23 @@ def run(cfg: Settings, labels: pl.DataFrame, label_source: str) -> dict[str, Any
                 "symbol": lab["symbol"],
                 "t_start_us": t0,
                 "day": day.isoformat(),
+                "overlaps_label": overlaps[lab["label_id"]],
                 **res,
             }
         )
     measured = [r for r in records if r["status"] == "measured"]
+    uncensored = [r for r in measured if not r["duration_censored"]]
     qs = {p: quantiles([r[p] for r in measured]) for p in PARAMS}
+    qs["duration_s"] = quantiles([r["duration_s"] for r in uncensored])
+    qs["duration_s_incl_censored"] = quantiles([r["duration_s"] for r in measured])
+    qs["vol_quote_base_s"] = quantiles([r["vol_mult"] * r["duration_s"] for r in uncensored])
+    flags = {
+        "n_duration_censored": len(measured) - len(uncensored),
+        "n_dump_censored": sum(r["dump_tau_s"] is None for r in measured),
+        "n_overlaps_label": sum(r["overlaps_label"] for r in measured),
+    }
     current = load_scenario_ranges().get("pump_burst", {}).get("train", {})
-    block, kept = suggest_train(qs, current)
+    block, kept = suggest_train({p: qs[p] for p in PARAMS}, current)
     return {
         "generated_by": "scripts/measure_pumps.py",
         "label_source": label_source,
@@ -338,12 +411,14 @@ def run(cfg: Settings, labels: pl.DataFrame, label_source: str) -> dict[str, Any
             "dump_bucket_s": DUMP_BUCKET_S,
             "ramp_frac": RAMP_FRAC,
             "min_impact": MIN_IMPACT,
+            "peak_max_after_s": PEAK_MAX_AFTER_S,
             "floors": FLOORS,
         },
         "n_labels": labels.height,
         "n_train_labels": len(records),
         "n_measured": len(measured),
         "excluded": excluded,
+        "flags": flags,
         "not_train_by_period": dict(sorted(not_train_by_period.items())),
         "quantiles": qs,
         "suggested_pump_burst_train": block,
@@ -372,15 +447,17 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
             if result["excluded"]["not_train"]
             else ""
         ),
-        "parameter       n      q10        q50        q90",
+        "flags (measured labels, not excluded): "
+        + ", ".join(f"{k} {v}" for k, v in result["flags"].items()),
+        "parameter                   n      q10        q50        q90",
     ]
     for p, q in result["quantiles"].items():
         if q["n"]:
             lines.append(
-                f"{p:<12} {q['n']:>4} {q['q10']:>10.4g} {q['q50']:>10.4g} {q['q90']:>10.4g}"
+                f"{p:<24} {q['n']:>4} {q['q10']:>10.4g} {q['q50']:>10.4g} {q['q90']:>10.4g}"
             )
         else:
-            lines.append(f"{p:<12} {0:>4}  not measurable")
+            lines.append(f"{p:<24} {0:>4}  not measurable")
     lines.append("suggested scenarios.yaml block (not applied):")
     block = {"pump_burst": {"train": result["suggested_pump_burst_train"]}}
     lines.extend(yaml.safe_dump(block, default_flow_style=None, sort_keys=False).splitlines())
