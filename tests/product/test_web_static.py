@@ -262,3 +262,14 @@ def test_time_to_detect_counts_only_new_alerts(tmp_path):
     js = str(WEB_DIR / "app.js")
     r = subprocess.run([node, str(script), js], capture_output=True, text=True, cwd=tmp_path)
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+HTML_TAGS = set(
+    "a button dd div dl dt em h1 h2 h3 h4 input label li ol option p section select small span"
+    " strong table tbody td th thead tr ul".split()
+)
+
+
+def test_el_builds_only_known_tags():
+    tags = set(re.findall(r'\bel\("([^"]+)"', text("app.js")))
+    assert tags and tags <= HTML_TAGS, sorted(tags - HTML_TAGS)

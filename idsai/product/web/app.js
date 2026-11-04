@@ -1253,7 +1253,7 @@ function pairedCard(paired) {
       ),
     );
   } else {
-    card.appendChild(el("paired", { class: "muted small" }, "ยังไม่มีผล"));
+    card.appendChild(el("p", { class: "muted small" }, "ยังไม่มีผล"));
   }
   if ((paired.notes || []).length) card.appendChild(el("ul", { class: "small" }, paired.notes.map((n) => el("li", {}, n))));
   return card;
