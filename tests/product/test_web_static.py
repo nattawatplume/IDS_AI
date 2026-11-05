@@ -25,7 +25,8 @@ from idsai.product.explainer import BANNED_TH
 
 VENDOR_JS = "vendor/lightweight-charts.standalone.production.js"
 PAGES = ("index.html", "app.js", "styles.css")
-ROUTES = ("#/monitor", "#/alerts", "#/redteam", "#/eval", "#/taxonomy", "#/about")
+ROUTES = ("#/home", "#/alerts", "#/simulate", "#/results", "#/activity")
+NAV_TH = ("หน้าหลัก", "การแจ้งเตือน", "ทดลองจำลอง", "ผลวัดระบบ")
 # the only absolute links the page may carry: attribution and About anchors, never a script source
 ALLOWED_URLS = {
     "https://www.tradingview.com/",
@@ -213,8 +214,10 @@ def test_every_element_app_js_targets_exists():
     ids = set(re.findall(r'\bid="([\w-]+)"', html))
     targets = set(re.findall(r'\$\("([\w-]+)"\)', js)) | set(re.findall(r'"(page-[\w-]+)"', js))
     assert targets and targets - ids == set()
-    for name in ("monitor", "alerts", "redteam", "eval", "taxonomy", "about"):
+    for name in ("home", "alerts", "simulate", "results"):
         assert f'data-route="{name}"' in html and f'"page-{name}"' in js
+    for page in ("home", "alerts", "alert", "simulate", "results", "activity", "login"):
+        assert f'id="page-{page}"' in html, page
 
 
 def test_live_mode_gates_replay_and_red_team():
@@ -328,31 +331,68 @@ def test_el_builds_only_known_tags():
     assert tags and tags <= HTML_TAGS, sorted(tags - HTML_TAGS)
 
 
-def test_both_themes_define_every_token():
-    css = text("styles.css")
-    tokens = ["--bg", "--panel", "--line", "--ink", "--dim", "--amber", "--red", "--green"]
-    blocks = [css.split(':root[data-theme="dark"]')[1], css.split(':root[data-theme="light"]')[1]]
-    for t in tokens:
-        assert re.search(rf"{t}\s*:", css.split("@media")[0]), t  # bare :root
-        for b in blocks:
-            assert re.search(rf"{t}\s*:", b.split("}")[0]), t
+def _nav_block(html: str) -> str:
+    m = re.search(r'<nav class="nav"[^>]*>(.*?)</nav>', html, re.S)
+    assert m, "no main nav"
+    return m.group(1)
 
 
-def test_theme_toggle_exists_and_is_wired():
-    assert 'id="theme-toggle"' in text("index.html")
+def test_shell_markup():
+    html = text("index.html")
+    links = re.findall(r"<a\b([^>]*)>(.*?)</a>", _nav_block(html), re.S)
+    labels = [" ".join(re.sub(r"<[^>]+>", " ", body).split()) for _, body in links]
+    assert tuple(labels) == NAV_TH, labels
+    for attrs, _ in links:
+        assert "data-route=" in attrs
+    assert 'id="theme-toggle"' not in html and "data-theme-choice" not in html
+    assert 'id="help-btn"' in html
+    for i in ("menu-activity", "menu-tour", "btn-logout"):
+        assert f'id="{i}"' in html, i
     js = text("app.js")
-    assert "function applyTheme(" in js and 'storageSet("theme"' in js
+    for gone in ("THEMES", "applyTheme", "chooseTheme", "bindTheme"):
+        assert gone not in js, gone
+    assert 'ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" }' in js
 
 
-def test_no_capsule_tabs_or_shadows():
+def test_glass_tokens():
     css = text("styles.css")
-    assert "box-shadow" not in css
-    assert not re.search(r"border-radius:\s*(?:[5-9]|\d{2,})px", css)
+    for decl in ("--bg: #0b0820", "--ok: #3ee08f", "--warn: #ffb547", "--bad: #ff5d73"):
+        assert decl in css, decl
+    assert "backdrop-filter" in css and "@supports not (backdrop-filter" in css
+    assert "prefers-reduced-motion: reduce" in css
+    assert "background-clip: text" not in css and "-webkit-background-clip" not in css
+    assert 'data-theme="light"' not in css and "prefers-color-scheme" not in css
+    # the accent gradient: only on the primary button and the active nav pill
+    accent = list(re.finditer(r"([^{}]+)\{[^}]*linear-gradient\([^)]*--violet", css))
+    assert accent
+    for m in accent:
+        sel = " ".join(m.group(1).split())
+        assert "primary" in sel or 'aria-current="page"' in sel, sel
+    assert "#8b5cf6" in css and "#3b82f6" in css
+    assert "@keyframes drift" in css and ".bg" in css
+    weights = set(re.findall(r"font-weight:\s*(\d+)", css))
+    assert weights <= {"400", "600"}, weights
+
+
+# emoji and pictographs; dingbats such as check marks and play/pause glyphs stay allowed
+EMOJI = re.compile("[\U0001f300-\U0001faff☀-⛿]")
+THAI = re.compile("[฀-๿]")
+JS_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"' + r"|'(?:[^'\\\n]|\\.)*'" + r"|`(?:[^`\\]|\\.)*`")
+
+
+def test_no_emoji_or_bang_in_copy():
+    html_text = re.sub(r"<!--.*?-->|<[^>]+>", "\n", text("index.html"), flags=re.S)
+    js_strings = JS_STRING.findall(text("app.js"))
+    for chunk in [html_text, *js_strings]:
+        assert not EMOJI.search(chunk), chunk[:80]
+    for chunk in [*html_text.split("\n"), *js_strings]:
+        if THAI.search(chunk):
+            assert "!" not in chunk, chunk[:80]
 
 
 def test_auditor_popup_is_anchored_inside_the_viewport_when_narrow():
     css = text("styles.css")
-    m = re.search(r"@media \(max-width: 760px\) \{(.*?)\n\}", css, re.S)
+    m = re.search(r"@media \(max-width: 720px\) \{(.*?)\n\}", css, re.S)
     assert m, "no narrow media block"
     block = m.group(1)
     assert re.search(r"\.auditor\s*\{\s*position:\s*static", block)
@@ -374,26 +414,53 @@ const k = m.presenterKey;
 assert.strictEqual(k({ key: " ", target: { tagName: "INPUT" } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "SELECT" } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "TEXTAREA" } }), null);
-assert.strictEqual(k({ key: " ", target: { tagName: "DIV" } }), "toggle-play");
-assert.strictEqual(k({ key: "4", target: { tagName: "BODY" } }), "page:4");
-assert.strictEqual(k({ key: "7", target: { tagName: "BODY" } }), null);
-assert.strictEqual(k({ key: "t", target: { tagName: "BODY" } }), "theme");
+assert.strictEqual(k({ key: "1", target: { tagName: "INPUT" } }), null);
+assert.strictEqual(k({ key: "?", target: { tagName: "TEXTAREA" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "DIV" } }), "play");
+assert.strictEqual(k({ key: " " }), "play");
+assert.strictEqual(k({ key: "?" }), "help");
+assert.strictEqual(k({ key: "1" }), "#/home");
+assert.strictEqual(k({ key: "2", target: { tagName: "BODY" } }), "#/alerts");
+assert.strictEqual(k({ key: "3", target: { tagName: "BODY" } }), "#/simulate");
+assert.strictEqual(k({ code: "Digit4" }), "#/results");
+assert.strictEqual(k({ key: "5", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "t" }), null);
+assert.strictEqual(k({ key: "T" }), null);
 assert.strictEqual(k({ key: "t", ctrlKey: true, target: { tagName: "BODY" } }), null);
 assert.strictEqual(k({ key: "1", metaKey: true, target: { tagName: "BODY" } }), null);
 assert.strictEqual(k({ key: "1", altKey: true, target: { tagName: "BODY" } }), null);
 // a Thai layout changes ev.key: the physical ev.code still drives the keys
-assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "BODY" } }), "theme");
-assert.strictEqual(k({ key: "ๅ", code: "Digit1", target: { tagName: "BODY" } }), "page:1");
-assert.strictEqual(k({ key: "ภ", code: "Digit6", target: { tagName: "BODY" } }), "page:6");
-assert.strictEqual(k({ key: "ๅ", code: "Numpad3", target: { tagName: "BODY" } }), "page:3");
-assert.strictEqual(k({ key: "ๅ", code: "Digit7", target: { tagName: "BODY" } }), null);
-assert.strictEqual(k({ key: "ๅ", code: "Digit0", target: { tagName: "BODY" } }), null);
-assert.strictEqual(k({ key: "Spacebar", code: "Space", target: { tagName: "BODY" } }),
-  "toggle-play");
-assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "INPUT" } }), null);
-assert.strictEqual(k({ key: "ะ", code: "KeyT", ctrlKey: true, target: { tagName: "BODY" } }), null);
-assert.strictEqual(m.PAGE_ORDER.length, 6);
-assert.strictEqual(m.PAGE_ORDER[0], "#/monitor");
+assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "ๅ", code: "Digit1", target: { tagName: "BODY" } }), "#/home");
+assert.strictEqual(k({ key: "ๅ", code: "Numpad3", target: { tagName: "BODY" } }), "#/simulate");
+assert.strictEqual(k({ key: "ๅ", code: "Digit5", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "ฦ", code: "Slash", shiftKey: true }), "help");
+assert.strictEqual(k({ key: "Spacebar", code: "Space", target: { tagName: "BODY" } }), "play");
+assert.deepStrictEqual(m.PAGE_ORDER, ["#/home", "#/alerts", "#/simulate", "#/results"]);
+assert.strictEqual(m.DEFAULT_ROUTE, "#/home");
+"""
+
+ROUTE_BODY = r"""
+const r = m.routeFor;
+assert.deepStrictEqual(r("#/monitor"), { route: "#/home", help: false });
+assert.deepStrictEqual(r("#/redteam"), { route: "#/simulate", help: false });
+assert.deepStrictEqual(r("#/eval"), { route: "#/results", help: false });
+assert.deepStrictEqual(r("#/about"), { route: "#/home", help: true });
+assert.deepStrictEqual(r("#/taxonomy"), { route: "#/home", help: true });
+assert.deepStrictEqual(r("#/alerts/abc"), { route: "#/alerts/abc", help: false });
+assert.deepStrictEqual(r("#/alerts"), { route: "#/alerts", help: false });
+assert.deepStrictEqual(r("#/home"), { route: "#/home", help: false });
+assert.deepStrictEqual(r("#/simulate"), { route: "#/simulate", help: false });
+assert.deepStrictEqual(r("#/results"), { route: "#/results", help: false });
+assert.deepStrictEqual(r("#/activity"), { route: "#/activity", help: false });
+const login = "#/login?next=%23%2Falerts";
+assert.deepStrictEqual(r(login), { route: login, help: false });
+assert.deepStrictEqual(r("#/login"), { route: "#/login", help: false });
+assert.deepStrictEqual(r(""), { route: "#/home", help: false });
+assert.deepStrictEqual(r(undefined), { route: "#/home", help: false });
+assert.deepStrictEqual(r("#/nope"), { route: "#/home", help: false });
+assert.deepStrictEqual(r("#/monitorx"), { route: "#/home", help: false });
+assert.deepStrictEqual(r("#/alerts/"), { route: "#/alerts", help: false });
 """
 
 TWEEN_BODY = r"""
@@ -418,6 +485,10 @@ def _run_motion(tmp_path, reduced, body):
 
 def test_presenter_keys_skip_fields(tmp_path):
     _run_motion(tmp_path, "false", PRESENTER_BODY)
+
+
+def test_route_for_redirects(tmp_path):
+    _run_motion(tmp_path, "false", ROUTE_BODY)
 
 
 def test_tween_snaps_under_reduced_motion(tmp_path):
@@ -674,7 +745,7 @@ def test_ablation_notes_cell_wraps():
 
 def test_long_explanations_live_on_about():
     html = text("index.html")
-    mon = re.search(r'<section id="page-monitor".*?</section>', html, re.S).group(0)
+    mon = re.search(r'<section id="page-home".*?</section>', html, re.S).group(0)
     for m in re.finditer(r'<p\b([^>]*)>(.*?)</p>', mon, re.S):
         if 'id="chart-info-body"' in m.group(1):
             continue
@@ -749,7 +820,7 @@ assert.strictEqual(s("#/eval"), "#/eval");
 assert.strictEqual(s("#/alerts/abc%20d"), "#/alerts/abc%20d");
 for (const bad of ["https://x", "//x", "", null, undefined, "eval", "javascript:alert(1)",
   "#/login?next=%23%2Fx", "#/\nx", 42]) {
-  assert.strictEqual(s(bad), "#/monitor", String(bad));
+  assert.strictEqual(s(bad), "#/home", String(bad));
 }
 """
 

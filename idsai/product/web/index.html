@@ -3,60 +3,58 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="dark">
   <title>Market IDS</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div class="bg" aria-hidden="true"><span class="blob blob-1"></span><span class="blob blob-2"></span><span class="blob blob-3"></span></div>
+
   <header class="topbar">
-    <div class="brand">
-      <span class="brand-name">MARKET·IDS</span>
-      <span id="mode-badge" class="badge badge-mode">…</span>
-    </div>
-    <nav class="tabs" aria-label="หน้า">
-      <a href="#/monitor" data-route="monitor">Monitor</a>
-      <a href="#/alerts" data-route="alerts">Alerts</a>
-      <a href="#/redteam" data-route="redteam">Red-Team</a>
-      <a href="#/eval" data-route="eval">Eval</a>
-      <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
-      <a href="#/about" data-route="about">About</a>
-      <a href="#/activity" data-route="activity" id="tab-activity" hidden>Activity</a>
+    <a class="brand" href="#/home" aria-label="Market IDS หน้าหลัก">
+      <svg class="brand-mark" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false">
+        <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="8" fill="rgba(139, 92, 246, 0.18)" stroke="rgba(255, 255, 255, 0.16)" stroke-width="1.5"/>
+        <path d="M7 18.5l4.5-5.5 3.5 3.5 6-8" stroke="#c4b5fd" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="21" cy="8.5" r="1.75" fill="#eef0ff"/>
+      </svg>
+      <span class="brand-name">Market IDS</span>
+    </a>
+    <nav class="nav" aria-label="หน้า">
+      <a href="#/home" data-route="home"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></svg><span>หน้าหลัก</span></a>
+      <a href="#/alerts" data-route="alerts"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span>การแจ้งเตือน</span></a>
+      <a href="#/simulate" data-route="simulate"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><path d="M10.25 8.75 15.25 12l-5 3.25z"/></svg><span>ทดลองจำลอง</span></a>
+      <a href="#/results" data-route="results"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 20h16M6.5 20v-7M12 20V5.5M17.5 20v-10"/></svg><span>ผลวัดระบบ</span></a>
     </nav>
-    <div class="topbar-stats">
-      <div class="stat" title="เวลาเหตุการณ์">
+    <div class="topbar-side">
+      <span class="chip mode-chip" title="โหมดข้อมูลและเวลาเหตุการณ์ (UTC)">
         <span id="live-dot" class="dot"></span>
+        <span id="mode-badge" class="badge-mode">…</span>
         <span id="clock" class="clock">–</span>
-      </div>
+      </span>
       <details id="auditor" class="stat auditor">
-        <summary>
-          <span class="stat-label">Auditor</span>
-          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text" class="small">กำลังโหลด…</span></span>
+        <summary class="chip">
+          <span class="stat-label">ตรวจระบบ</span>
+          <span id="auditor-dot" class="dot"></span><span id="auditor-text">กำลังโหลด…</span>
         </summary>
         <ul id="auditor-checks" class="auditor-checks"></ul>
       </details>
-      <div class="stat budget" title="งบการแจ้งเตือน (24 ชม.ล่าสุด)">
-        <span class="stat-label">งบ</span>
-        <span class="stat-value">
-          <span id="budget-meter" class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
-          <span id="budget-text" class="mono small">–</span>
-        </span>
+      <div class="chip budget" title="งบการแจ้งเตือน (24 ชม.ล่าสุด)">
+        <span class="stat-label">งบเตือน</span>
+        <span id="budget-meter" class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
+        <span id="budget-text" class="mono">–</span>
       </div>
-      <details id="user-chip" class="stat user-chip" hidden>
-        <summary>
-          <span id="user-name" class="small">–</span>
-          <span id="user-role" class="badge">–</span>
+      <button id="help-btn" class="icon-btn" type="button" aria-label="วิธีใช้" title="วิธีใช้ (กด ?)">?</button>
+      <details id="user-chip" class="user-chip" hidden>
+        <summary class="chip" aria-label="เมนูผู้ใช้">
+          <span id="user-name">–</span>
+          <span id="user-role" class="role">–</span>
         </summary>
         <div class="user-menu">
-          <div class="menu-label">ธีม</div>
-          <div class="menu-row">
-            <button type="button" class="mini" data-theme-choice="auto">AUTO</button>
-            <button type="button" class="mini" data-theme-choice="dark">DARK</button>
-            <button type="button" class="mini" data-theme-choice="light">LIGHT</button>
-          </div>
+          <a id="menu-activity" href="#/activity" data-route="activity" hidden>กิจกรรม</a>
+          <button id="menu-tour" type="button">ดูทัวร์อีกครั้ง</button>
           <button id="btn-logout" type="button">ออกจากระบบ</button>
         </div>
       </details>
-      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="ธีม">AUTO</button>
     </div>
   </header>
 
@@ -86,8 +84,8 @@
       </form>
     </section>
 
-    <!-- Monitor -->
-    <section id="page-monitor" class="page" hidden>
+    <!-- Home (redesigned in a later task) -->
+    <section id="page-home" class="page" hidden>
       <div class="toolbar">
         <label class="field">
           <span>สัญลักษณ์</span>
@@ -167,9 +165,9 @@
       <div id="alert-detail"></div>
     </section>
 
-    <!-- Red-Team -->
-    <section id="page-redteam" class="page" hidden>
-      <h1>Red-Team</h1>
+    <!-- Simulate (redesigned in a later task) -->
+    <section id="page-simulate" class="page" hidden>
+      <h1>ทดลองจำลอง</h1>
       <p class="muted small">ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่กำลังเล่นย้อนหลัง (เฉพาะสำเนาในหน่วยความจำ) แล้วจับเวลาจนระบบพบความผิดปกติทางสถิติ</p>
       <!-- fail closed: disabled until /api/health confirms replay or sim (app.js setMode) -->
       <div id="redteam-refused" class="banner banner-fail">Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)</div>
@@ -205,13 +203,13 @@
       <div id="rt-runs"></div>
     </section>
 
-    <!-- Eval -->
-    <section id="page-eval" class="page" hidden>
-      <h1>ผลการประเมิน</h1>
+    <!-- Results (redesigned in a later task) -->
+    <section id="page-results" class="page" hidden>
+      <h1>ผลวัดระบบ</h1>
       <div id="eval-body"></div>
     </section>
 
-    <!-- Taxonomy -->
+    <!-- Taxonomy: not routed; a later task moves it into the help drawer -->
     <section id="page-taxonomy" class="page" hidden>
       <h1>ATT&amp;CK for Markets</h1>
       <p class="muted small">กรอบเทคนิคที่ทีมสร้างขึ้นเพื่อการศึกษา (ไม่ใช่มาตรฐานทางการ)</p>
@@ -220,7 +218,7 @@
 
     <!-- Activity (admin) -->
     <section id="page-activity" class="page" hidden>
-      <h1>Activity</h1>
+      <h1>กิจกรรม</h1>
       <p class="muted small">บันทึกการใช้งานของผู้ใช้ทุกคน เรียงใหม่สุดก่อน (เฉพาะ admin)</p>
       <div class="toolbar">
         <label class="field">
@@ -245,7 +243,7 @@
       <p><button id="audit-more" type="button">โหลดเก่ากว่านี้</button></p>
     </section>
 
-    <!-- About -->
+    <!-- About: not routed; a later task moves it into the help drawer -->
     <section id="page-about" class="page prose" hidden>
       <h1>เกี่ยวกับ Market IDS</h1>
       <p>Market IDS เป็นต้นแบบเพื่อการศึกษาในวิชา CPE102 ใช้แนวคิดของระบบตรวจจับการบุกรุก (IDS) กับข้อมูลการซื้อขายคริปโตสาธารณะ

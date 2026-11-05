@@ -84,7 +84,9 @@ const AUDIT_ACTIONS = [
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
 ];
 const NEED_ANALYST_TH = "ต้องเป็น analyst";
-const DEFAULT_ROUTE = "#/monitor";
+const DEFAULT_ROUTE = "#/home";
+const ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" };
+const MODE_TH = { replay: "ย้อนดู", live: "สด", sim: "จำลอง" };
 
 function setMe(me) {
   state.me = me && typeof me === "object" ? me : null;
@@ -253,7 +255,8 @@ function storageSet(key, value) {
 
 // ------------------------------------------------------------------ prefs
 
-const PREF_KEYS = { theme: "theme", symbol: "idsai.symbol", eval_budget: "idsai.eval_budget" };
+// the server still accepts a saved `theme`; the page has one look and ignores it
+const PREF_KEYS = { symbol: "idsai.symbol", eval_budget: "idsai.eval_budget" };
 let prefsPending = {};
 let prefsTimer = null;
 
@@ -265,8 +268,6 @@ function authOn() {
 function loadedPrefs() {
   if (authOn()) return state.me.prefs || {};
   const out = {};
-  const theme = storageGet(PREF_KEYS.theme);
-  if (theme) out.theme = theme;
   const symbol = storageGet(PREF_KEYS.symbol);
   if (symbol) out.symbol = symbol;
   const raw = storageGet(PREF_KEYS.eval_budget);
@@ -316,49 +317,15 @@ function parentTechnique(id) {
 
 // ------------------------------------------------------------------ top bar
 
-const THEMES = ["auto", "dark", "light"];
+// the help drawer: a later task fills it; until then "?" and the old #/about, #/taxonomy links do nothing
+function openHelp() {}
 
-function currentTheme() {
-  const t = document.documentElement.dataset.theme;
-  return THEMES.includes(t) ? t : "auto";
-}
-
-function applyTheme(choice) {
-  const c = THEMES.includes(choice) ? choice : "auto";
-  if (c === "auto") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = c;
-  const btn = $("theme-toggle");
-  if (btn) {
-    btn.textContent = c.toUpperCase();
-    btn.title = `ธีม: ${c}`;
-  }
-  for (const b of document.querySelectorAll("[data-theme-choice]")) {
-    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === c));
-  }
-  storageSet("theme", c);
-  restyleCharts();
-}
-
-// a theme change the user made: apply it and remember it with the account
-function chooseTheme(choice) {
-  applyTheme(choice);
-  savePrefs({ theme: currentTheme() });
-}
-
-function bindTheme() {
-  const saved = storageGet("theme");
-  applyTheme(THEMES.includes(saved) ? saved : "auto");
-  $("theme-toggle").addEventListener("click", () => {
-    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
-  });
-  for (const b of document.querySelectorAll("[data-theme-choice]")) {
-    b.addEventListener("click", () => chooseTheme(b.dataset.themeChoice));
-  }
-}
+// the first-time tour: a later task fills it
+function startTour() {}
 
 // ------------------------------------------------------------------ motion + presenter keys
 
-const PAGE_ORDER = ["#/monitor", "#/alerts", "#/redteam", "#/eval", "#/taxonomy", "#/about"];
+const PAGE_ORDER = ["#/home", "#/alerts", "#/simulate", "#/results"];
 
 function reducedMotion() {
   const mm = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null;
@@ -405,18 +372,18 @@ function flash(node, cls = "flash") {
   node.classList.add(cls);
 }
 
+// "play", "help", one of PAGE_ORDER, or null; never while typing in a field
 function presenterKey(ev) {
   if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return null;
   // ev.code is the physical key: it still works when a Thai layout changes ev.key
+  const key = ev.key || "";
   const code = ev.code || "";
-  if (ev.key === " " || code === "Space") return "toggle-play";
-  if (ev.key === "t" || ev.key === "T" || code === "KeyT") return "theme";
-  if (/^[1-6]$/.test(ev.key || "")) return `page:${ev.key}`;
-  const digit = /^(?:Digit|Numpad)([1-6])$/.exec(code);
-  if (digit) return `page:${digit[1]}`;
-  return null;
+  if (key === " " || code === "Space") return "play";
+  if (key === "?" || (code === "Slash" && ev.shiftKey)) return "help";
+  const digit = /^[1-4]$/.test(key) ? key : (/^(?:Digit|Numpad)([1-4])$/.exec(code) || [])[1];
+  return digit ? PAGE_ORDER[Number(digit) - 1] : null;
 }
 
 // what Space should do now: the opposite of the replay state, nothing in LIVE or unknown mode
@@ -435,13 +402,13 @@ function onPresenterKey(ev) {
   const act = presenterKey(ev);
   if (!act) return;
   ev.preventDefault();
-  if (act === "toggle-play") {
+  if (act === "play") {
     const next = playToggleAction(state.mode, state.replaying);
     if (next) control(next);
-  } else if (act === "theme") {
-    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  } else if (act === "help") {
+    openHelp();
   } else {
-    location.hash = PAGE_ORDER[Number(act.slice(5)) - 1];
+    location.hash = act;
   }
 }
 
@@ -511,7 +478,7 @@ function setMode(mode) {
   lamp.classList.remove("ok", "fail");
   lamp.classList.add(mode === "live" ? "fail" : "ok");
   const badge = $("mode-badge");
-  badge.textContent = String(mode).toUpperCase();
+  badge.textContent = MODE_TH[mode] || String(mode);
   badge.className = `badge badge-mode ${mode}`;
   const live = mode === "live";
   $("replay-controls").hidden = live;
@@ -546,7 +513,7 @@ function applyRoleGates() {
     node.disabled = !ok;
     gate(node);
   }
-  $("tab-activity").hidden = !can("admin");
+  $("menu-activity").hidden = !can("admin");
 }
 
 function eventNowUs() {
@@ -576,7 +543,8 @@ function renderBudget() {
   const frac = budget > 0 ? rate / budget : 0;
   fill.style.width = `${Math.min(frac, 1) * 100}%`;
   fill.className = `meter-fill${frac > 1 ? " over" : frac >= 0.8 ? " warn" : ""}`;
-  $("budget-text").textContent = `${rate.toFixed(1)} / ${budget} ครั้งต่อสัญลักษณ์-วัน`;
+  $("budget-text").textContent = `${rate.toFixed(1)} / ${budget}`;
+  $("budget-text").title = `${rate.toFixed(1)} จากงบ ${budget} ครั้งต่อสัญลักษณ์ต่อวัน`;
   $("kpi-budget").textContent = `งบ ${budget}`;
   renderAlertsKpi(now);
 }
@@ -2018,17 +1986,32 @@ async function showTaxonomy() {
 const PAGES = {
   login: "page-login",
   activity: "page-activity",
-  monitor: "page-monitor",
+  home: "page-home",
   alerts: "page-alerts",
   alert: "page-alert",
-  redteam: "page-redteam",
-  eval: "page-eval",
-  taxonomy: "page-taxonomy",
-  about: "page-about",
+  simulate: "page-simulate",
+  results: "page-results",
 };
 
+// old links keep working: the 6-tab names map onto the 4 pages; About and Taxonomy live in help
+const ROUTE_REDIRECTS = { "#/monitor": "#/home", "#/redteam": "#/simulate", "#/eval": "#/results" };
+const HELP_ROUTES = ["#/about", "#/taxonomy"];
+const KNOWN_ROUTES = ["#/home", "#/alerts", "#/simulate", "#/results", "#/activity"];
+
+// where a hash should land: { route, help }; anything unknown goes home
+function routeFor(hash) {
+  const raw = typeof hash ==="string" ? hash : "";
+  if (ROUTE_REDIRECTS[raw]) return { route: ROUTE_REDIRECTS[raw], help: false };
+  if (HELP_ROUTES.includes(raw)) return { route: DEFAULT_ROUTE, help: true };
+  if (KNOWN_ROUTES.includes(raw)) return { route: raw, help: false };
+  if (raw === "#/alerts/") return { route: "#/alerts", help: false };
+  if (/^#\/alerts\/./.test(raw)) return { route: raw, help: false };
+  if (raw === "#/login" || raw.startsWith("#/login?")) return { route: raw, help: false };
+  return { route: DEFAULT_ROUTE, help: false };
+}
+
 function parseRoute() {
-  const hash = location.hash || "#/monitor";
+  const hash = routeFor(location.hash).route;
   const m = /^#\/alerts\/(.+)$/.exec(hash);
   if (m) {
     let id = m[1];
@@ -2041,10 +2024,17 @@ function parseRoute() {
   }
   const [path, query] = hash.replace(/^#\//, "").split("?");
   if (path === "login") return { name: "login", next: safeNext(new URLSearchParams(query || "").get("next")) };
-  return { name: PAGES[path] ? path : "monitor" };
+  return { name: PAGES[path] ? path : "home" };
 }
 
 function route() {
+  const hash = location.hash || "";
+  const target = routeFor(hash);
+  if (target.help) openHelp();
+  if (target.route !== hash) {
+    location.replace(target.route); // the hashchange that follows renders the page
+    return;
+  }
   const r = parseRoute();
   if (r.name === "activity" && !can("admin")) {
     // a convenience redirect: GET /api/audit answers 403 for anyone else anyway
@@ -2057,21 +2047,21 @@ function route() {
   }
   state.route = r.name;
   document.body.classList.toggle("login-mode", r.name === "login");
+  const chip = $("user-chip");
+  if (chip) chip.open = false;
   if (r.name !== "alert") destroyDetailChart();
   for (const [name, id] of Object.entries(PAGES)) $(id).hidden = name !== r.name;
   const tab = r.name === "alert" ? "alerts" : r.name;
-  for (const a of document.querySelectorAll(".tabs a")) {
+  for (const a of document.querySelectorAll(".nav a")) {
     if (a.dataset.route === tab) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  if (r.name === "monitor") {
+  if (r.name === "home") {
     initChart();
   } else if (r.name === "alert") {
     showAlert(r.id);
-  } else if (r.name === "eval") {
+  } else if (r.name === "results") {
     showEval();
-  } else if (r.name === "taxonomy") {
-    showTaxonomy();
   } else if (r.name === "activity") {
     showActivity();
   } else if (r.name === "login") {
@@ -2107,21 +2097,22 @@ function showLoginError(text) {
   box.textContent = text || "";
 }
 
+// with auth off the one local user is shown too, so the menu (activity, tour) stays reachable
 function renderUserChip() {
   const chip = $("user-chip");
+  const me = state.me;
+  chip.hidden = !me;
+  if (!me) return;
   const on = authOn();
-  chip.hidden = !on;
-  $("theme-toggle").hidden = on; // with an account the theme lives in the user menu
-  if (!on) return;
-  $("user-name").textContent = state.me.display_name || state.me.username;
-  $("user-role").textContent = String(state.me.role || "").toUpperCase();
+  $("user-name").textContent = on ? me.display_name || me.username : "ใช้งานในเครื่อง";
+  $("user-role").textContent = ROLE_TH[me.role] || "";
+  $("btn-logout").hidden = !on;
 }
 
 // the sign-in answer or /api/me: apply the account, its saved choices, and the role gates
 function adoptMe(me) {
   setMe(me);
   const prefs = loadedPrefs();
-  if (prefs.theme && THEMES.includes(prefs.theme)) applyTheme(prefs.theme);
   if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
   renderUserChip();
   applyRoleGates();
@@ -2372,7 +2363,11 @@ async function enterApp() {
 
 async function boot() {
   window.addEventListener("hashchange", safely(route));
-  bindTheme();
+  $("help-btn").addEventListener("click", openHelp);
+  $("menu-tour").addEventListener("click", () => {
+    $("user-chip").open = false;
+    startTour();
+  });
   bindLogin();
   bindActivity();
   document.addEventListener("keydown", safely(onPresenterKey));
@@ -2388,8 +2383,6 @@ async function boot() {
     renderAlertsKpi();
     loadSeries();
   });
-  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  if (media && media.addEventListener) media.addEventListener("change", safely(restyleCharts));
   if (!LWC) console.warn("dashboard: the chart library did not load");
 
   if (!(await loadMe())) {
@@ -2425,6 +2418,9 @@ if (typeof document !== "undefined") {
     noteReplayAction,
     getReplaying: () => state.replaying,
     PAGE_ORDER,
+    DEFAULT_ROUTE,
+    ROLE_TH,
+    routeFor,
     safeNext,
     isFramed,
     applyFramedHint,
