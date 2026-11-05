@@ -177,7 +177,7 @@ def test_login_lock_after_five(aenv, auth_client):
         now[0] = t
         r = login(c, "analyst")
         assert r.status_code == 401 and r.json() == {"detail": FAIL_TH}
-    assert actions(aenv.store).count("login_failed") == 8
+    assert actions(aenv.store).count("login_failed") == 6  # the locked attempts are one row
     assert "login" not in actions(aenv.store)
     # attempts during the lock did not extend it
     now[0] = 61.0
@@ -252,7 +252,7 @@ def test_concurrent_wrong_attempts_still_lock(aenv):
     rs = run_async(app, *[wrong() for _ in range(7)])
     assert all(r.status_code == 401 and r.json() == {"detail": FAIL_TH} for r in rs)
     reasons = [r["detail"]["reason"] for r in aenv.store.list_audit(500)]
-    assert reasons.count("password") == 5 and reasons.count("locked") == 2
+    assert reasons.count("password") == 5 and reasons.count("locked") == 1
     (ok,) = run_async(app, ("POST", "/api/auth/login", {"username": "analyst", "password": PW}))
     assert ok.status_code == 401  # still locked
     (other,) = run_async(app, ("POST", "/api/auth/login", {"username": "admin", "password": PW}))
@@ -495,3 +495,95 @@ def test_login_always_verifies_against_a_dummy_for_unknown_or_malformed_names(
     r = login(auth_client(), name)
     assert r.status_code == 401 and r.json() == {"detail": FAIL_TH}
     assert seen == [None]  # exactly one verify, with no stored hash: same cost as a real user
+
+
+def test_locked_audit_coalesced(aenv, auth_client):
+    c = auth_client()
+    for _ in range(5):
+        assert login(c, "analyst", "wrong-password").status_code == 401
+    for _ in range(5):
+        r = login(c, "analyst")
+        assert r.status_code == 401 and r.json() == {"detail": FAIL_TH}
+    reasons = [
+        r["detail"]["reason"] for r in aenv.store.list_audit(500) if r["action"] == "login_failed"
+    ]
+    assert reasons.count("locked") == 1 and reasons.count("password") == 5
+
+
+def test_login_waiter_cap(aenv, monkeypatch):
+    import asyncio
+    import secrets
+    import threading
+
+    import httpx
+
+    gate = threading.Event()
+    called: list[str] = []
+
+    def blocked(pw, stored):
+        called.append(pw)
+        gate.wait(10)
+        return False
+
+    monkeypatch.setattr(app_mod, "verify_or_dummy", blocked)
+    app = create_app(aenv.state)
+    n = app_mod.MAX_LOGIN_WAITERS + 1
+    creds = [(f"user{i:02d}", secrets.token_urlsafe(12)) for i in range(n)]
+
+    async def main():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            tasks = [
+                asyncio.create_task(
+                    c.post("/api/auth/login", json={"username": u, "password": p})
+                )
+                for u, p in creds
+            ]
+            try:
+                done, _ = await asyncio.wait(tasks, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+                assert done  # the over-cap one answers while the others still wait
+            finally:
+                gate.set()
+            return await asyncio.gather(*tasks)
+
+    rs = asyncio.run(main())
+    busy = [i for i, r in enumerate(rs) if r.status_code == 429]
+    assert busy
+    for i in busy:
+        assert rs[i].json() == {"detail": "ระบบไม่ว่าง ลองใหม่อีกครั้ง"}
+        u, p = creds[i]
+        assert u not in aenv.state.limiter._fails
+        assert p not in called
+    assert all(r.status_code == 401 for i, r in enumerate(rs) if i not in busy)
+
+
+def ws_close_code_after(aenv, c, monkeypatch, sign_out) -> int:
+    monkeypatch.setattr(app_mod, "WS_RECHECK_S", 0.05)
+    with pytest.raises(WebSocketDisconnect) as e:
+        with c.websocket_connect("/ws/stream") as ws:
+            assert ws.receive_json()["type"] == "health"
+            sign_out()
+            for _ in range(50):  # health arrives once a second; the close comes first
+                ws.receive_json()
+    return e.value.code
+
+
+def test_ws_closes_when_session_deleted(aenv, auth_client, monkeypatch):
+    c = auth_client("viewer")
+    th = token_hash(c.cookies["idsai_session"])
+    assert ws_close_code_after(aenv, c, monkeypatch, lambda: aenv.store.delete_session(th)) == 4401
+
+
+def test_ws_closes_when_user_disabled(aenv, auth_client, monkeypatch):
+    c = auth_client("viewer")
+    off = lambda: aenv.store.set_disabled("viewer", True)  # noqa: E731
+    assert ws_close_code_after(aenv, c, monkeypatch, off) == 4401
+
+
+def test_ws_stays_open_while_signed_in(aenv, auth_client, monkeypatch):
+    monkeypatch.setattr(app_mod, "WS_RECHECK_S", 0.05)
+    monkeypatch.setattr(app_mod, "HEALTH_S", 0.2)
+    c = auth_client("viewer")
+    with c.websocket_connect("/ws/stream") as ws:
+        for _ in range(3):  # several re-checks pass in between
+            assert ws.receive_json()["type"] == "health"

@@ -85,6 +85,9 @@ LOGIN_FAILED_TH = "ชื่อผู้ใช้หรือรหัสผ่�
 LOGIN_NEEDED_TH = "กรุณาเข้าสู่ระบบ"
 WS_UNAUTHORIZED = 4401
 VERIFY_SLOTS = 2  # password checks run in worker threads, at most this many at once
+MAX_LOGIN_WAITERS = 16  # logins queued on or holding a verify slot; beyond it: 429
+BUSY_TH = "ระบบไม่ว่าง ลองใหม่อีกครั้ง"
+WS_RECHECK_S = 60  # an open WebSocket re-reads its session this often; gone or disabled: 4401
 LOCAL_USER = {"user_id": "local", "username": "local", "display_name": "local", "role": "admin"}
 _USER_KEYS = ("user_id", "username", "display_name", "role")
 
@@ -258,6 +261,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
     app.state.idsai = state  # read by `current_user`
     signed = [Depends(current_user)]
     verify_slots = asyncio.Semaphore(VERIFY_SLOTS)  # concurrent logins queue here
+    login_waiters = 0  # logins waiting on or holding `verify_slots`
     if allowed_hosts is not None:
         app.add_middleware(HostAllowlist, allowed=list(allowed_hosts))
 
@@ -286,6 +290,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
 
     @app.post("/api/auth/login", dependencies=[Depends(same_origin)])
     async def login(body: LoginIn):
+        nonlocal login_waiters
         if not state.auth_enabled:
             raise HTTPException(409, "ระบบล็อกอินปิดอยู่")
         store, limiter, now = state.store, state.limiter, _now_us()
@@ -298,22 +303,29 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
             return HTTPException(401, LOGIN_FAILED_TH)
 
         if limiter.locked(name):  # no fail() here: it would extend the lock
-            raise failed(None, "locked")
+            if limiter.first_locked_hit(name):  # one audit row per lock, not one per attempt
+                raise failed(None, "locked")
+            raise HTTPException(401, LOGIN_FAILED_TH)
         try:
             check_username(name)
         except ValueError:
             user = None  # such a name cannot exist: no lookup
         else:
             user = store.get_user_by_name(name)
+        if login_waiters >= MAX_LOGIN_WAITERS:  # a flood is refused before it costs a count
+            raise HTTPException(429, BUSY_TH)
         # the attempt is counted before the await, so concurrent guesses cannot pass the lock
         # check together; a success clears it again
         limiter.fail(name)
         stored = None if user is None else user["pw_hash"]
+        login_waiters += 1
         try:
             async with verify_slots:  # scrypt off the loop, a bounded number at a time
                 ok = await asyncio.to_thread(verify_or_dummy, body.password, stored)
         except Exception:  # e.g. a password with lone surrogates cannot be encoded
             ok = False
+        finally:
+            login_waiters -= 1
         if ok:  # the user may have changed during the await
             user = store.get_user_by_name(name)
             ok = user is not None and user["pw_hash"] == stored
@@ -600,7 +612,24 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 while (await ws.receive())["type"] != "websocket.disconnect":
                     pass
 
-            tasks = [asyncio.create_task(listen()), asyncio.create_task(pulse())]
+            async def recheck() -> None:  # a logout, a disable or an expiry ends the stream
+                while True:
+                    await asyncio.sleep(WS_RECHECK_S)
+                    try:
+                        await current_user(ws)
+                    except HTTPException:
+                        async with lock:  # not in the middle of a send
+                            try:
+                                await ws.close(code=WS_UNAUTHORIZED)
+                            except (WebSocketDisconnect, RuntimeError, OSError):
+                                pass  # already gone
+                        return
+
+            tasks = [
+                asyncio.create_task(listen()),
+                asyncio.create_task(pulse()),
+                asyncio.create_task(recheck()),
+            ]
             if bus:
                 tasks += [
                     asyncio.create_task(collect("bar", queues["bars"])),
