@@ -359,7 +359,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
 
     @app.put("/api/me/prefs", dependencies=[Depends(same_origin)])
     async def put_prefs(body: PrefsIn, user: Signed):
-        if body.symbol is not None and body.symbol not in state.symbols:
+        if body.symbol is not None and body.symbol not in (state.symbols or []):
             raise HTTPException(422, "ไม่รู้จัก symbol นี้")
         budgets = state.cfg.eval.budgets_per_symbol_day
         if body.eval_budget is not None and body.eval_budget not in budgets:

@@ -472,3 +472,26 @@ def test_auth_off_me_is_local(aenv):
         assert c.get("/api/audit").status_code == 200
         r = send(c, "POST", "/api/alerts/a1/feedback", {"verdict": "tp", "analyst": "x"})
         assert r.status_code == 201 and r.json()["analyst"] == "x"
+
+
+def test_put_prefs_with_no_symbols_is_a_422_not_a_500(aenv, auth_client):
+    c = auth_client("analyst")
+    aenv.state.symbols = None
+    assert send(c, "PUT", "/api/me/prefs", {"symbol": SYM}).status_code == 422
+    assert send(c, "PUT", "/api/me/prefs", {"theme": "dark"}).status_code == 200
+
+
+@pytest.mark.parametrize("name", ["nobody1", "Bad Name!", "x", "a" * 33])
+def test_login_always_verifies_against_a_dummy_for_unknown_or_malformed_names(
+    aenv, auth_client, monkeypatch, name
+):
+    seen = []
+
+    def spy(pw, stored):
+        seen.append(stored)
+        return False
+
+    monkeypatch.setattr(app_mod, "verify_or_dummy", spy)
+    r = login(auth_client(), name)
+    assert r.status_code == 401 and r.json() == {"detail": FAIL_TH}
+    assert seen == [None]  # exactly one verify, with no stored hash: same cost as a real user

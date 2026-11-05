@@ -1258,7 +1258,7 @@ function feedbackCard(a) {
     type: "text",
     maxlength: "64",
     placeholder: "ชื่อผู้วิเคราะห์",
-    value: storageGet("idsai.analyst") || (authOn() ? state.me.display_name || "" : ""),
+    value: storageGet("idsai.analyst") || "",
     "aria-label": "ชื่อผู้วิเคราะห์",
   });
   const status = el("span", { class: "small" });
@@ -1275,12 +1275,13 @@ function feedbackCard(a) {
       status.textContent = NEED_ANALYST_TH;
       return;
     }
-    const name = analyst.value.trim();
+    // signed in: the server records the session user, so no name is typed or remembered here
+    const name = authOn() ? state.me.username : analyst.value.trim();
     if (!name) {
       status.textContent = "ใส่ชื่อผู้วิเคราะห์ก่อน";
       return;
     }
-    storageSet("idsai.analyst", name);
+    if (!authOn()) storageSet("idsai.analyst", name);
     status.textContent = "กำลังบันทึก…";
     try {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
@@ -1300,7 +1301,7 @@ function feedbackCard(a) {
     el(
       "div",
       { class: "feedback" },
-      el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
+      authOn() ? null : el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
       ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", ...gate, onclick: () => send(v) }, VERDICT_TH[v])),
     ),
     status,

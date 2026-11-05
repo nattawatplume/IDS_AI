@@ -859,3 +859,16 @@ def test_lost_session_routes_to_login_and_ws_4401_stops_reconnecting(tmp_path):
     assert "4401" in close and close.index("4401") < close.index("scheduleReconnect()")
     enter = js[js.index("async function enterApp(") : js.index("async function boot(")]
     assert "if (!state.ws) connect();" in enter  # signing in again reopens the socket
+
+
+def test_login_form_posts_so_a_credential_never_reaches_the_url():
+    form = re.search(r'<form id="login-form"[^>]*>', text("index.html")).group(0)
+    assert 'method="post"' in form
+
+
+def test_feedback_form_uses_the_session_user_when_auth_is_on():
+    js = text("app.js")
+    body = js[js.index("function feedbackCard"):]
+    body = body[: body.index("\n}\n")]
+    assert "state.me.username" in body  # the analyst is the signed-in user, not a typed name
+    assert "authOn()" in body
