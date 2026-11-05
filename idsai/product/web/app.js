@@ -372,11 +372,14 @@ function flash(node, cls = "flash") {
   node.classList.add(cls);
 }
 
-// "play", "help", one of PAGE_ORDER, or null; never while typing in a field
+const KEY_OWNERS = ["INPUT", "SELECT", "TEXTAREA", "BUTTON", "SUMMARY", "A"];
+
+// "play", "help", one of PAGE_ORDER, or null; never while a field or control has focus
 function presenterKey(ev) {
   if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
-  const tag = ev.target && ev.target.tagName;
-  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return null;
+  // a focused control keeps its own keys: Space presses a button, opens a menu, follows a link
+  const target = ev.target;
+  if (target && (KEY_OWNERS.includes(target.tagName) || target.isContentEditable)) return null;
   // ev.code is the physical key: it still works when a Thai layout changes ev.key
   const key = ev.key || "";
   const code = ev.code || "";
@@ -712,19 +715,6 @@ function onCrosshair(param) {
     return pt && isNum(pt.value) ? pt.value : null;
   };
   renderReadout(param.time, at(chart.price), at(chart.f));
-}
-
-function restyleCharts() {
-  if (chart.api) {
-    chart.api.applyOptions(baseChartOptions());
-    chart.price.applyOptions({ color: cssVar("--line-price") });
-    chart.f.applyOptions({ color: cssVar("--line-f") });
-    LANES.forEach(([key, , color]) => {
-      if (chart.lanes[key]) chart.lanes[key].applyOptions({ color: cssVar(color) });
-    });
-    if (chart.tauLine) chart.tauLine.applyOptions({ color: cssVar("--tau") });
-  }
-  if (state.detailChart) state.detailChart.restyle();
 }
 
 function seriesData(times, values) {
@@ -1327,11 +1317,6 @@ async function drawDetailChart(node, a) {
   c.timeScale().fitContent();
   state.detailChart = {
     remove: () => c.remove(),
-    restyle: () => {
-      c.applyOptions(baseChartOptions());
-      line.applyOptions({ color: cssVar("--line-price") });
-      shade.setData(shadeData());
-    },
   };
 }
 
@@ -2000,7 +1985,7 @@ const KNOWN_ROUTES = ["#/home", "#/alerts", "#/simulate", "#/results", "#/activi
 
 // where a hash should land: { route, help }; anything unknown goes home
 function routeFor(hash) {
-  const raw = typeof hash ==="string" ? hash : "";
+  const raw = typeof hash === "string" ? hash : "";
   if (ROUTE_REDIRECTS[raw]) return { route: ROUTE_REDIRECTS[raw], help: false };
   if (HELP_ROUTES.includes(raw)) return { route: DEFAULT_ROUTE, help: true };
   if (KNOWN_ROUTES.includes(raw)) return { route: raw, help: false };
@@ -2171,6 +2156,12 @@ function bindLogin() {
   document.addEventListener("click", (ev) => {
     const chip = $("user-chip");
     if (chip.open && !chip.contains(ev.target)) chip.open = false;
+  });
+  document.addEventListener("keydown", (ev) => {
+    const chip = $("user-chip");
+    if (ev.key !== "Escape" || !chip.open) return;
+    chip.open = false;
+    chip.querySelector("summary").focus();
   });
 }
 

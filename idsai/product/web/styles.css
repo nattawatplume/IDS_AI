@@ -91,12 +91,12 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   width: 60vmax;
   height: 60vmax;
   border-radius: 50%;
-  opacity: 0.3;
   animation: drift 36s ease-in-out infinite alternate;
 }
-.blob-1 { top: -24vmax; left: -16vmax; background: radial-gradient(circle, #7c4dff 0%, rgba(124, 77, 255, 0) 65%); }
-.blob-2 { top: 16vmax; right: -24vmax; background: radial-gradient(circle, #2f6bff 0%, rgba(47, 107, 255, 0) 65%); animation-delay: -12s; }
-.blob-3 { bottom: -32vmax; left: 24vw; background: radial-gradient(circle, #00c2ff 0%, rgba(0, 194, 255, 0) 65%); opacity: 0.2; animation-delay: -24s; }
+/* the three opacities add up to at most 0.35 (spec 4.12): large soft fields, never a bright spot behind text */
+.blob-1 { width: 80vmax; height: 80vmax; top: -36vmax; left: -28vmax; opacity: 0.14; background: radial-gradient(circle, #7c4dff 0%, #7c4dff 20%, rgba(124, 77, 255, 0) 70%); }
+.blob-2 { width: 76vmax; height: 76vmax; top: 8vmax; right: -32vmax; opacity: 0.12; background: radial-gradient(circle, #2f6bff 0%, #2f6bff 20%, rgba(47, 107, 255, 0) 70%); animation-delay: -12s; }
+.blob-3 { width: 72vmax; height: 72vmax; bottom: -40vmax; left: 16vw; opacity: 0.09; background: radial-gradient(circle, #00c2ff 0%, #00c2ff 20%, rgba(0, 194, 255, 0) 70%); animation-delay: -24s; }
 
 /* ------------------------------------------------------------------ glass surfaces */
 .glass,
@@ -124,7 +124,8 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   display: flex;
   align-items: center;
   gap: 8px 16px;
-  max-width: 1232px;
+  width: calc(100% - 32px);
+  max-width: 1200px;
   margin: 12px auto 0;
   padding: 8px 12px 8px 16px;
   background: rgba(16, 13, 40, 0.55);
@@ -182,7 +183,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .clock.dim { opacity: 0.5; }
 
 .auditor { position: relative; }
-#auditor-text { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+#auditor-text { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .auditor summary, .user-chip summary { list-style: none; cursor: pointer; }
 .auditor summary::-webkit-details-marker, .user-chip summary::-webkit-details-marker { display: none; }
 .auditor-checks {
@@ -227,6 +228,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .user-chip { position: relative; }
 .user-chip summary { display: flex; align-items: center; gap: 8px; }
 .role { font-size: 13px; color: var(--dim); }
+#user-name { max-width: 112px; overflow: hidden; text-overflow: ellipsis; }
 .user-menu {
   position: absolute;
   top: calc(100% + 8px);
@@ -489,10 +491,24 @@ td.when { white-space: nowrap; }
   .topbar .budget, #clock { display: none; }
 }
 
+/* ------------------------------------------------------------------ tablet: <= 1200 px, icon-only brand, dot-only status chips */
+@media (max-width: 1200px) {
+  .topbar { gap: 8px 12px; }
+  .brand-name, .topbar .auditor .stat-label, #auditor-text, #user-name { display: none; }
+  .nav { gap: 0; }
+  .nav a { padding: 8px 12px; }
+}
+@media (max-width: 860px) {
+  .topbar { padding-left: 12px; }
+  .nav a { padding: 8px; font-size: 14px; }
+  .topbar-side { gap: 4px; }
+  .topbar .chip { padding: 4px 8px; }
+}
+
 /* ------------------------------------------------------------------ phone: <= 720 px, the nav becomes a bottom tab bar */
 @media (max-width: 720px) {
   /* no backdrop-filter here: it would become the containing block of the fixed bottom nav */
-  .topbar { margin: 8px 8px 0; padding: 8px 8px 8px 12px; gap: 8px; justify-content: space-between; -webkit-backdrop-filter: none; backdrop-filter: none; background: rgba(16, 13, 40, 0.92); }
+  .topbar { width: auto; margin: 8px 8px 0; padding: 8px 8px 8px 12px; gap: 8px; justify-content: space-between; -webkit-backdrop-filter: none; backdrop-filter: none; background: rgba(16, 13, 40, 0.92); }
   .brand-name { display: none; }
   .nav {
     position: fixed;
@@ -515,7 +531,6 @@ td.when { white-space: nowrap; }
   .nav a span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
   .nav-icon { display: block; }
   .topbar-side { gap: 4px; }
-  #user-name, .topbar .auditor .stat-label { display: none; }
   main { padding: 12px 12px 112px; }
   .footer { padding-bottom: 112px; }
   .auditor { position: static; }

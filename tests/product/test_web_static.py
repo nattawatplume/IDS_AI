@@ -346,6 +346,9 @@ def test_shell_markup():
         assert "data-route=" in attrs
     assert 'id="theme-toggle"' not in html and "data-theme-choice" not in html
     assert 'id="help-btn"' in html
+    js = text("app.js")
+    login = js[js.index("function bindLogin(") :]
+    assert '"Escape"' in login[: login.index("\n}\n")]  # the user menu closes on Escape
     for i in ("menu-activity", "menu-tour", "btn-logout"):
         assert f'id="{i}"' in html, i
     js = text("app.js")
@@ -372,6 +375,27 @@ def test_glass_tokens():
     assert "@keyframes drift" in css and ".bg" in css
     weights = set(re.findall(r"font-weight:\s*(\d+)", css))
     assert weights <= {"400", "600"}, weights
+
+
+def test_background_blobs_stay_subtle():
+    css = text("styles.css")
+    base = re.search(r"(?m)^\.blob\s*\{([^}]*)\}", css).group(1)
+    assert "opacity" not in base  # each blob carries its own, so the sum below is the whole story
+    total = 0.0
+    for i in (1, 2, 3):
+        body = re.search(rf"(?m)^\.blob-{i}\s*\{{([^}}]*)\}}", css).group(1)
+        total += float(re.search(r"opacity:\s*([\d.]+)", body).group(1))
+    assert total <= 0.35 + 1e-9, total
+    assert len(re.findall(r'class="blob blob-\d"', text("index.html"))) == 3
+
+
+def test_top_bar_has_a_mid_breakpoint():
+    css = text("styles.css")
+    m = re.search(r"@media \(max-width: 1200px\) \{(.*?)\n\}", css, re.S)
+    assert m, "no tablet breakpoint for the top bar"
+    for sel in (".brand-name", "#auditor-text", "#user-name", ".nav a"):
+        assert sel in m.group(1), sel
+    assert "viewport-fit=cover" in text("index.html")
 
 
 # emoji and pictographs; dingbats such as check marks and play/pause glyphs stay allowed
@@ -416,6 +440,11 @@ assert.strictEqual(k({ key: " ", target: { tagName: "SELECT" } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "TEXTAREA" } }), null);
 assert.strictEqual(k({ key: "1", target: { tagName: "INPUT" } }), null);
 assert.strictEqual(k({ key: "?", target: { tagName: "TEXTAREA" } }), null);
+for (const tagName of ["BUTTON", "SUMMARY", "A"]) {
+  assert.strictEqual(k({ key: " ", target: { tagName } }), null, tagName);
+  assert.strictEqual(k({ key: "2", target: { tagName } }), null, tagName);
+}
+assert.strictEqual(k({ key: " ", target: { tagName: "DIV", isContentEditable: true } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "DIV" } }), "play");
 assert.strictEqual(k({ key: " " }), "play");
 assert.strictEqual(k({ key: "?" }), "help");
