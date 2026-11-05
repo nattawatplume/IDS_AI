@@ -336,3 +336,12 @@ def test_no_capsule_tabs_or_shadows():
     css = text("styles.css")
     assert "box-shadow" not in css
     assert not re.search(r"border-radius:\s*(?:[5-9]|\d{2,})px", css)
+
+
+def test_auditor_popup_is_anchored_inside_the_viewport_when_narrow():
+    css = text("styles.css")
+    m = re.search(r"@media \(max-width: 760px\) \{(.*?)\n\}", css, re.S)
+    assert m, "no narrow media block"
+    block = m.group(1)
+    assert re.search(r"\.auditor\s*\{\s*position:\s*static", block)
+    assert re.search(r"\.auditor-checks\s*\{[^}]*left:\s*16px[^}]*right:\s*16px[^}]*width:\s*auto", block)
