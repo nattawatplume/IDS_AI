@@ -76,15 +76,35 @@
           <span id="replay-status" class="muted small"></span>
         </div>
       </div>
-      <div class="card chart-card">
-        <div id="chart" class="chart"></div>
-        <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+      <div class="kpis">
+        <div class="kpi"><span class="kpi-label">สัญลักษณ์</span><span class="kpi-value mono" id="kpi-symbol">–</span></div>
+        <div class="kpi"><span class="kpi-label">ค่า F ล่าสุด / τ</span><span class="kpi-value mono"><span id="kpi-f">–</span><small class="kpi-sub">/ <span id="kpi-tau">–</span></small></span></div>
+        <div class="kpi"><span class="kpi-label">แจ้งเตือน 24 ชม.</span><span class="kpi-value mono kpi-alert"><span id="kpi-alerts">0</span><small class="kpi-sub" id="kpi-budget">งบ –</small></span></div>
+        <div class="kpi"><span class="kpi-label">Auditor</span><span class="kpi-value" id="kpi-auditor">–</span></div>
       </div>
-      <p class="legend small muted">
-        บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
-        F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
-        L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
-      </p>
+      <div class="monitor-body">
+        <div class="monitor-main">
+          <div class="chart-card">
+            <div class="chart-bar">
+              <span id="readout" class="readout mono small">–</span>
+              <button id="layers-toggle" class="mini" type="button" aria-expanded="false">แสดง L1/L2/L3</button>
+              <button id="chart-info" class="mini" type="button" aria-expanded="false" aria-label="คำอธิบายกราฟ">i</button>
+            </div>
+            <p id="chart-info-body" class="legend small muted" hidden>
+              บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
+              F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
+              L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
+            </p>
+            <div id="chart" class="chart"></div>
+            <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+          </div>
+        </div>
+        <aside class="rail" aria-label="แจ้งเตือนล่าสุด">
+          <h2 class="rail-title">แจ้งเตือนล่าสุด</h2>
+          <div id="alert-rail" class="rail-list"></div>
+          <p id="rail-empty" class="empty small" hidden>ยังไม่มีการแจ้งเตือน</p>
+        </aside>
+      </div>
     </section>
 
     <!-- Alerts triage -->

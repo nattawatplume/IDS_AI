@@ -428,3 +428,23 @@ def test_space_toggle_follows_replay_state_and_skips_live(tmp_path):
     _run_motion(tmp_path, "false", PLAY_BODY)
     js = text("app.js")
     assert "noteReplayAction(action)" in js and "presenterPlaying" not in js
+
+
+# ---- monitor: kpi strip, alert rail, synced crosshair ----
+
+
+def test_monitor_has_kpi_strip_rail_and_info():
+    html = text("index.html")
+    for i in [
+        "kpi-symbol", "kpi-f", "kpi-tau", "kpi-alerts", "kpi-budget", "kpi-auditor",
+        "alert-rail", "layers-toggle", "chart-info", "chart-info-body",
+    ]:  # fmt: skip
+        assert f'id="{i}"' in html, i
+    assert "ค่า p รวม" in html and "ความหายากเทียบตลาดปกติ" in html
+
+
+def test_ws_close_turns_live_dot_off():
+    js = text("app.js")
+    assert "function setLive(" in js
+    close = js.split('addEventListener("close"')[1][:400]
+    assert "setLive(false)" in close

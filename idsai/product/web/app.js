@@ -47,6 +47,9 @@ const state = {
   route: null,
   detailChart: null,
   injections: [],
+  railIds: null, // alert ids already on the rail; null until the first render
+  alertCount: 0,
+  layersOpen: false,
 };
 
 // ------------------------------------------------------------------ helpers
@@ -106,7 +109,7 @@ function fmtP(p) {
 
 function fmtNum(x, digits = 3) {
   if (!isNum(x)) return "–";
-  if (x !== 0 && Math.abs(x) < 10 ** -digits) return x.toExponential(1);
+  if (digits > 0 && x !== 0 && Math.abs(x) < 10 ** -digits) return x.toExponential(1);
   return x.toFixed(digits);
 }
 
@@ -302,6 +305,14 @@ function onPresenterKey(ev) {
   }
 }
 
+// the top-bar pulse: on while data flows, off on pause or a dropped connection
+function setLive(on) {
+  const dot = $("live-dot");
+  const clock = $("clock");
+  if (dot) dot.classList.toggle("live", !!on);
+  if (clock) clock.classList.toggle("dim", !on);
+}
+
 function renderHealth(h) {
   state.health = h;
   setMode(h.mode);
@@ -320,6 +331,9 @@ function renderHealth(h) {
       : "กำลังอุ่นเครื่อง";
   }
   $("auditor-text").textContent = text;
+  const kpiAud = $("kpi-auditor");
+  kpiAud.textContent = text;
+  kpiAud.className = `kpi-value ${h.overall || ""}`;
   $("auditor").title = text; // the warm-up wording lives in the tooltip, the bar stays short
   const list = clear($("auditor-checks"));
   for (const c of checks) {
@@ -350,7 +364,9 @@ function setMode(mode) {
   if (!mode || mode === state.mode) return;
   state.mode = mode;
   state.replaying = true; // a new mode starts with a running replay
-  $("live-dot").className = `dot ${mode === "live" ? "fail" : "ok"}`;
+  const lamp = $("live-dot");
+  lamp.classList.remove("ok", "fail");
+  lamp.classList.add(mode === "live" ? "fail" : "ok");
   const badge = $("mode-badge");
   badge.textContent = String(mode).toUpperCase();
   badge.className = `badge badge-mode ${mode}`;
@@ -378,6 +394,7 @@ function renderBudget() {
   const fill = $("budget-fill");
   if (!isNum(budget) || !isNum(now)) {
     $("budget-text").textContent = "–";
+    $("kpi-budget").textContent = "งบ –";
     fill.style.width = "0";
     return;
   }
@@ -389,8 +406,14 @@ function renderBudget() {
   const rate = n / nSym;
   const frac = budget > 0 ? rate / budget : 0;
   fill.style.width = `${Math.min(frac, 1) * 100}%`;
-  fill.className = `meter-fill${frac > 1 ? " over" : frac > 0.75 ? " near" : ""}`;
+  fill.className = `meter-fill${frac > 1 ? " over" : frac >= 0.8 ? " warn" : ""}`;
   $("budget-text").textContent = `${rate.toFixed(1)} / ${budget} ครั้งต่อสัญลักษณ์-วัน`;
+  $("kpi-budget").textContent = `งบ ${budget}`;
+  const box = $("kpi-alerts");
+  const rose = n > state.alertCount;
+  state.alertCount = n;
+  tweenNumber(box, n, 0);
+  if (rose) flash(box.parentNode);
 }
 
 // ------------------------------------------------------------------ monitor chart
@@ -405,6 +428,7 @@ const chart = {
   markers: null,
   last: {}, // series key -> last plotted time (s)
   priceTimes: [], // sorted times of the price series, for snapping markers
+  now: { price: null, f: null }, // latest plotted values, shown while the pointer is away
 };
 
 function chartColors() {
@@ -470,13 +494,73 @@ function initChart() {
     }),
     1,
   );
-  LANES.forEach(([key, title, color], i) => {
-    chart.lanes[key] = chart.api.addSeries(LWC.LineSeries, lineOptions(cssVar(color), title), 2 + i);
-  });
+  if (state.layersOpen) addLanes();
   chart.markers = LWC.createSeriesMarkers(chart.price, []);
   const panes = chart.api.panes();
   if (panes[0]) panes[0].setStretchFactor(3);
   if (panes[1]) panes[1].setStretchFactor(1.4);
+  // one chart, one crosshair: it already spans the price, F and layer panes; the readout follows it
+  chart.api.subscribeCrosshairMove(onCrosshair);
+  renderReadout(null, chart.now.price, chart.now.f);
+}
+
+function addLanes() {
+  LANES.forEach(([key, title, color], i) => {
+    chart.lanes[key] = chart.api.addSeries(LWC.LineSeries, lineOptions(cssVar(color), title), 2 + i);
+  });
+}
+
+function removeLanes() {
+  for (const [key] of LANES) {
+    if (chart.lanes[key]) chart.api.removeSeries(chart.lanes[key]);
+    chart.lanes[key] = null;
+    delete chart.last[key];
+  }
+}
+
+// the L1/L2/L3 panes are folded away by default; opening them re-reads the series
+function setLayersOpen(open) {
+  state.layersOpen = open;
+  const btn = $("layers-toggle");
+  btn.setAttribute("aria-expanded", String(open));
+  btn.textContent = open ? "ซ่อน L1/L2/L3" : "แสดง L1/L2/L3";
+  if (!chart.api) return;
+  if (open) {
+    addLanes();
+    loadSeries();
+  } else {
+    removeLanes();
+  }
+}
+
+function setInfoOpen(open) {
+  $("chart-info").setAttribute("aria-expanded", String(open));
+  $("chart-info-body").hidden = !open;
+}
+
+function bindMonitor() {
+  $("layers-toggle").addEventListener("click", () => setLayersOpen(!state.layersOpen));
+  $("chart-info").addEventListener("click", () => setInfoOpen($("chart-info-body").hidden));
+}
+
+function renderReadout(time, price, f) {
+  const parts = [];
+  if (isNum(time)) parts.push(fmtSec(time));
+  parts.push(`ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`);
+  parts.push(`F ${isNum(f) ? fmtNum(f, 2) : "–"}`);
+  $("readout").textContent = parts.join(" · ");
+}
+
+function onCrosshair(param) {
+  if (!param || !isNum(param.time) || !param.seriesData) {
+    renderReadout(null, chart.now.price, chart.now.f); // pointer left: show the latest
+    return;
+  }
+  const at = (series) => {
+    const pt = series && param.seriesData.get(series);
+    return pt && isNum(pt.value) ? pt.value : null;
+  };
+  renderReadout(param.time, at(chart.price), at(chart.f));
 }
 
 function restyleCharts() {
@@ -484,7 +568,9 @@ function restyleCharts() {
     chart.api.applyOptions(baseChartOptions());
     chart.price.applyOptions({ color: cssVar("--line-price") });
     chart.f.applyOptions({ color: cssVar("--line-f") });
-    LANES.forEach(([key, , color]) => chart.lanes[key].applyOptions({ color: cssVar(color) }));
+    LANES.forEach(([key, , color]) => {
+      if (chart.lanes[key]) chart.lanes[key].applyOptions({ color: cssVar(color) });
+    });
     if (chart.tauLine) chart.tauLine.applyOptions({ color: cssVar("--tau") });
   }
   if (state.detailChart) state.detailChart.restyle();
@@ -500,6 +586,19 @@ function seriesData(times, values) {
     out.push(isNum(values[i]) ? { time: t, value: values[i] } : { time: t });
   }
   return out;
+}
+
+function lastValue(data) {
+  for (let i = data.length - 1; i >= 0; i -= 1) if ("value" in data[i]) return data[i].value;
+  return null;
+}
+
+function showTau(tau) {
+  $("kpi-tau").textContent = fmtNum(tau, 2);
+}
+
+function showF(f) {
+  tweenNumber($("kpi-f"), f, 2);
 }
 
 function lastTime(data) {
@@ -544,12 +643,17 @@ async function loadSeries() {
   const f = seriesData(times, s.F || []);
   chart.f.setData(f);
   chart.last.f = lastTime(f);
+  chart.now = { price: lastValue(price), f: lastValue(f) };
+  renderReadout(null, chart.now.price, chart.now.f);
   for (const [key] of LANES) {
+    if (!chart.lanes[key]) continue;
     const d = seriesData(times, s[key] || []);
     chart.lanes[key].setData(d);
     chart.last[key] = lastTime(d);
   }
   setTau(s.tau);
+  showTau(s.tau);
+  showF(chart.now.f);
   $("chart-empty").hidden = price.length > 0;
   renderMarkers();
 }
@@ -569,7 +673,7 @@ function nearestTime(t) {
 }
 
 function sevColor(sev) {
-  return sev >= 3 ? cssVar("--fail") : sev >= 2 ? cssVar("--warn") : cssVar("--muted");
+  return sev >= 3 ? cssVar("--red") : cssVar("--amber");
 }
 
 function renderMarkers() {
@@ -606,6 +710,7 @@ function plot(key, series, t, value) {
   if (t <= last) return false; // stale (e.g. after a seek): dropped on purpose
   series.update({ time: t, value });
   chart.last[key] = t;
+  if (key === "price" || key === "f") chart.now[key] = value;
   return true;
 }
 
@@ -625,7 +730,7 @@ function onBar(bar) {
 function onScore(p) {
   if (!p || p.symbol !== state.symbol || !chart.api || !isNum(p.t_end_us)) return;
   const t = toSec(p.t_end_us);
-  plot("f", chart.f, t, p.F);
+  if (plot("f", chart.f, t, p.F)) showF(p.F);
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);
 }
 
@@ -638,6 +743,7 @@ async function control(action, value) {
     const body = value === undefined ? { action } : { action, value };
     const r = await postJson("/api/replay/control", body);
     noteReplayAction(action);
+    if (action === "play" || action === "pause") setLive(state.replaying);
     status.textContent = `ตำแหน่ง ${fmtUs(r.cursor_us)}`;
   } catch (e) {
     status.textContent = e.message;
@@ -677,6 +783,7 @@ async function loadAlerts() {
 
 function alertsChanged() {
   renderAlertsTable();
+  renderRail();
   renderMarkers();
   renderBudget();
   checkInjections();
@@ -734,6 +841,26 @@ function renderAlertsTable() {
     });
     body.appendChild(row);
   }
+}
+
+// newest eight alerts beside the chart; a row that was not there before slides in
+function renderRail() {
+  const box = clear($("alert-rail"));
+  const items = sortedAlerts().slice(0, 8);
+  $("rail-empty").hidden = items.length > 0;
+  const seen = state.railIds;
+  for (const a of items) {
+    const fresh = seen !== null && !seen.has(a.alert_id);
+    box.appendChild(
+      el(
+        "a",
+        { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id) },
+        el("strong", { class: "mono" }, `${a.technique_id} · ${a.symbol}`),
+        el("span", { class: "muted small mono" }, `${fmtUs(a.ts_event_us).slice(11)} · p ${fmtP(a.fused_p)} · ${a.agreement}/3 ชั้น`),
+      ),
+    );
+  }
+  state.railIds = new Set(items.map((a) => a.alert_id));
 }
 
 async function loadTaxonomy() {
@@ -1582,6 +1709,7 @@ function connect() {
   });
   ws.addEventListener("message", safely((ev) => dispatch(JSON.parse(ev.data))));
   ws.addEventListener("close", () => {
+    setLive(false);
     if (state.ws === ws) scheduleReconnect();
   });
   ws.addEventListener("error", () => {
@@ -1599,6 +1727,7 @@ function scheduleReconnect() {
 function dispatch(msg) {
   if (!msg || typeof msg !== "object") return;
   const { type, data } = msg;
+  setLive(state.replaying || state.mode === "live"); // paused replay: off, whatever the server still sends
   if (type === "bar") onBar(data);
   else if (type === "score") onScore(data);
   else if (type === "alert") onAlert(data);
@@ -1613,6 +1742,7 @@ function fillSymbols() {
     for (const s of state.symbols) sel.appendChild(el("option", { value: s }, s));
     sel.value = state.symbol || "";
   }
+  $("kpi-symbol").textContent = state.symbol || "–";
 }
 
 async function boot() {
@@ -1620,10 +1750,12 @@ async function boot() {
   bindTheme();
   document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
+  bindMonitor();
   bindRedTeam();
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
     $("rt-symbol").value = state.symbol;
+    $("kpi-symbol").textContent = state.symbol || "–";
     loadSeries();
   });
   const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
