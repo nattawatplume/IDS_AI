@@ -3,8 +3,11 @@ name: Deploy to Hugging Face Space
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/mvp]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: deploy-space
@@ -47,4 +50,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: ${{ vars.HF_SPACE }}
         run: |
+          [ -n "$HF_SPACE" ] || { echo "ยังไม่ได้ตั้ง HF_SPACE" >&2; exit 1; }
+          [ -n "$HF_TOKEN" ] || { echo "ยังไม่ได้ตั้ง HF_TOKEN" >&2; exit 1; }
           git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" HEAD:main

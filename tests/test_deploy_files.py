@@ -104,7 +104,8 @@ def _workflow(name: str) -> tuple[dict, str]:
 def test_deploy_space_workflow():
     wf, text = _workflow("deploy-space.yml")
     triggers = wf[True]  # PyYAML reads the key `on` as True
-    assert triggers["push"]["branches"] == ["main"]
+    assert triggers["push"]["branches"] == ["main", "feat/mvp"]
+    assert wf["permissions"] == {"contents": "read"}
     assert "workflow_dispatch" in triggers
     steps = wf["jobs"]["deploy"]["steps"]
     runs = "\n".join(s.get("run", "") for s in steps)
@@ -123,7 +124,7 @@ def test_deploy_space_workflow():
         assert not any(ln.strip().startswith("echo") and "HF_TOKEN" in ln for ln in lines)
     for ln in text.splitlines():
         if "HF_TOKEN" in ln and "secrets." not in ln:
-            assert "${HF_TOKEN}" in ln or ln.strip().startswith("HF_TOKEN:")
+            assert "HF_TOKEN}" in ln or "$HF_TOKEN" in ln or ln.strip().startswith("HF_TOKEN:")
     assert text.count("secrets.HF_TOKEN") == 1
 
 
@@ -132,8 +133,10 @@ def test_keepalive_workflow():
     triggers = wf[True]
     assert triggers["schedule"] == [{"cron": "0 */6 * * *"}]
     assert "workflow_dispatch" in triggers
-    assert "curl -fsS --retry 5" in text
-    assert "https://${{ vars.SPACE_URL }}/api/health" in text
+    assert wf["permissions"] == {"contents": "read"}
+    assert "SPACE_URL: ${{ vars.SPACE_URL }}" in text
+    cmd = 'curl -fsS --retry 5 --retry-delay 30 --max-time 120 "https://$SPACE_URL/api/health"'
+    assert cmd in text
 
 
 def test_readme_hosting_section():
@@ -149,6 +152,7 @@ def test_readme_hosting_section():
         "SPACE_URL",
         "Deploy to Hugging Face Space",
         "Run workflow",
+        "feat/mvp",
         "hf.space",
         "SameSite",
         "รีสตาร์ต",

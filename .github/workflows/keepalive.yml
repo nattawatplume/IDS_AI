@@ -6,8 +6,17 @@ on:
     - cron: "0 */6 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   ping:
     runs-on: ubuntu-latest
+    env:
+      SPACE_URL: ${{ vars.SPACE_URL }}
     steps:
-      - run: curl -fsS --retry 5 --retry-delay 10 "https://${{ vars.SPACE_URL }}/api/health"
+      - name: Check the variable
+        run: |
+          [ -n "$SPACE_URL" ] || { echo "ยังไม่ได้ตั้ง SPACE_URL" >&2; exit 1; }
+      - name: Ping the Space
+        run: curl -fsS --retry 5 --retry-delay 30 --max-time 120 "https://$SPACE_URL/api/health"
