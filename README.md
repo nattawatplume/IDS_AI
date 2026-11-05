@@ -93,6 +93,26 @@ uv run idsai serve --mode replay
 
 คำสั่ง `user` ต้องหยุด `serve` ก่อน เพราะฐานข้อมูลเปิดได้ทีละโปรแกรม ถ้า `serve` ยังรันอยู่จะขึ้นข้อความให้หยุดแล้วลองใหม่
 
+## เปิดบนเว็บตลอด 24 ชม. (Hugging Face Spaces)
+
+โปรเจกต์นี้เปิดเป็นเว็บบน Hugging Face Space (แบบ Docker, ฟรี) ได้ GitHub Actions จะส่งโค้ดขึ้นไปให้เอง และมีตัวปลุกทุก 6 ชม. ไม่ให้ Space หลับ ทำตามนี้ทีละข้อ:
+
+1. สมัครบัญชี Hugging Face (huggingface.co) แล้วกดยืนยันอีเมลที่ส่งมา
+2. สร้าง Space ใหม่: กด New → Space แล้วเลือก SDK เป็น Docker, Template เป็น Blank, Hardware เป็น CPU basic (ฟรี), Visibility เป็น Public จากนั้นจดชื่อไว้ เช่น `nattawatplume/market-ids`
+3. ในหน้า Space ไปที่ Settings → Variables and secrets → New secret ตั้งชื่อ `IDSAI_USERS` ใส่ค่าบัญชีผู้ใช้ บัญชีละหนึ่งบรรทัด รูปแบบ `ชื่อ:สิทธิ์:รหัสผ่าน` (ต้องมี `admin` อย่างน้อยหนึ่งบัญชี ชื่อยาว 3–32 ตัว รหัสผ่านยาวอย่างน้อย 10 ตัว)
+4. ที่ Hugging Face ไปที่ Settings → Access Tokens → Create new token เลือกชนิด Write แล้วคัดลอกโทเคนไว้
+5. ที่หน้า GitHub ของโปรเจกต์ไปที่ Settings → Secrets and variables → Actions แล้วเพิ่ม: secret ชื่อ `HF_TOKEN` (ค่าคือโทเคนจากข้อ 4), variable ชื่อ `HF_SPACE` (ค่าเช่น `nattawatplume/market-ids`) และ variable ชื่อ `SPACE_URL` (ค่าเช่น `nattawatplume-market-ids.hf.space` ไม่ต้องมี `https://`)
+6. ไปที่แท็บ Actions → เลือก "Deploy to Hugging Face Space" → กด Run workflow เลือกสาขา `feat/mvp` (หรือรวม PR เข้า `main` แล้วระบบจะส่งให้เอง)
+7. รอให้ Space สร้างเสร็จ (ครั้งแรกประมาณ 10–15 นาที) แล้วเปิด URL ของ Space และเข้าสู่ระบบด้วยบัญชีจากข้อ 3
+
+ข้อควรรู้:
+
+- ให้เปิดที่ URL ตรง `https://<ชื่อผู้ใช้>-<ชื่อ space>.hf.space` ไม่ใช่หน้า Space บน huggingface.co เพราะหน้านั้นฝังเว็บไว้ในกรอบ (iframe) เบราว์เซอร์จะทิ้งคุกกี้ `SameSite=Strict` ทำให้ล็อกอินไม่ติด
+- แก้ค่า `IDSAI_USERS` เมื่อไรก็ตาม Space จะรีสตาร์ตเอง
+- รีสตาร์ตทุกครั้งจะล้างการแจ้งเตือน ผลการตรวจ (feedback) เซสชัน และบันทึกกิจกรรมทั้งหมด เริ่มใหม่จากข้อมูลเดโม
+- มีการเล่นย้อนหลังตัวเดียวที่ทุกคนใช้ร่วมกัน ถ้า analyst กดเล่น หยุด หรือเลื่อนเวลา ทุกคนที่เปิดอยู่จะเห็นเปลี่ยนตาม
+- GitHub จะปิด workflow ที่ตั้งเวลาไว้ถ้าไม่มีความเคลื่อนไหวในโปรเจกต์นาน 60 วัน ให้เข้าแท็บ Actions แล้วกดเปิดใหม่หนึ่งครั้ง
+
 ## รันชุดทดสอบ
 
 ```bash
