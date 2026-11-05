@@ -156,6 +156,15 @@ class HostAllowlist:
         await self.app(scope, receive, send)
 
 
+class _NoCacheStatic(StaticFiles):
+    """Dashboard files revalidate on every load (ETag / Last-Modified still give a 304)."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastAPI:
     """The app over `state`. `allowed_hosts` (e.g. loopback names plus the bound host) turns on a
     `Host` header allowlist against DNS rebinding: any other host gets 400, HTTP and WebSocket
@@ -399,5 +408,5 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 bus.unsubscribe(topic, q)
 
     if WEB_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+        app.mount("/", _NoCacheStatic(directory=WEB_DIR, html=True), name="web")
     return app
