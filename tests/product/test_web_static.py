@@ -306,7 +306,7 @@ def test_time_to_detect_counts_only_new_alerts(tmp_path):
 
 
 HTML_TAGS = set(
-    "a button dd div dl dt em h1 h2 h3 h4 input label li ol option p section select small span"
+    "a button dd details div dl dt em h1 h2 h3 h4 input label li ol option p section select small span summary"
     " strong table tbody td th thead tr ul".split()
 )
 
@@ -481,3 +481,53 @@ def test_red_team_ring_and_one_row_form():
     assert 'id="rt-ring"' in js or 'id: "rt-ring"' in js or "rt-ring" in js
     assert "rt-banner" in js and "stroke-dashoffset" in js
     assert 'class="form-grid rt-row"' in html or "rt-row" in html
+
+
+VERDICT_BODY = r"""
+const cell = (mean, ci, n) => ({ mean: { recall_any: mean, fa_per_symbol_day: 1.65, fa_per_symbol_day_hard: 11.2 },
+  ci: { recall_any: ci }, n_events: n });
+const report = (full, rows) => ({ runs: 5, experiments: { real_t001: { full: { "2": full } } },
+  paired_bootstrap: { budget: 2, metric: "recall_any", rows } });
+const T = (id) => m.EVAL_TARGETS.find((t) => t.id === id);
+const miss = m.targetVerdict(report(cell(0.739, [0.68, 0.801], 200), []), T("real_recall"));
+assert.strictEqual(miss.state, "miss");
+assert.strictEqual(miss.value, 0.739);
+assert.strictEqual(miss.n, 200);
+assert.deepStrictEqual(miss.ci, [0.68, 0.801]);
+assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_recall")).state, "pass");
+assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa")).state, "pass");
+assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa_hard")).state, "miss");
+// variant absent / experiment absent / budget absent: never pass
+assert.strictEqual(m.targetVerdict({ runs: 5, experiments: { real_t001: {} } }, T("real_recall")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("semisyn_pump_burst")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict({ runs: 5, experiments: { real_t001: { full: { "5": cell(0.9, null, 9) } } } }, T("real_recall")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict(report({ mean: {}, n_events: 3 }, []), T("real_recall")).state, "unmeasured");
+// paired: the CI lower bound must clear 0; a baseline wholly better is a miss
+const rows = [
+  { baseline: "baseline.random", diff_mean: 0.639, ci: [0.57, 0.7], n_events: 200 },
+  { baseline: "baseline.kk", diff_mean: -0.17, ci: [-0.222, -0.121], n_events: 200 },
+  { baseline: "stat.robust_z", diff_mean: 0.005, ci: [-0.03, 0.04], n_events: 200 },
+];
+const r = report(cell(0.74, null, 200), rows);
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.random")).state, "pass");
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.kk")).state, "miss");
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_stat.robust_z")).state, "miss");
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.pca")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.kk")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict(null, T("real_recall")).state, "unmeasured");
+assert.strictEqual(m.evalEmpty({ runs: 0 }), true);
+assert.strictEqual(m.evalEmpty(null), true);
+assert.strictEqual(m.evalEmpty({ runs: 3, experiments: {} }), false);
+"""
+
+
+def test_target_verdicts(tmp_path):
+    _run_motion(tmp_path, "false", VERDICT_BODY)
+
+
+def test_ablation_notes_cell_wraps():
+    css = text("styles.css")
+    assert re.search(r"td\.notes[^}]*max-width", css)
+    js = text("app.js")
+    assert 'class: "small muted notes"' in js and "หมายเหตุวิธีวัด" in js
+    assert 'el("details"' in js and "uv run idsai report" in js

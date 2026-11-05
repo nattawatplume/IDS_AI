@@ -436,6 +436,29 @@ button.selected { outline: 2px solid var(--amber); outline-offset: 1px; }
   .kpi:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
 }
 
+/* ------------------------------------------------------------------ eval */
+.section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 16px 0 8px; }
+.targets { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 8px; margin-bottom: 12px; }
+.target { background: var(--panel); border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius); padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.target .label { font-size: 11px; color: var(--dim); }
+.target .big { font-size: 20px; }
+.target.pass { border-left-color: var(--green); }
+.target.miss { border-left-color: var(--red); }
+.verdict { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.verdict.pass { color: var(--green); }
+.verdict.miss { color: var(--red); }
+.verdict.unmeasured { color: var(--dim); }
+.forest { width: 100%; max-width: 520px; height: auto; display: block; margin-bottom: 8px; }
+.forest text { fill: var(--ink); font-size: 11px; font-family: var(--font); }
+.forest text.tick { fill: var(--dim); }
+.forest .zero { stroke: var(--dim); stroke-dasharray: 3 3; }
+.forest .ci-line { stroke-width: 2; animation: grow 0.5s ease-out both; }
+.forest .good { stroke: var(--green); fill: var(--green); }
+.forest .bad { stroke: var(--red); fill: var(--red); }
+.forest .flat { stroke: var(--dim); fill: var(--dim); }
+td.notes { max-width: 260px; white-space: normal; overflow-wrap: anywhere; }
+details.notes-box summary { cursor: pointer; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); }
+
 /* ------------------------------------------------------------------ motion */
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @keyframes glow { 0% { background-color: color-mix(in srgb, var(--amber) 35%, transparent); } 100% { background-color: transparent; } }

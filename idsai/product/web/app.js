@@ -1416,6 +1416,68 @@ function tickInjections() {
 
 // ------------------------------------------------------------------ eval
 
+// targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6
+const EVAL_BASELINES = ["baseline.random", "baseline.kk", "baseline.iforest", "baseline.pca", "stat.robust_z"];
+const EVAL_TARGETS = [
+  { id: "real_recall", label: "recall ≥ 0.8 · ตลาดจริง (real_t001)", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8 },
+  ...["pump_burst", "pump_stealth", "wash_pingpong"].map((v) => ({
+    id: `semisyn_${v}`, label: `recall ≥ 0.8 · ${v}`, experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8,
+  })),
+  { id: "real_fa", label: "เตือนผิด ≤ งบ · ตลาดจริง", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2 },
+  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · ตลาดจริง", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
+  ...EVAL_BASELINES.map((b) => ({
+    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
+  })),
+];
+
+function evalEmpty(report) {
+  return !report || !report.runs || !report.experiments;
+}
+
+// pass / miss / unmeasured: absent data is never a pass
+function targetVerdict(report, target) {
+  const none = { state: "unmeasured", value: null, ci: null, n: null };
+  if (evalEmpty(report)) return none;
+  if (target.cmp === "pair") {
+    const paired = report.paired_bootstrap;
+    if (!paired || Number(paired.budget) !== Number(target.budget)) return none;
+    const found = (paired.rows || []).find((r) => r.baseline === target.variant);
+    if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
+    return { state: found.ci[0] > target.threshold ? "pass" : "miss", value: found.diff_mean, ci: found.ci, n: found.n_events };
+  }
+  const variants = report.experiments[target.experiment] || {};
+  const cell = (variants[target.variant] || {})[String(target.budget)];
+  const value = cell && cell.mean ? cell.mean[target.metric] : null;
+  if (!isNum(value)) return none;
+  const ci = cell.ci && Array.isArray(cell.ci[target.metric]) ? cell.ci[target.metric] : null;
+  const ok = target.cmp === ">=" ? value >= target.threshold : value <= target.threshold;
+  return { state: ok ? "pass" : "miss", value, ci, n: cell.n_events };
+}
+
+const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด" };
+
+function fmtSigned(x) {
+  return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
+}
+
+function targetCard(target, verdict, index) {
+  const paired = target.cmp === "pair";
+  const goal = paired ? "CI ขอบล่าง > 0" : `${target.cmp === ">=" ? "≥" : "≤"} ${target.threshold}`;
+  const none = verdict.state === "unmeasured";
+  return el(
+    "div",
+    { class: `target ${verdict.state} rise`, style: `animation-delay: ${index * 50}ms` },
+    el("span", { class: "label" }, target.label),
+    el("strong", { class: `verdict ${verdict.state}` }, TARGET_STATE_TH[verdict.state]),
+    el("span", { class: "mono big" }, none ? "–" : paired ? fmtSigned(verdict.value) : fmtNum(verdict.value, 3)),
+    el(
+      "span",
+      { class: "small mono muted" },
+      none ? `เป้า ${goal}` : `${verdict.ci ? ciText(verdict.value, verdict.ci) : "ไม่มี CI"} · n ${verdict.n ?? "–"} · เป้า ${goal}`,
+    ),
+  );
+}
+
 async function showEval() {
   const box = clear($("eval-body"));
   box.appendChild(el("p", { class: "muted" }, "กำลังโหลด…"));
@@ -1427,15 +1489,8 @@ async function showEval() {
     return;
   }
   clear(box);
-  if (!report || !report.runs || !report.experiments) {
-    box.appendChild(
-      el(
-        "div",
-        { class: "empty" },
-        el("p", {}, "ยังไม่มีรายงานผลการประเมิน"),
-        el("p", { class: "small" }, "รัน uv run idsai eval แล้วตามด้วย uv run idsai report จากนั้นเปิดหน้านี้ใหม่"),
-      ),
-    );
+  if (evalEmpty(report)) {
+    box.appendChild(el("p", { class: "empty" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่"));
     return;
   }
   box.appendChild(
@@ -1452,6 +1507,15 @@ async function showEval() {
       "ตัวเลขหลักคือ recall ต่อเหตุการณ์ (พร้อม 95% CI) และจำนวนการเตือนผิดต่อสัญลักษณ์-วัน precision แสดงคู่กับ prevalence เสมอ ทุกแถวมีป้ายที่มา",
     ),
   );
+
+  box.appendChild(el("h2", { class: "section-label" }, "เป้าหมาย (งบ 2 ครั้ง/สัญลักษณ์-วัน)"));
+  box.appendChild(el("div", { class: "targets" }, EVAL_TARGETS.map((t, i) => targetCard(t, targetVerdict(report, t), i))));
+
+  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
+  if (report.retrain_decision) {
+    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
+    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
+  }
 
   const budgets = new Set();
   for (const variants of Object.values(report.experiments)) {
@@ -1476,13 +1540,11 @@ async function showEval() {
   select.addEventListener("change", draw);
   draw();
 
-  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
-  if (report.retrain_decision) {
-    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
-    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
-  }
-  if ((report.notes || []).length) {
-    box.appendChild(el("div", { class: "card" }, el("h3", {}, "หมายเหตุ"), el("ul", { class: "small" }, report.notes.map((n) => el("li", {}, n)))));
+  const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
+  if (notes.length) {
+    box.appendChild(
+      el("details", { class: "card notes-box" }, el("summary", {}, "หมายเหตุวิธีวัด"), el("ul", { class: "small" }, notes.map((n) => el("li", {}, n)))),
+    );
   }
 }
 
@@ -1529,7 +1591,7 @@ function experimentTable(exp, variants, budget) {
         el("td", { class: "num mono" }, `${fmtNum(m.precision, 3)} (prevalence ${fmtNum(m.prevalence, 4)})`),
         el("td", { class: "num mono" }, fmtNum(m.ttd_median_s, 0)),
         el("td", { class: "num" }, cell.n_events),
-        el("td", { class: "small muted" }, flags.join(" · ")),
+        el("td", { class: "small muted notes" }, flags.join(" · ")),
       ),
     );
   }
@@ -1565,6 +1627,7 @@ function experimentTable(exp, variants, budget) {
 
 function pairedCard(paired) {
   const card = el("div", { class: "card" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
+  if ((paired.rows || []).length) card.appendChild(forestPlot(paired));
   const rows = (paired.rows || []).map((row) =>
     el(
       "tr",
@@ -1593,7 +1656,6 @@ function pairedCard(paired) {
   } else {
     card.appendChild(el("p", { class: "muted small" }, "ยังไม่มีผล"));
   }
-  if ((paired.notes || []).length) card.appendChild(el("ul", { class: "small" }, paired.notes.map((n) => el("li", {}, n))));
   return card;
 }
 
@@ -1604,6 +1666,29 @@ function svg(tag, attrs, ...children) {
   for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, String(v));
   for (const c of children) node.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
   return node;
+}
+
+// AE minus each baseline: one CI per row; right of 0 = AE better
+function forestPlot(paired) {
+  const rows = (paired.rows || []).filter((r) => isNum(r.diff_mean) && Array.isArray(r.ci) && isNum(r.ci[0]) && isNum(r.ci[1]));
+  const W = 520;
+  const rowH = 28;
+  const left = 120;
+  const top = 8;
+  const H = top + rowH * rows.length + 28;
+  const lim = Math.max(0.1, ...rows.map((r) => Math.max(Math.abs(r.ci[0]), Math.abs(r.ci[1]))));
+  const x = (v) => left + ((v + lim) / (2 * lim)) * (W - left - 12);
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "forest", role: "img", "aria-label": "ผลต่าง recall ของ AE เทียบแต่ละ baseline พร้อม 95% CI" });
+  root.appendChild(svg("line", { x1: x(0), x2: x(0), y1: top, y2: H - 22, class: "zero" }));
+  [-lim, 0, lim].forEach((v) => root.appendChild(svg("text", { x: x(v), y: H - 6, "text-anchor": "middle", class: "tick" }, v.toFixed(2))));
+  rows.forEach((r, i) => {
+    const cy = top + rowH * i + rowH / 2;
+    const tone = r.ci[0] > 0 ? "good" : r.ci[1] < 0 ? "bad" : "flat";
+    root.appendChild(svg("text", { x: left - 8, y: cy + 4, "text-anchor": "end" }, r.baseline));
+    root.appendChild(svg("line", { x1: x(r.ci[0]), x2: x(r.ci[1]), y1: cy, y2: cy, class: `ci-line ${tone}`, style: `transform-origin: ${x(r.diff_mean)}px ${cy}px` }));
+    root.appendChild(svg("circle", { cx: x(r.diff_mean), cy, r: 3.5, class: `dot ${tone}` }));
+  });
+  return root;
 }
 
 function whiskerChart(series, order) {
@@ -1863,6 +1948,10 @@ if (typeof document !== "undefined") {
     bannerText,
     redTeamAllowed,
     reducedMotion,
+    EVAL_TARGETS,
+    targetVerdict,
+    evalEmpty,
+    forestPlot,
     tweenNumber,
     flash,
     presenterKey,
