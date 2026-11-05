@@ -155,3 +155,51 @@ def test_auth_flag_overrides_config():
     assert cli.auth_enabled(parser.parse_args(["serve", "--no-auth"]), on) is False
     assert cli.auth_enabled(parser.parse_args(["serve"]), off) is False
     assert cli.auth_enabled(parser.parse_args(["serve", "--auth"]), off) is True
+
+
+def test_user_list_shows_created_and_last_seen(cfg_path, monkeypatch, capsys):
+    run(cfg_path, "user", "add", "erin", "--password-stdin", stdin=PW + "\n", monkeypatch=monkeypatch)
+    capsys.readouterr()
+    assert run(cfg_path, "user", "list") == 0
+    out = capsys.readouterr().out
+    assert "สร้างเมื่อ" in out and "เข้าล่าสุด -" in out and "UTC" in out
+    with open_store(cfg_path) as st:
+        uid = st.get_user_by_name("erin")["user_id"]
+        st.create_session(uid, "tok", 1_800_000_000 * 10**6, 2_000_000_000 * 10**6, False)
+    assert run(cfg_path, "user", "list") == 0
+    out = capsys.readouterr().out
+    assert "เข้าล่าสุด -" not in out and "2027-01-15" in out
+    assert "scrypt$" not in out and "pw_hash" not in out
+
+
+@pytest.mark.parametrize("name", ["cli", "local"])
+def test_user_add_rejects_reserved_names(cfg_path, monkeypatch, capsys, name):
+    assert run(cfg_path, "user", "add", name, "--password-stdin",
+               stdin=PW + "\n", monkeypatch=monkeypatch) == 1
+    assert "สงวน" in capsys.readouterr().err
+    with open_store(cfg_path) as st:
+        assert st.list_users() == []
+
+
+def test_user_command_while_another_process_holds_the_db(cfg_path, tmp_path, capsys):
+    import subprocess
+    import sys
+
+    s = load_settings(cfg_path)
+    with open_store(cfg_path):
+        pass  # create the file and its tables first
+    code = (
+        "import duckdb,sys,time;c=duckdb.connect(sys.argv[1]);print('ready',flush=True);"
+        "time.sleep(60)"
+    )
+    holder = subprocess.Popen(
+        [sys.executable, "-c", code, str(s.paths.app_db)], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        assert run(cfg_path, "user", "list") == 1
+        err = capsys.readouterr().err
+        assert "หยุด serve" in err and "Traceback" not in err
+    finally:
+        holder.kill()
+        holder.wait()

@@ -117,3 +117,17 @@ def test_audit_limit_capped_at_500(store):
         store.add_audit(i, "u", "alice", "login")
     assert len(store.list_audit(limit=10_000)) == 500
     assert len(store.list_audit(limit=3)) == 3
+
+
+def test_list_users_shows_last_seen_from_sessions(store):
+    a = store.add_user("alice", "Alice", "analyst", "h", 5)
+    store.add_user("bob", "Bob", "viewer", "h", 6)
+    assert [(r["username"], r["created_us"], r["last_seen_us"]) for r in store.list_users()] == [
+        ("alice", 5, None),
+        ("bob", 6, None),
+    ]
+    store.create_session(a, "t1", 100, 10**15, False)
+    store.create_session(a, "t2", 200, 10**15, True)
+    rows = {r["username"]: r for r in store.list_users()}
+    assert rows["alice"]["last_seen_us"] == 200 and rows["bob"]["last_seen_us"] is None
+    assert "pw_hash" not in rows["alice"]

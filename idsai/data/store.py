@@ -497,8 +497,9 @@ class Store:
 
     def list_users(self) -> list[dict]:
         return self._rows(
-            "SELECT user_id, username, display_name, role, created_us, disabled "
-            "FROM users ORDER BY created_us, username",
+            "SELECT u.user_id, u.username, u.display_name, u.role, u.created_us, u.disabled, "
+            "(SELECT MAX(s.last_seen_us) FROM sessions s WHERE s.user_id = u.user_id) "
+            "AS last_seen_us FROM users u ORDER BY u.created_us, u.username",
             [],
         )
 

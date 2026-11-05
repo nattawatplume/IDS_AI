@@ -942,7 +942,28 @@ def read_new_password(args: argparse.Namespace) -> str:
     return pw
 
 
+RESERVED_USERNAMES = ("cli", "local")  # the audit log's actor names for the CLI and auth-off mode
+
+
+def _when(us: int | None) -> str:
+    if us is None:
+        return "-"
+    return datetime.fromtimestamp(us / S_US, UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
+    import duckdb
+
+    try:
+        return _cmd_user(args, cfg)
+    except duckdb.IOException:  # DuckDB lets one process hold app.duckdb at a time
+        raise CliError(
+            f"เปิดฐานข้อมูล {cfg.paths.app_db} ไม่ได้ น่าจะมีโปรแกรมอื่นใช้อยู่ (เช่น `idsai serve` "
+            "ที่กำลังรัน) ให้หยุด serve ก่อน แล้วลองสั่งใหม่"
+        ) from None
+
+
+def _cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
     from idsai.product.auth import check_username, hash_password
 
     act = args.user_cmd
@@ -958,7 +979,10 @@ def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
             for u in users:
                 flag = "  disabled" if u["disabled"] else ""
                 shown = f"  ({u['display_name']})" if u["display_name"] else ""
-                _say(f"{u['username']}{shown}  {u['role']}{flag}")
+                _say(
+                    f"{u['username']}{shown}  {u['role']}{flag}  "
+                    f"สร้างเมื่อ {_when(u['created_us'])}  เข้าล่าสุด {_when(u['last_seen_us'])}"
+                )
             return 0
         name = args.username
         if act == "add":
@@ -966,6 +990,8 @@ def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
                 check_username(name)
             except ValueError as e:
                 raise CliError(str(e)) from None
+            if name in RESERVED_USERNAMES:
+                raise CliError(f"ชื่อ {name} สงวนไว้ใช้ในบันทึกกิจกรรม เลือกชื่ออื่น")
             if len(args.display_name) > 64:
                 raise CliError("ชื่อที่แสดงต้องไม่เกิน 64 ตัวอักษร")
             if store.get_user_by_name(name) is not None:
