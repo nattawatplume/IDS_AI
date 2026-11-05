@@ -317,7 +317,8 @@ def test_time_to_detect_counts_only_new_alerts(tmp_path):
 
 
 HTML_TAGS = set(
-    "a button dd details div dl dt em h1 h2 h3 h4 input label li ol option p section select small span summary"
+    "a button dd details div dl dt em h1 h2 h3 h4 input label li ol option p section select "
+    "small span summary"
     " strong table tbody td th thead tr ul".split()
 )
 
@@ -355,7 +356,9 @@ def test_auditor_popup_is_anchored_inside_the_viewport_when_narrow():
     assert m, "no narrow media block"
     block = m.group(1)
     assert re.search(r"\.auditor\s*\{\s*position:\s*static", block)
-    assert re.search(r"\.auditor-checks\s*\{[^}]*left:\s*16px[^}]*right:\s*16px[^}]*width:\s*auto", block)
+    assert re.search(
+        r"\.auditor-checks\s*\{[^}]*left:\s*16px[^}]*right:\s*16px[^}]*width:\s*auto", block
+    )
 
 
 MOTION_JS = r"""
@@ -385,7 +388,8 @@ assert.strictEqual(k({ key: "ภ", code: "Digit6", target: { tagName: "BODY" } }
 assert.strictEqual(k({ key: "ๅ", code: "Numpad3", target: { tagName: "BODY" } }), "page:3");
 assert.strictEqual(k({ key: "ๅ", code: "Digit7", target: { tagName: "BODY" } }), null);
 assert.strictEqual(k({ key: "ๅ", code: "Digit0", target: { tagName: "BODY" } }), null);
-assert.strictEqual(k({ key: "Spacebar", code: "Space", target: { tagName: "BODY" } }), "toggle-play");
+assert.strictEqual(k({ key: "Spacebar", code: "Space", target: { tagName: "BODY" } }),
+  "toggle-play");
 assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "INPUT" } }), null);
 assert.strictEqual(k({ key: "ะ", code: "KeyT", ctrlKey: true, target: { tagName: "BODY" } }), null);
 assert.strictEqual(m.PAGE_ORDER.length, 6);
@@ -552,9 +556,11 @@ def test_red_team_ring_and_one_row_form():
 
 
 VERDICT_BODY = r"""
-const cell = (mean, ci, n) => ({ mean: { recall_any: mean, fa_per_symbol_day: 1.65, fa_per_symbol_day_hard: 11.2 },
+const cell = (mean, ci, n) => ({
+  mean: { recall_any: mean, fa_per_symbol_day: 1.65, fa_per_symbol_day_hard: 11.2 },
   ci: { recall_any: ci }, n_events: n });
-const report = (full, rows) => ({ runs: 5, experiments: { real_t001: { full: { "2": full } } },
+const report = (full, rows) => ({
+  runs: 5, experiments: { real_t001: { full: { "2": full } } },
   paired_bootstrap: { budget: 2, metric: "recall_any", rows } });
 const T = (id) => m.EVAL_TARGETS.find((t) => t.id === id);
 const miss = m.targetVerdict(report(cell(0.739, [0.68, 0.801], 200), []), T("real_recall"));
@@ -562,14 +568,21 @@ assert.strictEqual(miss.state, "miss");
 assert.strictEqual(miss.value, 0.739);
 assert.strictEqual(miss.n, 200);
 assert.deepStrictEqual(miss.ci, [0.68, 0.801]);
-assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_recall")).state, "pass");
+assert.strictEqual(
+  m.targetVerdict(report(cell(0.85, null, 200), []), T("real_recall")).state, "pass");
 assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa")).state, "pass");
-assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa_hard")).state, "miss");
+assert.strictEqual(
+  m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa_hard")).state, "miss");
 // variant absent / experiment absent / budget absent: never pass
-assert.strictEqual(m.targetVerdict({ runs: 5, experiments: { real_t001: {} } }, T("real_recall")).state, "unmeasured");
-assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("semisyn_pump_burst")).state, "unmeasured");
-assert.strictEqual(m.targetVerdict({ runs: 5, experiments: { real_t001: { full: { "5": cell(0.9, null, 9) } } } }, T("real_recall")).state, "unmeasured");
-assert.strictEqual(m.targetVerdict(report({ mean: {}, n_events: 3 }, []), T("real_recall")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: { real_t001: {} } }, T("real_recall")).state,
+  "unmeasured");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: {} }, T("semisyn_pump_burst")).state, "unmeasured");
+const noBudget = { runs: 5, experiments: { real_t001: { full: { "5": cell(0.9, null, 9) } } } };
+assert.strictEqual(m.targetVerdict(noBudget, T("real_recall")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict(report({ mean: {}, n_events: 3 }, []), T("real_recall")).state, "unmeasured");
 // paired: the CI lower bound must clear 0; a baseline wholly better is a miss
 const rows = [
   { baseline: "baseline.random", diff_mean: 0.639, ci: [0.57, 0.7], n_events: 200 },
@@ -585,22 +598,31 @@ assert.strictEqual(ref.state, "reference");
 assert.strictEqual(ref.value, 0.639);
 assert.deepStrictEqual(ref.ci, [0.57, 0.7]);
 assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.pca")).state, "unmeasured");
-assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.random")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.random")).state, "unmeasured");
 const ids = m.EVAL_TARGETS.map((t) => t.id);
 assert.ok(!ids.includes("ae_vs_baseline.random") || T("ae_vs_baseline.random").reference === true);
 assert.ok(T("ae_vs_baseline.pca").reference === true);
-for (const b of ["baseline.iforest", "stat.robust_z", "baseline.kk"]) assert.ok(!T(`ae_vs_${b}`).reference, b);
+for (const b of ["baseline.iforest", "stat.robust_z", "baseline.kk"]) {
+  assert.ok(!T(`ae_vs_${b}`).reference, b);
+}
 // latency has no metric in report.json: always unmeasured, never a pass
 assert.strictEqual(m.targetVerdict(r, T("latency_p99")).state, "unmeasured");
-assert.strictEqual(m.targetVerdict(report(cell(0.9, null, 9), []), T("latency_p99")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict(report(cell(0.9, null, 9), []), T("latency_p99")).state, "unmeasured");
 // recall_correct rides along on the recall cards
-const withCorrect = { mean: { recall_any: 1, recall_correct: 0.001 }, ci: { recall_any: [1, 1], recall_correct: [0, 0.003] }, n_events: 401 };
-const wash = m.targetVerdict({ runs: 5, experiments: { semisyn: { wash_pingpong: { "2": withCorrect } } } }, T("semisyn_wash_pingpong"));
+const withCorrect = {
+  mean: { recall_any: 1, recall_correct: 0.001 },
+  ci: { recall_any: [1, 1], recall_correct: [0, 0.003] }, n_events: 401 };
+const wash = m.targetVerdict(
+  { runs: 5, experiments: { semisyn: { wash_pingpong: { "2": withCorrect } } } },
+  T("semisyn_wash_pingpong"));
 assert.strictEqual(wash.state, "pass");
 assert.strictEqual(wash.correct.value, 0.001);
 assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.kk")).state, "miss");
 assert.strictEqual(m.targetVerdict(r, T("ae_vs_stat.robust_z")).state, "miss");
-assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.kk")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.kk")).state, "unmeasured");
 assert.strictEqual(m.targetVerdict(null, T("real_recall")).state, "unmeasured");
 assert.strictEqual(m.evalEmpty({ runs: 0 }), true);
 assert.strictEqual(m.evalEmpty(null), true);
@@ -617,7 +639,7 @@ def test_target_verdicts_against_the_real_report(tmp_path):
     if not rpt.is_file():
         pytest.skip("data/report.json is not present")
     body = (
-        "const rep = JSON.parse(require('fs').readFileSync(%r, 'utf8'));\n" % str(rpt)
+        f"const rep = JSON.parse(require('fs').readFileSync({str(rpt)!r}, 'utf8'));\n"
         + r"""
 const got = {};
 for (const t of m.EVAL_TARGETS) {
@@ -626,9 +648,12 @@ for (const t of m.EVAL_TARGETS) {
 }
 const want = {
   real_recall: ["miss", 0.739], real_fa: ["pass", 1.65], real_fa_hard: ["miss", 11.17],
-  semisyn_pump_burst: ["miss", 0.295], semisyn_pump_stealth: ["miss", 0.351], semisyn_wash_pingpong: ["pass", 1],
-  "ae_vs_baseline.iforest": ["miss"], "ae_vs_stat.robust_z": ["miss"], "ae_vs_baseline.kk": ["miss"],
-  "ae_vs_baseline.random": ["reference"], "ae_vs_baseline.pca": ["reference"], latency_p99: ["unmeasured", null],
+  semisyn_pump_burst: ["miss", 0.295], semisyn_pump_stealth: ["miss", 0.351],
+  semisyn_wash_pingpong: ["pass", 1],
+  "ae_vs_baseline.iforest": ["miss"], "ae_vs_stat.robust_z": ["miss"],
+  "ae_vs_baseline.kk": ["miss"],
+  "ae_vs_baseline.random": ["reference"], "ae_vs_baseline.pca": ["reference"],
+  latency_p99: ["unmeasured", null],
 };
 for (const [id, [state, value]] of Object.entries(want)) {
   assert.strictEqual(got[id][0], state, id + " " + JSON.stringify(got[id]));
@@ -699,7 +724,10 @@ def test_activity_renders_audit_fields_as_text_only():
 def test_mutating_buttons_check_can():
     js = text("app.js")
     control = js[js.index("async function control(") : js.index("function bindReplay(")]
-    assert 'can("analyst")' in control and control.index('can("analyst")') < control.index("postJson(")
+    assert (
+        'can("analyst")' in control
+        and control.index('can("analyst")') < control.index("postJson(")
+    )
     fb = js[js.index("function feedbackCard(") : js.index("async function drawDetailChart(")]
     assert 'can("analyst")' in fb and fb.index('can("analyst")') < fb.index("postJson(")
     rt = js[js.index('$("redteam-form").addEventListener') : js.index("function addInjection(")]
@@ -719,7 +747,8 @@ AUTH_BODY = r"""
 const s = m.safeNext;
 assert.strictEqual(s("#/eval"), "#/eval");
 assert.strictEqual(s("#/alerts/abc%20d"), "#/alerts/abc%20d");
-for (const bad of ["https://x", "//x", "", null, undefined, "eval", "javascript:alert(1)", "#/login?next=%23%2Fx", "#/\nx", 42]) {
+for (const bad of ["https://x", "//x", "", null, undefined, "eval", "javascript:alert(1)",
+  "#/login?next=%23%2Fx", "#/\nx", 42]) {
   assert.strictEqual(s(bad), "#/monitor", String(bad));
 }
 """
@@ -749,9 +778,12 @@ const m = require(process.argv[2]);
 """
 PREFS_BODY = r"""
 const store = {};
-globalThis.window = { localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } } };
+globalThis.window = { localStorage: {
+  getItem: (k) => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); } } };
 const calls = [];
-globalThis.fetch = async (path, opts) => { calls.push([path, opts]); return { ok: true, status: 200, json: async () => ({}) }; };
+globalThis.fetch = async (path, opts) => {
+  calls.push([path, opts]); return { ok: true, status: 200, json: async () => ({}) }; };
 (async () => {
   m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
   m.savePrefs({ symbol: "ETHUSDT" });
@@ -812,7 +844,8 @@ globalThis.matchMedia = () => ({ matches: false });
 const m = require(process.argv[2]);
 globalThis.document = { getElementById: () => null, body: { classList: { toggle() {} } } };
 globalThis.location = { hash: "#/eval" };
-const reply = (status) => async () => ({ ok: status < 400, status, json: async () => ({ detail: "กรุณาเข้าสู่ระบบ" }) });
+const reply = (status) => async () => ({
+  ok: status < 400, status, json: async () => ({ detail: "กรุณาเข้าสู่ระบบ" }) });
 """
 
 SESSION_LOST_BODY = r"""
@@ -831,7 +864,8 @@ SESSION_LOST_BODY = r"""
   location.hash = "#/login";
   await assert.rejects(() => m.api("/api/auth/login", { method: "POST" }));
   assert.notStrictEqual(m.getMe(), null);
-  // WS close 4401: no reconnect, user cleared, sign-in route; other codes keep the socket for the retry loop
+  // WS close 4401: no reconnect, user cleared, sign-in route;
+  // other codes keep the socket for the retry loop
   location.hash = "#/alerts";
   const ws = {};
   m.setWs(ws);

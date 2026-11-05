@@ -141,7 +141,11 @@ def test_config_hash_platform_independent_paths():
 
 def test_config_hash_ignores_the_auth_section():
     base = config_hash(load_settings())
-    for auth in ({"enabled": True}, {"cookie_secure": True}, {"enabled": True, "cookie_secure": True}):
+    for auth in (
+        {"enabled": True},
+        {"cookie_secure": True},
+        {"enabled": True, "cookie_secure": True},
+    ):
         assert config_hash(load_settings(overrides={"auth": auth})) == base
     # other sections still change it
     assert config_hash(load_settings(overrides={"live": {"symbols": ["ZZZBTC"]}})) != base

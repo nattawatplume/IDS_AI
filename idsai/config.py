@@ -191,7 +191,9 @@ def load_settings(path: str | Path | None = None, overrides: dict | None = None)
 def config_hash(s: Settings) -> str:
     """12-hex sha256 of the canonical JSON dump of the settings, minus `auth`: sign-in changes no
     model, feature or detection output, so it must not invalidate packs, bundles or run records."""
-    blob = json.dumps(s.model_dump(mode="json", exclude={"auth"}), sort_keys=True, separators=(",", ":"))
+    blob = json.dumps(
+        s.model_dump(mode="json", exclude={"auth"}), sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 

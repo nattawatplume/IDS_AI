@@ -32,7 +32,10 @@ def _scrypt(pw: str, salt: bytes) -> bytes:
 
 def hash_password(pw: str) -> str:
     salt = secrets.token_bytes(16)
-    b64 = lambda b: base64.b64encode(b).decode("ascii")
+
+    def b64(b: bytes) -> str:
+        return base64.b64encode(b).decode("ascii")
+
     return f"{_PREFIX}{b64(salt)}${b64(_scrypt(pw, salt))}"
 
 

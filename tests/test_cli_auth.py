@@ -158,7 +158,15 @@ def test_auth_flag_overrides_config():
 
 
 def test_user_list_shows_created_and_last_seen(cfg_path, monkeypatch, capsys):
-    run(cfg_path, "user", "add", "erin", "--password-stdin", stdin=PW + "\n", monkeypatch=monkeypatch)
+    run(
+        cfg_path,
+        "user",
+        "add",
+        "erin",
+        "--password-stdin",
+        stdin=PW + "\n",
+        monkeypatch=monkeypatch,
+    )
     capsys.readouterr()
     assert run(cfg_path, "user", "list") == 0
     out = capsys.readouterr().out
