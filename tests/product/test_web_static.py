@@ -224,7 +224,7 @@ def test_live_mode_gates_replay_and_red_team():
     js = text("app.js")
     body = js[js.index("function setMode(") : js.index("function eventNowUs(")]
     assert 'const live = mode === "live";' in body
-    assert '$("replay-controls").hidden = live;' in body
+    assert '$("replay-bar").hidden = live;' in body
     assert "const allowed = redTeamAllowed(mode);" in body
     assert "refused.hidden = allowed;" in body and "REFUSED_TH" in body
     assert 'querySelectorAll("select, input, button")' in body
@@ -393,7 +393,7 @@ def test_top_bar_has_a_mid_breakpoint():
     css = text("styles.css")
     m = re.search(r"@media \(max-width: 1200px\) \{(.*?)\n\}", css, re.S)
     assert m, "no tablet breakpoint for the top bar"
-    for sel in (".brand-name", "#auditor-text", "#user-name", ".nav a"):
+    for sel in (".brand-name", "#user-name", ".nav a"):
         assert sel in m.group(1), sel
     assert "viewport-fit=cover" in text("index.html")
 
@@ -414,15 +414,20 @@ def test_no_emoji_or_bang_in_copy():
             assert "!" not in chunk, chunk[:80]
 
 
-def test_auditor_popup_is_anchored_inside_the_viewport_when_narrow():
-    css = text("styles.css")
-    m = re.search(r"@media \(max-width: 720px\) \{(.*?)\n\}", css, re.S)
-    assert m, "no narrow media block"
-    block = m.group(1)
-    assert re.search(r"\.auditor\s*\{\s*position:\s*static", block)
-    assert re.search(
-        r"\.auditor-checks\s*\{[^}]*left:\s*16px[^}]*right:\s*16px[^}]*width:\s*auto", block
-    )
+def test_auditor_and_budget_live_in_the_home_cards_not_the_header():
+    html, js = text("index.html"), text("app.js")
+    header = re.search(r"<header\b.*?</header>", html, re.S).group(0)
+    for gone in ('id="auditor"', "auditor-text", "budget-meter", "budget-text", "งบเตือน"):
+        assert gone not in header, gone
+    alerts = re.search(r'<div id="card-alerts".*?<!-- /card-alerts -->', html, re.S).group(0)
+    assert 'id="budget-line"' in alerts and 'id="alerts-count"' in alerts
+    budget = js[js.index("function renderBudget(") :]
+    assert "ใช้งบแจ้งเตือนไป" in budget[: budget.index("\n}\n")]
+    health = re.search(r'<details id="card-health".*?</details>', html, re.S).group(0)
+    assert 'id="health-checks"' in health and "<summary" in health
+    # every check is named in Thai: no raw auditor names on screen
+    for name in ("alert_rate", "calibration", "latency", "trade_gaps", "staleness", "warmup"):
+        assert re.search(rf'\b{name}: "[^"]*[\u0e00-\u0e7f]', js), name
 
 
 MOTION_JS = r"""
@@ -565,14 +570,65 @@ def test_space_toggle_follows_replay_state_and_skips_live(tmp_path):
 # ---- monitor: kpi strip, alert rail, synced crosshair ----
 
 
-def test_monitor_has_kpi_strip_rail_and_info():
+def _home(html: str) -> str:
+    return re.search(r'<section id="page-home".*?</section>', html, re.S).group(0)
+
+
+def test_home_markup():
     html = text("index.html")
-    for i in [
-        "kpi-symbol", "kpi-f", "kpi-tau", "kpi-alerts", "kpi-budget", "kpi-auditor",
-        "alert-rail", "layers-toggle", "chart-info", "chart-info-body",
-    ]:  # fmt: skip
-        assert f'id="{i}"' in html, i
-    assert "ค่า p รวม" in html and "ความหายากเทียบตลาดปกติ" in html
+    home = _home(html)
+    for i in (
+        "hero-orb", "hero-title", "hero-line", "card-alerts", "card-symbol", "card-health",
+        "chart-card", "replay-bar", "rail", "alert-rail", "layers-toggle", "chart-info-body",
+    ):  # fmt: skip
+        assert f'id="{i}"' in home, i
+    assert re.search(r'<details\b[^>]*\bid="chart-details"', home), "chart details is a <details>"
+    details = re.search(r'<details\b[^>]*\bid="chart-details".*?</details>', home, re.S).group(0)
+    assert 'id="layers-toggle"' in details and 'id="chart-info-body"' in details
+    assert "ดูรายละเอียด" in details
+    bar = re.search(r'<div id="replay-bar".*?<!-- /replay-bar -->', home, re.S).group(0)
+    chips = re.findall(r'<button\b[^>]*\bclass="[^"]*\bchip\b[^"]*"[^>]*>', bar)
+    assert len(chips) == 4, chips
+    adv = re.search(r'<details\b[^>]*>(?:(?!</details>).)*\bid="advanced-seek"', bar, re.S)
+    assert adv, "the seek field sits behind ขั้นสูง in a <details>"
+    assert "ขั้นสูง" in bar and "ไปที่เวลา" in bar
+    # the old KPI strip and info button are gone
+    for gone in ("kpi-", 'class="kpis"', 'id="chart-info"', 'id="replay-controls"'):
+        assert gone not in html, gone
+    assert "ค่า p รวม" in home and "ความหายากเทียบตลาดปกติ" in home
+    # the home page keeps one primary action: the play button
+    assert len(re.findall(r'class="[^"]*\bprimary\b', home)) == 1
+
+
+def test_chart_colours_and_titles():
+    css, js = text("styles.css"), text("app.js")
+    for decl in ("--line-price: #a5b4fc", "--line-f: #8b5cf6", "--tau: #ffb547"):
+        assert decl in css, decl
+    init = js[js.index("function initChart(") : js.index("function addLanes(")]
+    assert "ระดับความผิดปกติ" in init and "glow" in init
+    tau = js[js.index("function setTau(") : js.index("async function loadSeries(")]
+    assert 'title: "เส้นเตือน"' in tau and "Dashed" in tau
+
+
+def test_glass_cards_lift_on_hover_but_not_under_reduced_motion():
+    css = text("styles.css")
+    hover = re.search(r"(?m)^\.card:hover\s*\{([^}]*)\}", css)
+    assert hover and "translateY(-2px)" in hover.group(1) and "--glass-border-hi" in hover.group(1)
+    reduced = css.split("prefers-reduced-motion: reduce")[1]
+    assert re.search(r"\.card:hover[^{]*\{[^}]*transform:\s*none", reduced)
+
+
+def test_hero_and_rail_render_only_what_changed():
+    js = text("app.js")
+    hero = js[js.index("function renderHero(") :]
+    hero = hero[: hero.index("\n}\n")]
+    assert "heroStatus(" in hero and "flash(" in hero and "state.hero" in hero
+    for caller in ("function renderHealth(", "function onScore(", "function alertsChanged("):
+        body = js[js.index(caller) :]
+        assert "renderHero()" in body[: body.index("\n}\n")], caller
+    rail = js[js.index("function renderRail(") :]
+    rail = rail[: rail.index("\n}\n")]
+    assert ".slice(0, 5)" in rail and "firstSentence(" in rail and "el(" in rail
 
 
 def test_ws_close_turns_live_dot_off():
@@ -593,9 +649,9 @@ def test_alerts_kpi_counts_the_selected_symbol_only():
     kpi = js.split("function renderAlertsKpi(")[1].split("\n}\n")[0]
     assert "a.symbol === state.symbol" in kpi and "DAY_US" in kpi
     assert '"–"' in kpi
-    assert 'id="kpi-alerts">–<' in text("index.html")
+    assert 'id="alerts-count">–<' in text("index.html")
     change = js.split('$("symbol-select").addEventListener("change"')[1][:400]
-    assert "renderAlertsKpi()" in change
+    assert "renderBudget()" in change  # renderBudget recounts through renderAlertsKpi
 
 
 def test_resting_styles_are_visible_when_animation_does_not_run():
@@ -1238,3 +1294,125 @@ def test_help_route_waits_for_the_app_view():
     assert "openHelp()" in head and 'state.view === "app"' in head and "pendingHelp = true" in head
     enter = js[js.index("async function enterApp(") : js.index("async function boot(")]
     assert "state.pendingHelp" in enter and "openHelp()" in enter
+
+
+# ---- home: hero status, speed chips, first sentence, viewer gates ----
+
+HERO_BODY = r"""
+const S = 1e6;
+const now = 10000 * S;
+const h = (o) => m.heroStatus({ nowUs: now, alerts: [], f: null, tau: null, auditor: "ok",
+  symbol: "STEEMBTC", ...o });
+assert.strictEqual(m.HERO_WATCH_RATIO, 0.8);
+assert.strictEqual(m.HERO_RECENT_US, 30 * 60 * S);
+let r = h({});
+assert.deepStrictEqual(r, { level: "normal", title: "ตลาดปกติ",
+  line: "ไม่มีแจ้งเตือนใน 30 นาทีล่าสุด", alertId: null });
+assert.strictEqual(h({ f: 0.79, tau: 1 }).level, "normal");
+r = h({ f: 0.8, tau: 1 });
+assert.strictEqual(r.level, "watch");
+assert.strictEqual(r.title, "กำลังเฝ้าระวัง");
+assert.strictEqual(r.line, "ระดับความผิดปกติใกล้เส้นเตือน");
+r = h({ auditor: "warn" });
+assert.strictEqual(r.level, "watch");
+assert.strictEqual(r.line, "ระบบตรวจตัวเองพบจุดที่ควรดู");
+assert.strictEqual(r.alertId, null);
+// 16:42 UTC on some day, exactly 30 min before now
+const at = 3 * 86400 * S + (16 * 3600 + 42 * 60) * S;
+const edge = { alert_id: "a-edge", symbol: "STEEMBTC", ts_event_us: at };
+r = m.heroStatus({ nowUs: at + 30 * 60 * S, alerts: [edge], f: null, tau: null, auditor: "ok",
+  symbol: "STEEMBTC" });
+assert.deepStrictEqual(r, { level: "alert", title: "พบความผิดปกติทางสถิติ",
+  line: "ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ STEEMBTC เมื่อ 16:42 น.", alertId: "a-edge" });
+r = m.heroStatus({ nowUs: at + 30 * 60 * S + 1, alerts: [edge], f: 0.1, tau: 1, auditor: "ok",
+  symbol: "STEEMBTC" });
+assert.strictEqual(r.level, "normal");
+// both hold: alert wins, and the newest recent alert is the one named
+const older = { alert_id: "a-old", symbol: "STEEMBTC", ts_event_us: now - 20 * 60 * S };
+const newer = { alert_id: "a-new", symbol: "STEEMBTC", ts_event_us: now - 5 * 60 * S };
+r = h({ alerts: new Map([["a-old", older], ["a-new", newer]]).values(), f: 5, tau: 1,
+  auditor: "warn" });
+assert.strictEqual(r.level, "alert");
+assert.strictEqual(r.alertId, "a-new");
+// nulls never throw
+for (const o of [{ nowUs: null }, { nowUs: undefined, f: undefined, tau: undefined },
+  { alerts: null }, { alerts: undefined, auditor: undefined }, { nowUs: null, alerts: [newer] }]) {
+  assert.strictEqual(typeof m.heroStatus({ ...o }).level, "string");
+  assert.strictEqual(typeof h(o).level, "string");
+}
+assert.strictEqual(m.heroStatus({ nowUs: null, alerts: [newer], f: 2, tau: 1 }).level, "watch");
+assert.deepStrictEqual(m.SPEED_CHIPS, [{ label: "1×", v: 1 }, { label: "10×", v: 10 },
+  { label: "60×", v: 60 }, { label: "เร็วสุด", v: 0 }]);
+"""
+
+FIRST_SENTENCE_BODY = r"""
+const f = m.firstSentence;
+assert.strictEqual(f(""), "");
+assert.strictEqual(f(null), "");
+assert.strictEqual(f(undefined), "");
+assert.strictEqual(f("ราคาขึ้นเร็ว. ปริมาณสูง."), "ราคาขึ้นเร็ว");
+assert.strictEqual(f("ราคาขึ้นเร็ว"), "ราคาขึ้นเร็ว");
+// the explainer joins its sentences with "; ", and a decimal point is never a sentence end
+const ex = "พบความผิดปกติทางสถิติ (MM-T001 ปั่นแล้วเท) ที่ STEEMBTC เวลา 16:42:10 UTC: " +
+  "ปริมาณ 3.5 เท่า; 2 จาก 3 ชั้นตรวจจับเห็นพ้อง; ความหายากเทียบตลาดปกติ p ≈ 1.2e-5";
+assert.strictEqual(f(ex),
+  "พบความผิดปกติทางสถิติ (MM-T001 ปั่นแล้วเท) ที่ STEEMBTC เวลา 16:42:10 UTC: ปริมาณ 3.5 เท่า");
+assert.strictEqual(f("  a   b.  c"), "a b");
+const long = "ก".repeat(200);
+assert.strictEqual(f(long).length, 120);
+assert.ok(f(long).endsWith("…"));
+assert.strictEqual(f("ข".repeat(120)), "ข".repeat(120));
+"""
+
+GATES_HEAD = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: false });
+const m = require(process.argv[2]);
+const nodes = {};
+const chips = [0, 1, 2, 3].map(() => ({ disabled: false, title: "",
+  removeAttribute(k) { this[k] = ""; } }));
+const node = (id) => (nodes[id] ||= { id, disabled: false, hidden: false, textContent: "",
+  title: "", removeAttribute(k) { this[k] = ""; },
+  querySelectorAll: () => (id === "replay-bar" ? chips : []) });
+globalThis.document = { getElementById: node, querySelectorAll: () => [],
+  body: { classList: { toggle() {} } } };
+"""
+
+GATES_BODY = r"""
+m.setMe({ username: "v", role: "viewer", auth_enabled: true });
+m.applyRoleGates();
+for (const id of ["btn-play", "seek-input", "btn-seek"]) {
+  assert.strictEqual(nodes[id].disabled, true, id);
+}
+for (const c of chips) assert.strictEqual(c.disabled, true);
+assert.strictEqual(nodes["replay-reason"].hidden, false);
+assert.strictEqual(nodes["replay-reason"].textContent, "เฉพาะผู้วิเคราะห์ขึ้นไปที่ควบคุมได้");
+m.setMe({ username: "a", role: "analyst", auth_enabled: true });
+m.applyRoleGates();
+for (const id of ["btn-play", "seek-input", "btn-seek"]) {
+  assert.strictEqual(nodes[id].disabled, false, id);
+}
+for (const c of chips) assert.strictEqual(c.disabled, false);
+assert.strictEqual(nodes["replay-reason"].hidden, true);
+console.log("ok");
+"""
+
+
+def test_hero_status_rules(tmp_path):
+    _run_motion(tmp_path, "false", HERO_BODY)
+
+
+def test_first_sentence(tmp_path):
+    _run_motion(tmp_path, "false", FIRST_SENTENCE_BODY)
+
+
+def test_hero_and_replay_gates_viewer(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "gates.js"
+    script.write_text(GATES_HEAD + GATES_BODY, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr

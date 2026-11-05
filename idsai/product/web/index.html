@@ -36,18 +36,6 @@
         <span id="mode-badge" class="badge-mode">…</span>
         <span id="clock" class="clock">–</span>
       </span>
-      <details id="auditor" class="stat auditor">
-        <summary class="chip">
-          <span class="stat-label">ตรวจระบบ</span>
-          <span id="auditor-dot" class="dot"></span><span id="auditor-text">กำลังโหลด…</span>
-        </summary>
-        <ul id="auditor-checks" class="auditor-checks"></ul>
-      </details>
-      <div class="chip budget" title="งบการแจ้งเตือน (24 ชม.ล่าสุด)">
-        <span class="stat-label">งบเตือน</span>
-        <span id="budget-meter" class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
-        <span id="budget-text" class="mono">–</span>
-      </div>
       <button id="help-btn" class="icon-btn" type="button" aria-label="วิธีใช้" title="วิธีใช้ (กด ?)">?</button>
       <details id="user-chip" class="user-chip" hidden>
         <summary class="chip" aria-label="เมนูผู้ใช้">
@@ -104,63 +92,108 @@
       </form>
     </section>
 
-    <!-- Home (redesigned in a later task) -->
+    <!-- Home: the status first, then the numbers, the chart and the replay, newest alerts beside -->
     <section id="page-home" class="page" hidden>
-      <div class="toolbar">
-        <label class="field">
-          <span>สัญลักษณ์</span>
-          <select id="symbol-select"></select>
-        </label>
-        <div id="replay-controls" class="replay" hidden>
-          <button id="btn-play" type="button">▶ เล่น</button>
-          <button id="btn-pause" type="button">❚❚ หยุด</button>
-          <label class="field">
-            <span>ความเร็ว</span>
-            <select id="speed-select">
-              <option value="" selected disabled>เลือก…</option>
-              <option value="1">1×</option>
-              <option value="10">10×</option>
-              <option value="60">60×</option>
-              <option value="300">300×</option>
-              <option value="0">เร็วสุด</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>ไปที่เวลา (UTC)</span>
-            <input id="seek-input" type="datetime-local" step="1">
-          </label>
-          <button id="btn-seek" type="button">ไป</button>
-          <span id="replay-status" class="muted small"></span>
+      <div id="hero" class="card hero">
+        <span id="hero-orb" class="orb wait" aria-hidden="true"></span>
+        <div class="hero-text" role="status" aria-live="polite">
+          <h1 id="hero-title" class="hero-title">กำลังอ่านสถานะ</h1>
+          <p id="hero-line" class="hero-line"></p>
         </div>
       </div>
-      <div class="kpis">
-        <div class="kpi"><span class="kpi-label">สัญลักษณ์</span><span class="kpi-value mono" id="kpi-symbol">–</span></div>
-        <div class="kpi"><span class="kpi-label">ค่า F ล่าสุด / τ</span><span class="kpi-value mono"><span id="kpi-f">–</span><small class="kpi-sub">/ <span id="kpi-tau">–</span></small></span></div>
-        <div class="kpi"><span class="kpi-label">แจ้งเตือน 24 ชม.</span><span class="kpi-value mono kpi-alert"><span id="kpi-alerts">–</span><small class="kpi-sub" id="kpi-budget">งบ –</small></span></div>
-        <div class="kpi"><span class="kpi-label">Auditor</span><span class="kpi-value" id="kpi-auditor">–</span></div>
+
+      <div class="home-cards">
+        <div id="card-alerts" class="card stat-card">
+          <span class="card-label">แจ้งเตือนวันนี้</span>
+          <span class="card-value"><span id="alerts-count">–</span> <span class="card-unit">ครั้ง</span></span>
+          <span class="card-sub">
+            <span class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
+            <span id="budget-line">ใช้งบแจ้งเตือนไป –</span>
+          </span>
+        </div><!-- /card-alerts -->
+        <div id="card-symbol" class="card stat-card">
+          <span class="card-label">เหรียญที่ดูอยู่</span>
+          <span id="symbol-name" class="card-value">–</span>
+          <label id="symbol-pick" class="symbol-pick" hidden>
+            <span class="card-sub">เปลี่ยนเหรียญ</span>
+            <select id="symbol-select"></select>
+          </label>
+          <span id="symbol-price" class="card-sub">ราคาล่าสุด –</span>
+        </div>
+        <details id="card-health" class="card stat-card health-card">
+          <summary>
+            <span class="card-label">สุขภาพระบบ</span>
+            <span class="card-value"><span id="health-dot" class="dot"></span><span id="health-text">–</span></span>
+            <span id="health-sub" class="card-sub">กดเพื่อดูรายการตรวจ</span>
+          </summary>
+          <ul id="health-checks" class="health-checks"></ul>
+        </details>
       </div>
-      <div class="monitor-body">
-        <div class="monitor-main">
-          <div class="chart-card">
-            <div class="chart-bar">
-              <span id="readout" class="readout mono small">–</span>
-              <button id="layers-toggle" class="mini" type="button" aria-expanded="false">แสดง L1/L2/L3</button>
-              <button id="chart-info" class="mini" type="button" aria-expanded="false" aria-label="คำอธิบายกราฟ">i</button>
+
+      <div class="home-body">
+        <div class="home-main">
+          <div id="chart-card" class="card chart-card">
+            <div class="chart-head">
+              <h2 class="card-title">ราคาและระดับความผิดปกติ</h2>
+              <span id="readout" class="readout small">–</span>
             </div>
-            <p id="chart-info-body" class="legend small muted" hidden>
-              บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
-              F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
-              L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
-            </p>
             <div id="chart" class="chart"></div>
-            <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+            <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลของเหรียญนี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+            <details id="chart-details" class="chart-details">
+              <summary>ดูรายละเอียด</summary>
+              <p id="chart-info-body" class="small muted">
+                กราฟบนคือราคาปิด ลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
+                กราฟล่างคือระดับความผิดปกติ F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก)
+                เส้นประสีส้มคือเส้นเตือน τ เมื่อ F ขึ้นถึงเส้นนี้ระบบจะแจ้งเตือน ·
+                L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
+              </p>
+              <button id="layers-toggle" class="mini" type="button" aria-expanded="false">แสดง L1/L2/L3</button>
+            </details>
           </div>
         </div>
-        <aside class="rail" aria-label="แจ้งเตือนล่าสุด">
-          <h2 class="rail-title">แจ้งเตือนล่าสุด</h2>
-          <div id="alert-rail" class="rail-list"></div>
-          <p id="rail-empty" class="empty small" hidden>ยังไม่มีการแจ้งเตือน</p>
-        </aside>
+
+        <div class="home-side">
+          <div id="replay-bar" class="card replay-bar" hidden>
+            <div class="replay-top">
+              <button id="btn-play" type="button" class="primary play-btn" aria-label="หยุดชั่วคราว" title="หยุดชั่วคราว (กด Space)">❚❚</button>
+              <div class="replay-now">
+                <span class="replay-label">ย้อนดูข้อมูลจริง</span>
+                <span id="replay-clock" class="replay-clock small">–</span>
+              </div>
+            </div>
+            <div class="replay-track" title="ตำแหน่งของเวลาในข้อมูลภายในวันนั้น (UTC)"><span id="replay-fill" class="replay-fill"></span></div>
+            <div class="speed-row">
+              <span class="small muted">ความเร็ว</span>
+              <div class="speed-chips" role="group" aria-label="ความเร็วในการเล่น">
+                <button type="button" class="chip speed-chip" data-speed="1" aria-pressed="false">1×</button>
+                <button type="button" class="chip speed-chip" data-speed="10" aria-pressed="false">10×</button>
+                <button type="button" class="chip speed-chip" data-speed="60" aria-pressed="false">60×</button>
+                <button type="button" class="chip speed-chip" data-speed="0" aria-pressed="false">เร็วสุด</button>
+              </div>
+            </div>
+            <p id="replay-reason" class="small muted replay-reason" hidden></p>
+            <span id="replay-status" class="small muted replay-status"></span>
+            <details class="replay-advanced">
+              <summary class="small">ขั้นสูง</summary>
+              <div id="advanced-seek" class="advanced-seek">
+                <label class="field">
+                  <span>ไปที่เวลา (UTC)</span>
+                  <input id="seek-input" type="datetime-local" step="1">
+                </label>
+                <button id="btn-seek" type="button">ไป</button>
+              </div>
+            </details>
+          </div><!-- /replay-bar -->
+
+          <aside id="rail" class="rail" aria-label="แจ้งเตือนล่าสุด">
+            <div class="rail-head">
+              <h2 class="rail-title">แจ้งเตือนล่าสุด</h2>
+              <a href="#/alerts" class="small">ดูทั้งหมด</a>
+            </div>
+            <div id="alert-rail" class="rail-list"></div>
+            <p id="rail-empty" class="empty small" hidden>ยังไม่มีการแจ้งเตือน</p>
+          </aside>
+        </div>
       </div>
     </section>
 

@@ -23,7 +23,29 @@ const LANES = [
 ];
 const SEVERITY_TH = { 1: "ต่ำ", 2: "กลาง", 3: "สูง" };
 const STATUS_TH = { open: "เปิด", updated: "อัปเดต", closed: "ปิดแล้ว" };
-const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail: "ผิดปกติ" };
+const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail: "มีปัญหา" };
+// the auditor's check names, as a teacher would read them
+const CHECK_NAME_TH = {
+  alert_rate: "จำนวนการแจ้งเตือนเทียบงบ",
+  calibration: "การเทียบมาตรฐานของคะแนน",
+  calibration_resolution: "ความละเอียดของการเทียบมาตรฐาน",
+  latency: "ความเร็วในการคำนวณ",
+  trade_gaps: "ช่วงที่ข้อมูลการซื้อขายขาดหาย",
+  exclusion: "ช่วงที่ตัดออกจากการตรวจ",
+  staleness: "ความสดของข้อมูล",
+  warmup: "การเก็บข้อมูลตั้งต้น",
+};
+// the home hero: an alert in the last 30 min of event time, else F near τ or an auditor warning
+const HERO_WATCH_RATIO = 0.8;
+const HERO_RECENT_US = 30 * 60 * S_US;
+const SPEED_CHIPS = [
+  { label: "1×", v: 1 },
+  { label: "10×", v: 10 },
+  { label: "60×", v: 60 },
+  { label: "เร็วสุด", v: 0 },
+];
+const VIEWER_REPLAY_TH = "เฉพาะผู้วิเคราะห์ขึ้นไปที่ควบคุมได้";
+const HEADLINE_MAX = 120;
 const VERDICT_TH = { tp: "ผิดปกติจริง (TP)", fp: "แจ้งเตือนผิด (FP)", unsure: "ไม่แน่ใจ" };
 const REFUSED_TH =
   "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง (ใช้ได้เฉพาะโหมด replay / sim)";
@@ -68,6 +90,10 @@ const state = {
   injections: [],
   railIds: null, // alert ids already on the rail; null until the first render
   alertCount: 0,
+  alertCountKnown: false, // the count has been shown once: only a later rise flashes the card
+  alertsLoaded: false, // the first /api/alerts answered: before it, a count is not yet the real one
+  hero: null, // the last heroStatus shown: the DOM is touched only when it changes
+  speed: null, // the speed chip the server last accepted
   layersOpen: false,
   me: null, // GET /api/me: { username, display_name, role, auth_enabled, prefs }
   started: false, // the data boot (symbols, series, alerts, websocket) has run
@@ -460,41 +486,47 @@ function renderHealth(h) {
   setMode(h.mode);
   if (isNum(h.event_us)) $("clock").textContent = fmtUs(h.event_us);
   else if (isNum(state.lastBarUs)) $("clock").textContent = fmtUs(state.lastBarUs);
+  renderReplayClock(eventNowUs());
+  renderHealthCard(h);
+  renderBudget();
+  renderHero();
+  tickInjections(); // the Red-Team card moves with the clock above it
+}
 
+// "สุขภาพระบบ": the auditor's overall word, and its checks in Thai behind the card's summary
+function renderHealthCard(h) {
   const checks = Array.isArray(h.checks) ? h.checks : [];
-  const dot = $("auditor-dot");
-  dot.className = `dot ${h.overall || ""}`;
+  $("health-dot").className = `dot ${h.overall || ""}`;
+  $("health-text").textContent = CHECK_TH[h.overall] || "–";
   const warm = checks.find((c) => c.name === "warmup");
-  let text = `${CHECK_TH[h.overall] || h.overall || "–"}`;
+  let sub = "กดเพื่อดูรายการตรวจ";
   if (warm && warm.status !== "ok") {
     const hours = warm.value && warm.value.hours_remaining;
-    text = isNum(hours)
-      ? `กำลังอุ่นเครื่อง (เหลือประมาณ ${hours.toFixed(1)} ชม.)`
-      : "กำลังอุ่นเครื่อง";
+    sub = isNum(hours)
+      ? `กำลังเก็บข้อมูลตั้งต้น (เหลือประมาณ ${hours.toFixed(1)} ชม.)`
+      : "กำลังเก็บข้อมูลตั้งต้น";
   }
-  $("auditor-text").textContent = text;
-  const kpiAud = $("kpi-auditor");
-  kpiAud.textContent = text;
-  kpiAud.className = `kpi-value ${h.overall || ""}`;
-  $("auditor").title = text; // the warm-up wording lives in the tooltip, the bar stays short
-  const list = clear($("auditor-checks"));
+  $("health-sub").textContent = sub;
+  const list = clear($("health-checks"));
   for (const c of checks) {
     list.appendChild(
       el(
         "li",
         {},
-        el("span", { class: `dot ${c.status}`, style: "display:inline-block;margin-right:6px" }),
-        el("strong", {}, c.name),
-        ` · ${CHECK_TH[c.status] || c.status}`,
-        el("div", { class: "muted" }, c.detail_th || ""),
+        el(
+          "div",
+          { class: "check-head" },
+          el("span", { class: `dot ${c.status}` }),
+          el("span", {}, CHECK_NAME_TH[c.name] || "การตรวจอื่น"),
+          el("span", { class: `check-state ${c.status}` }, CHECK_TH[c.status] || "–"),
+        ),
+        c.detail_th ? el("div", { class: "muted small" }, c.detail_th) : null,
       ),
     );
   }
   if (isNum(h.late_trades) && h.late_trades > 0) {
-    list.appendChild(el("li", { class: "muted" }, `การซื้อขายที่มาช้า: ${h.late_trades}`));
+    list.appendChild(el("li", { class: "muted small" }, `การซื้อขายที่มาช้า ${h.late_trades} รายการ`));
   }
-  renderBudget();
-  tickInjections(); // the Red-Team card moves with the clock above it
 }
 
 function redTeamAllowed(mode) {
@@ -513,7 +545,8 @@ function setMode(mode) {
   badge.textContent = MODE_TH[mode] || String(mode);
   badge.className = `badge badge-mode ${mode}`;
   const live = mode === "live";
-  $("replay-controls").hidden = live;
+  $("replay-bar").hidden = live;
+  renderPlayButton();
   const allowed = redTeamAllowed(mode);
   const refused = $("redteam-refused");
   refused.hidden = allowed;
@@ -531,11 +564,15 @@ function applyRoleGates() {
     if (ok) node.removeAttribute("title");
     else node.title = NEED_ANALYST_TH;
   };
-  for (const id of ["btn-play", "btn-pause", "speed-select", "seek-input", "btn-seek"]) {
-    const node = $(id);
+  const replay = [...["btn-play", "seek-input", "btn-seek"].map($), ...$("replay-bar").querySelectorAll(".chip")];
+  for (const node of replay) {
     node.disabled = !ok;
     gate(node);
   }
+  // a viewer still sees the bar, read-only, and is told why in Thai
+  const reason = $("replay-reason");
+  reason.hidden = ok;
+  reason.textContent = ok ? "" : VIEWER_REPLAY_TH;
   const allowed = redTeamAllowed(state.mode) && ok;
   for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
     node.disabled = !allowed;
@@ -554,50 +591,135 @@ function eventNowUs() {
   return state.lastBarUs;
 }
 
+// "ใช้งบแจ้งเตือนไป x/y": the selected coin's alerts of the last 24 h against the per-coin daily budget
 function renderBudget() {
   const h = state.health;
   const budget = h && h.budget_per_symbol_day;
-  const now = eventNowUs();
+  const n = renderAlertsKpi();
   const fill = $("budget-fill");
-  if (!isNum(budget) || !isNum(now)) {
-    $("budget-text").textContent = "–";
-    $("kpi-budget").textContent = "งบ –";
+  const line = $("budget-line");
+  if (!isNum(budget) || !isNum(n)) {
+    line.textContent = "ใช้งบแจ้งเตือนไป –";
+    line.removeAttribute("title");
     fill.style.width = "0";
-    renderAlertsKpi(now);
     return;
   }
-  const nSym = Math.max(state.symbols.length, 1);
-  let n = 0;
-  for (const a of state.alerts.values()) {
-    if (a.ts_event_us > now - DAY_US && a.ts_event_us <= now) n += 1;
-  }
-  const rate = n / nSym;
-  const frac = budget > 0 ? rate / budget : 0;
+  const frac = budget > 0 ? n / budget : 0;
   fill.style.width = `${Math.min(frac, 1) * 100}%`;
   fill.className = `meter-fill${frac > 1 ? " over" : frac >= 0.8 ? " warn" : ""}`;
-  $("budget-text").textContent = `${rate.toFixed(1)} / ${budget}`;
-  $("budget-text").title = `${rate.toFixed(1)} จากงบ ${budget} ครั้งต่อสัญลักษณ์ต่อวัน`;
-  $("kpi-budget").textContent = `งบ ${budget}`;
-  renderAlertsKpi(now);
+  line.textContent = `ใช้งบแจ้งเตือนไป ${n}/${budget}`;
+  line.title = `งบคือจำนวนแจ้งเตือนที่ตั้งไว้ต่อเหรียญต่อวัน (${budget} ครั้ง)`;
 }
 
-// the KPI counts the selected symbol's alerts of the last 24 h (the unit of the budget above)
+// the card counts the selected symbol's alerts of the last 24 h (the unit of the budget); null without a clock
 function renderAlertsKpi(now = eventNowUs()) {
-  const box = $("kpi-alerts");
+  const box = $("alerts-count");
   if (!state.symbol || !isNum(now)) {
     box.textContent = "–";
     state.alertCount = 0;
-    return;
+    state.alertCountKnown = false;
+    return null;
   }
   let n = 0;
   for (const a of state.alerts.values()) {
     if (a.symbol === state.symbol && a.ts_event_us > now - DAY_US && a.ts_event_us <= now) n += 1;
   }
-  const rose = n > state.alertCount;
+  const rose = state.alertCountKnown && n > state.alertCount;
   state.alertCount = n;
+  if (state.alertsLoaded) state.alertCountKnown = true;
   tweenNumber(box, n, 0);
-  if (rose) flash(box.parentNode);
+  if (rose) flash($("card-alerts"));
+  return n;
 }
+
+// ------------------------------------------------------------------ home: hero status
+
+// HH:MM of a µs UTC time, or "–"
+function hhmm(us) {
+  const full = fmtUs(us);
+  return full === "–" ? full : full.slice(11, 16);
+}
+
+// the one sentence at the top of Home; pure, so the rules are tested in node
+function heroStatus({ nowUs, alerts, f, tau, auditor, symbol } = {}) {
+  let recent = null;
+  if (isNum(nowUs)) {
+    for (const a of alerts || []) {
+      if (!a || !isNum(a.ts_event_us) || a.ts_event_us < nowUs - HERO_RECENT_US) continue;
+      if (!recent || a.ts_event_us > recent.ts_event_us) recent = a;
+    }
+  }
+  if (recent) {
+    const where = recent.symbol || symbol || "";
+    return {
+      level: "alert",
+      title: "พบความผิดปกติทางสถิติ",
+      line: `ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ ${where} เมื่อ ${hhmm(recent.ts_event_us)} น.`,
+      alertId: typeof recent.alert_id === "string" ? recent.alert_id : null,
+    };
+  }
+  const near = isNum(f) && isNum(tau) && f >= HERO_WATCH_RATIO * tau;
+  if (near || auditor === "warn") {
+    return {
+      level: "watch",
+      title: "กำลังเฝ้าระวัง",
+      line: near ? "ระดับความผิดปกติใกล้เส้นเตือน" : "ระบบตรวจตัวเองพบจุดที่ควรดู",
+      alertId: null,
+    };
+  }
+  return { level: "normal", title: "ตลาดปกติ", line: "ไม่มีแจ้งเตือนใน 30 นาทีล่าสุด", alertId: null };
+}
+
+// runs on every health, score and alert update; writes the DOM only when the sentence changes
+function renderHero() {
+  if (!state.health && !isNum(state.lastBarUs)) return; // no clock yet: keep "กำลังอ่านสถานะ"
+  const next = heroStatus({
+    nowUs: eventNowUs(),
+    alerts: state.alerts.values(),
+    f: chart.now.f,
+    tau: chart.tau,
+    auditor: state.health && state.health.overall,
+    symbol: state.symbol,
+  });
+  const prev = state.hero;
+  if (prev && prev.level === next.level && prev.title === next.title && prev.line === next.line && prev.alertId === next.alertId) {
+    return;
+  }
+  state.hero = next;
+  $("hero").dataset.level = next.level;
+  $("hero-title").textContent = next.title;
+  const line = clear($("hero-line"));
+  line.appendChild(next.alertId ? el("a", { href: alertHref(next.alertId) }, next.line) : document.createTextNode(next.line));
+  if (!prev || prev.level !== next.level) {
+    const orb = $("hero-orb");
+    orb.className = `orb ${next.level}`;
+    flash(orb, "orb-change");
+  }
+}
+
+// the replay bar's clock: the event time, and how far through its UTC day it is
+function renderReplayClock(now) {
+  const clock = $("replay-clock");
+  const fill = $("replay-fill");
+  if (!isNum(now)) {
+    clock.textContent = "–";
+    fill.style.width = "0";
+    return;
+  }
+  clock.textContent = fmtUs(now);
+  const day = (((now % DAY_US) + DAY_US) % DAY_US) / DAY_US;
+  fill.style.width = `${(day * 100).toFixed(2)}%`;
+}
+
+// the first sentence of an explanation, for a one-line headline: it ends at a "." or ";" that is
+// followed by a space or the end (so 3.5 and 1.2e-5 stay whole), and is cut to 120 characters
+function firstSentence(text) {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  const stop = /[.;](?= |$)/.exec(flat);
+  const head = (stop ? flat.slice(0, stop.index) : flat).trim();
+  return head.length > HEADLINE_MAX ? `${head.slice(0, HEADLINE_MAX - 1)}…` : head;
+}
+
 
 // ------------------------------------------------------------------ monitor chart
 
@@ -605,6 +727,7 @@ const chart = {
   api: null,
   price: null,
   f: null,
+  fGlow: null, // a wide faint copy under the F line: its glow
   lanes: {},
   tau: null,
   tauLine: null,
@@ -612,6 +735,7 @@ const chart = {
   last: {}, // series key -> last plotted time (s)
   priceTimes: [], // sorted times of the price series, for snapping markers
   now: { price: null, f: null }, // latest plotted values, shown while the pointer is away
+  hover: false, // the pointer is on the chart: the readout follows it, not the stream
 };
 
 function chartColors() {
@@ -621,6 +745,7 @@ function chartColors() {
     grid: cssVar("--line"),
     price: cssVar("--line-price"),
     f: cssVar("--line-f"),
+    fGlow: cssVar("--line-f-glow"),
     tau: cssVar("--tau"),
     shade: cssVar("--shade"),
   };
@@ -664,9 +789,16 @@ function initChart() {
     lineOptions(c.price, "ราคา", { priceFormat: { type: "price", precision: 8, minMove: 1e-8 } }),
     0,
   );
+  // the glow goes first so the F line draws on top of it; it has no label and no crosshair dot
+  chart.fGlow = chart.api.addSeries(
+    LWC.LineSeries,
+    lineOptions(c.fGlow, "", { lineWidth: 6, lastValueVisible: false, crosshairMarkerVisible: false }),
+    1,
+  );
   chart.f = chart.api.addSeries(
     LWC.LineSeries,
-    lineOptions(c.f, "F (−log10 p)", {
+    lineOptions(c.f, "ระดับความผิดปกติ", {
+      lineWidth: 2,
       // keep the τ line in view even while F stays far below it
       autoscaleInfoProvider: (original) => {
         const r = original();
@@ -707,6 +839,7 @@ function setLayersOpen(open) {
   const btn = $("layers-toggle");
   btn.setAttribute("aria-expanded", String(open));
   btn.textContent = open ? "ซ่อน L1/L2/L3" : "แสดง L1/L2/L3";
+  $("chart").classList.toggle("lanes", open); // three more panes need more height
   if (!chart.api) return;
   if (open) {
     addLanes();
@@ -716,29 +849,36 @@ function setLayersOpen(open) {
   }
 }
 
-function setInfoOpen(open) {
-  $("chart-info").setAttribute("aria-expanded", String(open));
-  $("chart-info-body").hidden = !open;
-}
-
 function bindMonitor() {
   $("layers-toggle").addEventListener("click", () => setLayersOpen(!state.layersOpen));
-  $("chart-info").addEventListener("click", () => setInfoOpen($("chart-info-body").hidden));
+}
+
+// the crosshair in plain words: when, the price, and how the level stands against the warning line
+function readoutText(time, price, f, tau) {
+  const when = isNum(time) ? `เวลา ${fmtSec(time).slice(11)}` : "ล่าสุด";
+  const parts = [when, `ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`];
+  let level = `ระดับความผิดปกติ ${isNum(f) ? fmtNum(f, 2) : "–"}`;
+  if (isNum(f) && isNum(tau)) level += f >= tau ? ` (ถึงเส้นเตือน ${fmtNum(tau, 2)})` : ` (เส้นเตือน ${fmtNum(tau, 2)})`;
+  parts.push(level);
+  return parts.join(" · ");
 }
 
 function renderReadout(time, price, f) {
-  const parts = [];
-  if (isNum(time)) parts.push(fmtSec(time));
-  parts.push(`ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`);
-  parts.push(`F ${isNum(f) ? fmtNum(f, 2) : "–"}`);
-  $("readout").textContent = parts.join(" · ");
+  $("readout").textContent = readoutText(time, price, f, chart.tau);
+}
+
+function renderSymbolPrice() {
+  const p = chart.now.price;
+  $("symbol-price").textContent = `ราคาล่าสุด ${isNum(p) ? fmtNum(p, 8) : "–"}`;
 }
 
 function onCrosshair(param) {
   if (!param || !isNum(param.time) || !param.seriesData) {
+    chart.hover = false;
     renderReadout(null, chart.now.price, chart.now.f); // pointer left: show the latest
     return;
   }
+  chart.hover = true;
   const at = (series) => {
     const pt = series && param.seriesData.get(series);
     return pt && isNum(pt.value) ? pt.value : null;
@@ -763,14 +903,6 @@ function lastValue(data) {
   return null;
 }
 
-function showTau(tau) {
-  $("kpi-tau").textContent = fmtNum(tau, 2);
-}
-
-function showF(f) {
-  tweenNumber($("kpi-f"), f, 2);
-}
-
 function lastTime(data) {
   return data.length ? data[data.length - 1].time : -Infinity;
 }
@@ -789,7 +921,7 @@ function setTau(tau) {
       lineWidth: 1,
       lineStyle: LWC.LineStyle ? LWC.LineStyle.Dashed : 2,
       axisLabelVisible: true,
-      title: "τ",
+      title: "เส้นเตือน",
     });
   }
 }
@@ -812,9 +944,9 @@ async function loadSeries() {
   chart.last = { price: lastTime(price) };
   const f = seriesData(times, s.F || []);
   chart.f.setData(f);
+  chart.fGlow.setData(f);
   chart.last.f = lastTime(f);
   chart.now = { price: lastValue(price), f: lastValue(f) };
-  renderReadout(null, chart.now.price, chart.now.f);
   for (const [key] of LANES) {
     if (!chart.lanes[key]) continue;
     const d = seriesData(times, s[key] || []);
@@ -822,10 +954,11 @@ async function loadSeries() {
     chart.last[key] = lastTime(d);
   }
   setTau(s.tau);
-  showTau(s.tau);
-  showF(chart.now.f);
+  renderReadout(null, chart.now.price, chart.now.f);
+  renderSymbolPrice();
   $("chart-empty").hidden = price.length > 0;
   renderMarkers();
+  renderHero();
 }
 
 function nearestTime(t) {
@@ -894,14 +1027,19 @@ function onBar(bar) {
   if (plot("price", chart.price, t, bar.close)) {
     chart.priceTimes.push(t);
     $("chart-empty").hidden = true;
+    renderSymbolPrice();
   }
 }
 
 function onScore(p) {
   if (!p || p.symbol !== state.symbol || !chart.api || !isNum(p.t_end_us)) return;
   const t = toSec(p.t_end_us);
-  if (plot("f", chart.f, t, p.F)) showF(p.F);
+  if (plot("f", chart.f, t, p.F)) {
+    chart.fGlow.update({ time: t, value: p.F });
+    if (!chart.hover) renderReadout(null, chart.now.price, chart.now.f);
+  }
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);
+  renderHero();
 }
 
 // ------------------------------------------------------------------ replay controls
@@ -910,7 +1048,7 @@ async function control(action, value) {
   const status = $("replay-status");
   if (!can("analyst")) {
     status.textContent = NEED_ANALYST_TH;
-    return;
+    return false;
   }
   status.textContent = "…";
   try {
@@ -918,18 +1056,48 @@ async function control(action, value) {
     const r = await postJson("/api/replay/control", body);
     noteReplayAction(action);
     if (action === "play" || action === "pause") setLive(state.replaying);
-    status.textContent = `ตำแหน่ง ${fmtUs(r.cursor_us)}`;
+    renderPlayButton();
+    // the button and the chips already show play and speed; only a jump says where it landed
+    status.textContent = action === "seek" ? `ไปที่ ${fmtUs(r.cursor_us)} แล้ว` : "";
+    return true;
   } catch (e) {
     status.textContent = e.message;
+    return false;
+  }
+}
+
+// one big button: ❚❚ while the replay runs, ▶ while it is paused
+function renderPlayButton() {
+  const btn = $("btn-play");
+  const playing = state.replaying;
+  btn.textContent = playing ? "❚❚" : "▶";
+  const label = playing ? "หยุดชั่วคราว" : "เล่นต่อ";
+  btn.setAttribute("aria-label", label);
+  if (can("analyst")) btn.title = `${label} (กด Space)`;
+}
+
+function renderSpeedChips() {
+  for (const chip of $("replay-bar").querySelectorAll(".chip")) {
+    chip.setAttribute("aria-pressed", String(Number(chip.dataset.speed) === state.speed));
   }
 }
 
 function bindReplay() {
-  $("btn-play").addEventListener("click", () => control("play"));
-  $("btn-pause").addEventListener("click", () => control("pause"));
-  $("speed-select").addEventListener("change", (ev) => {
-    const v = Number(ev.target.value);
-    if (Number.isFinite(v)) control("speed", v);
+  $("btn-play").addEventListener("click", () => {
+    const next = playToggleAction(state.mode, state.replaying);
+    if (next) control(next);
+  });
+  const chips = $("replay-bar").querySelectorAll(".chip");
+  chips.forEach((chip, i) => {
+    const c = SPEED_CHIPS[i];
+    chip.textContent = c.label;
+    chip.dataset.speed = String(c.v);
+    chip.addEventListener("click", async () => {
+      if (await control("speed", c.v)) {
+        state.speed = c.v;
+        renderSpeedChips();
+      }
+    });
   });
   $("btn-seek").addEventListener("click", () => {
     const raw = $("seek-input").value;
@@ -948,6 +1116,7 @@ async function loadAlerts() {
   try {
     const items = await api("/api/alerts?limit=1000");
     state.alerts = new Map(items.map((a) => [a.alert_id, a]));
+    state.alertsLoaded = true;
   } catch (e) {
     console.warn("alerts:", e.message);
     return;
@@ -960,6 +1129,7 @@ function alertsChanged() {
   renderRail();
   renderMarkers();
   renderBudget();
+  renderHero();
   checkInjections();
 }
 
@@ -1026,20 +1196,28 @@ function renderAlertsTable() {
   }
 }
 
-// newest eight alerts beside the chart; a row that was not there before slides in
+// the newest five alerts beside the chart as mini-cards; a card that was not there before rises in
 function renderRail() {
   const box = clear($("alert-rail"));
-  const items = sortedAlerts().slice(0, 8);
+  const items = sortedAlerts().slice(0, 5);
   $("rail-empty").hidden = items.length > 0;
   const seen = state.railIds;
   for (const a of items) {
     const fresh = seen !== null && !seen.has(a.alert_id);
+    const full = a.explanation_th || "พบความผิดปกติทางสถิติ";
     box.appendChild(
       el(
         "a",
-        { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id) },
-        el("strong", { class: "mono" }, `${a.technique_id} · ${a.symbol}`),
-        el("span", { class: "muted small mono" }, `${fmtUs(a.ts_event_us).slice(11)} · p ${fmtP(a.fused_p)} · ${a.agreement}/3 ชั้น`),
+        { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id), title: full },
+        el(
+          "span",
+          { class: "rail-meta small" },
+          el("span", { class: `rail-dot sev-${a.severity}`, "aria-hidden": "true" }),
+          el("span", { class: "rail-time" }, `${hhmm(a.ts_event_us)} น.`),
+          el("span", { class: "muted" }, a.symbol),
+          el("span", { class: "rail-sev muted" }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
+        ),
+        el("span", { class: "rail-headline" }, firstSentence(full)),
       ),
     );
   }
@@ -2375,7 +2553,8 @@ function fillSymbols() {
     for (const s of state.symbols) sel.appendChild(el("option", { value: s }, s));
     sel.value = state.symbol || "";
   }
-  $("kpi-symbol").textContent = state.symbol || "–";
+  $("symbol-name").textContent = state.symbol || "–";
+  $("symbol-pick").hidden = state.symbols.length < 2; // one coin: nothing to choose
 }
 
 // the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
@@ -2407,7 +2586,7 @@ async function enterApp() {
   try {
     renderHealth(await api("/api/health"));
   } catch (e) {
-    $("auditor-text").textContent = "อ่านสถานะไม่ได้";
+    $("health-text").textContent = "อ่านสถานะไม่ได้";
   }
   initChart();
   await Promise.all([loadSeries(), loadAlerts()]);
@@ -2431,10 +2610,11 @@ async function boot() {
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
     $("rt-symbol").value = state.symbol;
-    $("kpi-symbol").textContent = state.symbol || "–";
+    $("symbol-name").textContent = state.symbol || "–";
     savePrefs({ symbol: state.symbol });
     state.alertCount = 0;
-    renderAlertsKpi();
+    state.alertCountKnown = false; // a new coin's count is not news
+    renderBudget(); // the count and the budget line are per coin
     loadSeries();
   });
   if (!LWC) console.warn("dashboard: the chart library did not load");
@@ -2486,6 +2666,12 @@ if (typeof document !== "undefined") {
     getReplaying: () => state.replaying,
     PAGE_ORDER,
     DEFAULT_ROUTE,
+    heroStatus,
+    HERO_WATCH_RATIO,
+    HERO_RECENT_US,
+    SPEED_CHIPS,
+    firstSentence,
+    applyRoleGates,
     ROLE_TH,
     routeFor,
     safeNext,
