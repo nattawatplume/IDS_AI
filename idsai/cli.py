@@ -19,8 +19,9 @@ calibrated on other normal days (`idsai.eval.experiments.fit_and_calibrate`).
 import argparse
 import json
 import math
+import re
 import sys
-from collections.abc import Callable, Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -702,10 +703,11 @@ def resolve_bind(args: argparse.Namespace, cfg: Settings) -> tuple[str, int]:
     return args.host, args.port if args.port is not None else cfg.port
 
 
-def allowed_hosts(host: str) -> list[str]:
-    """Loopback names plus the bound host: the `Host` header allowlist (DNS rebinding)."""
+def allowed_hosts(host: str, public: Sequence[str] = ()) -> list[str]:
+    """Loopback names, the bound host and any public host names (behind a TLS proxy): the `Host`
+    header allowlist (DNS rebinding)."""
     bound = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return list(dict.fromkeys([*LOOPBACK_HOSTS, bound.lower()]))
+    return list(dict.fromkeys([*LOOPBACK_HOSTS, bound.lower(), *(h.lower() for h in public)]))
 
 
 def run_server(
@@ -1103,6 +1105,12 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     use_auth = auth_enabled(args, cfg)
     with _app_store(cfg) as store:
         check_serve_auth(host, use_auth, store)
+        if args.loop and args.mode == "live":
+            raise CliError("--loop ใช้ได้กับโหมด replay เท่านั้น (ไม่ใช้กับ --mode live)")
+        if args.secure_cookies:
+            cfg = cfg.model_copy(
+                update={"auth": cfg.auth.model_copy(update={"cookie_secure": True})}
+            )
         if host in WILDCARD_BINDS:
             _warn(
                 f"หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ {', '.join(allowed_hosts(host))} "
@@ -1113,7 +1121,7 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
         else:
             state, background = prepare_replay(args, cfg, store)
         store.purge_sessions(_now_us())
-        app = create_app(state, allowed_hosts=allowed_hosts(host))
+        app = create_app(state, allowed_hosts=allowed_hosts(host, args.public_host))
         _say(f"เปิดที่ http://{host if ':' not in host else f'[{host}]'}:{port} (กด Ctrl+C เพื่อหยุด)")
         run_server(app, host, port, with_session_purge(store, background))
     return 0
@@ -1143,6 +1151,18 @@ def _speed(text: str) -> float:
     if not (math.isfinite(x) and x > 0):
         raise argparse.ArgumentTypeError(f"ความเร็วต้องเป็นตัวเลขจำกัดที่มากกว่า 0: {text!r}")
     return x
+
+
+_HOST_RE = re.compile(r"^[a-z0-9.-]+$")
+
+
+def _public_host(text: str) -> str:
+    name = text.strip().lower()
+    if not _HOST_RE.fullmatch(name):
+        raise argparse.ArgumentTypeError(
+            f"ชื่อโฮสต์ต้องเป็นชื่ออย่างเดียว ไม่มี http:// พอร์ต หรือเส้นทาง: {text!r}"
+        )
+    return name
 
 
 def _positive(text: str) -> int:
@@ -1238,6 +1258,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default=DEFAULT_HOST, help="ค่าเริ่มต้น 127.0.0.1 (เฉพาะเครื่องนี้)")
     s.add_argument("--port", type=int, default=None, help="ค่าเริ่มต้น 8800")
     s.add_argument("--speed", type=_speed, default=DEFAULT_SPEED, help="replay: เท่าของเวลาจริง (60)")
+    s.add_argument(
+        "--public-host", action="append", default=[], type=_public_host, metavar="NAME",
+        help="ชื่อโฮสต์สาธารณะหลัง proxy TLS (เช่น x.hf.space) เพิ่มใน allowlist ของ Host; ใช้ซ้ำได้",
+    )
+    s.add_argument(
+        "--secure-cookies", action="store_true",
+        help="ตั้งคุกกี้เซสชันเป็น Secure (แทน auth.cookie_secure)",
+    )
+    s.add_argument(
+        "--loop", action="store_true", help="replay: เล่นวนซ้ำเมื่อจบ (ไม่ใช้กับ --mode live)"
+    )
     g = s.add_mutually_exclusive_group()
     g.add_argument(
         "--auth", dest="auth", action="store_const", const=True, default=None,
