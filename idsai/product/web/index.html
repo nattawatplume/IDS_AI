@@ -10,7 +10,12 @@
 <body>
   <div class="bg" aria-hidden="true"><span class="blob blob-1"></span><span class="blob blob-2"></span><span class="blob blob-3"></span></div>
 
-  <header class="topbar">
+  <div id="boot-loader" class="boot-loader" role="status">
+    <span class="boot-spinner" aria-hidden="true"></span>
+    <span id="boot-text" class="small muted">กำลังตรวจสอบการเข้าสู่ระบบ</span>
+  </div>
+
+  <header id="topbar" class="topbar" hidden>
     <a class="brand" href="#/home" aria-label="Market IDS หน้าหลัก">
       <svg class="brand-mark" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false">
         <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="8" fill="rgba(139, 92, 246, 0.18)" stroke="rgba(255, 255, 255, 0.16)" stroke-width="1.5"/>
@@ -63,9 +68,23 @@
   <main>
     <!-- Sign-in -->
     <section id="page-login" class="page" hidden>
-      <form id="login-form" class="card login-card" method="post" autocomplete="on">
-        <h1 class="login-mark">MARKET·IDS</h1>
-        <p class="muted small">เข้าสู่ระบบเพื่อดูแดชบอร์ด</p>
+      <div class="login-hero">
+        <div class="login-brand">
+          <svg class="login-mark" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false">
+            <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="8" fill="rgba(139, 92, 246, 0.18)" stroke="rgba(255, 255, 255, 0.16)" stroke-width="1.5"/>
+            <path d="M7 18.5l4.5-5.5 3.5 3.5 6-8" stroke="#c4b5fd" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="21" cy="8.5" r="1.75" fill="#eef0ff"/>
+          </svg>
+          <h1 class="login-name">Market IDS</h1>
+        </div>
+        <p class="login-tagline"><span>กล้องวงจรปิดของตลาดคริปโต</span> <span>เตือนเมื่อการซื้อขายผิดปกติทางสถิติ</span></p>
+        <svg class="login-line" viewBox="0 0 520 170" fill="none" aria-hidden="true" focusable="false">
+          <path class="login-line-limit" d="M0 64H520"/>
+          <path class="login-line-rest" pathLength="1000" d="M0 130 L20 124 L40 132 L60 126 L80 129 L100 121 L120 128 L140 123 L160 131 L180 125 L200 127 L220 120 L240 129 L260 124 L280 128 L300 122 L320 126 L338 118 L354 100 L368 56 L380 36 L392 72 L406 110 L422 123 L440 128 L460 121 L480 126 L500 123 L520 127"/>
+          <path class="login-line-trace" pathLength="1000" d="M0 130 L20 124 L40 132 L60 126 L80 129 L100 121 L120 128 L140 123 L160 131 L180 125 L200 127 L220 120 L240 129 L260 124 L280 128 L300 122 L320 126 L338 118 L354 100 L368 56 L380 36 L392 72 L406 110 L422 123 L440 128 L460 121 L480 126 L500 123 L520 127"/>
+        </svg>
+      </div>
+      <form id="login-form" class="card login-card" method="post" autocomplete="on" aria-label="เข้าสู่ระบบ">
         <p id="login-framed" class="small login-framed" role="note" hidden>หน้านี้ถูกเปิดอยู่ในกรอบของเว็บอื่น ล็อกอินได้เฉพาะเมื่อเปิดเว็บนี้โดยตรงเท่านั้น <a id="login-framed-link" target="_top" href="#">เปิดเว็บนี้โดยตรง</a></p>
         <label class="field">
           <span>ชื่อผู้ใช้</span>
@@ -77,10 +96,11 @@
         </label>
         <label class="check">
           <input id="login-remember" type="checkbox">
-          <span>จดจำฉัน</span>
+          <span>จำฉันไว้</span>
         </label>
         <p id="login-error" class="small login-error" role="alert" hidden></p>
         <button id="login-submit" type="submit" class="primary">เข้าสู่ระบบ</button>
+        <p class="small muted login-note">บัญชีผู้ใช้สร้างโดยผู้ดูแลระบบ</p>
       </form>
     </section>
 
@@ -293,7 +313,7 @@
     </section>
   </main>
 
-  <footer class="footer small muted">
+  <footer id="site-footer" class="footer small muted" hidden>
     ข้อมูล: Binance Vision (CC BY-NC-SA 4.0) · กราฟ: TradingView Lightweight Charts™ ·
     เพื่อการศึกษาเท่านั้น ไม่ใช่คำแนะนำการลงทุน · <a href="#/about">ที่มาและข้อจำกัด</a>
   </footer>

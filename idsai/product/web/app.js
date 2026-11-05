@@ -71,6 +71,7 @@ const state = {
   layersOpen: false,
   me: null, // GET /api/me: { username, display_name, role, auth_enabled, prefs }
   started: false, // the data boot (symbols, series, alerts, websocket) has run
+  view: "loading", // bootView(): only the loader shows until /api/me answers
   evalBudget: null, // saved Eval budget (string, as the option value)
   audit: [], // Activity rows already loaded, newest first
   auditDone: false,
@@ -123,6 +124,14 @@ function goLogin() {
   if (here.startsWith("#/login")) return;
   const next = safeNext(here);
   location.hash = next === DEFAULT_ROUTE && !here.startsWith(DEFAULT_ROUTE) ? "#/login" : `#/login?next=${encodeURIComponent(next)}`;
+}
+
+// what the first paint may show: nothing but the loader until we know whether sign-in is on,
+// then the sign-in page (auth on, no session) or the app; so the dashboard never flashes
+function bootView(me, authEnabled) {
+  if (authEnabled !== true && authEnabled !== false) return "loading";
+  if (me || !authEnabled) return "app";
+  return "login";
 }
 
 // ------------------------------------------------------------------ helpers
@@ -372,18 +381,20 @@ function flash(node, cls = "flash") {
   node.classList.add(cls);
 }
 
-const KEY_OWNERS = ["INPUT", "SELECT", "TEXTAREA", "BUTTON", "SUMMARY", "A"];
+// a field owns every key typed into it
+const KEY_OWNERS = ["INPUT", "SELECT", "TEXTAREA"];
+// a button, menu or link owns only Space (it presses, opens or follows); 1-4 and ? still work
+const SPACE_OWNERS = ["BUTTON", "SUMMARY", "A"];
 
-// "play", "help", one of PAGE_ORDER, or null; never while a field or control has focus
+// "play", "help", one of PAGE_ORDER, or null; never while a field has focus
 function presenterKey(ev) {
   if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
-  // a focused control keeps its own keys: Space presses a button, opens a menu, follows a link
   const target = ev.target;
   if (target && (KEY_OWNERS.includes(target.tagName) || target.isContentEditable)) return null;
   // ev.code is the physical key: it still works when a Thai layout changes ev.key
   const key = ev.key || "";
   const code = ev.code || "";
-  if (key === " " || code === "Space") return "play";
+  if (key === " " || code === "Space") return target && SPACE_OWNERS.includes(target.tagName) ? null : "play";
   if (key === "?" || (code === "Slash" && ev.shiftKey)) return "help";
   const digit = /^[1-4]$/.test(key) ? key : (/^(?:Digit|Numpad)([1-4])$/.exec(code) || [])[1];
   return digit ? PAGE_ORDER[Number(digit) - 1] : null;
@@ -402,6 +413,7 @@ function noteReplayAction(action) {
 }
 
 function onPresenterKey(ev) {
+  if (state.view !== "app" || state.route === "login") return; // nothing to present before sign-in
   const act = presenterKey(ev);
   if (!act) return;
   ev.preventDefault();
@@ -2020,7 +2032,12 @@ function route() {
     location.replace(target.route); // the hashchange that follows renders the page
     return;
   }
+  if (state.view === "loading") return; // boot() routes once /api/me has answered
   const r = parseRoute();
+  if (r.name !== "login" && !state.me) {
+    goLogin(); // no session yet: a typed or bookmarked page waits behind the sign-in
+    return;
+  }
   if (r.name === "activity" && !can("admin")) {
     // a convenience redirect: GET /api/audit answers 403 for anyone else anyway
     location.hash = DEFAULT_ROUTE;
@@ -2032,6 +2049,7 @@ function route() {
   }
   state.route = r.name;
   document.body.classList.toggle("login-mode", r.name === "login");
+  $("topbar").hidden = r.name === "login"; // the sign-in page carries its own logo
   const chip = $("user-chip");
   if (chip) chip.open = false;
   if (r.name !== "alert") destroyDetailChart();
@@ -2103,14 +2121,23 @@ function adoptMe(me) {
   applyRoleGates();
 }
 
+// whether sign-in is on: true or false once /api/me answers, null when it could not be reached
 async function loadMe() {
   try {
-    adoptMe(await api("/api/me"));
-    return true;
+    const me = await api("/api/me");
+    adoptMe(me);
+    return !!(me && me.auth_enabled);
   } catch (e) {
     setMe(null);
-    return false;
+    return e.status === 401 ? true : null; // only sign-in answers 401
   }
+}
+
+// leave the loader for the sign-in page or the app
+function showView(view) {
+  state.view = view;
+  $("boot-loader").hidden = view !== "loading";
+  $("site-footer").hidden = view === "loading";
 }
 
 function bindLogin() {
@@ -2322,6 +2349,7 @@ function fillSymbols() {
 
 // the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
 async function enterApp() {
+  showView("app");
   if (state.started) {
     // signed in again mid-session: the same page, fresh data
     applyRoleGates();
@@ -2376,7 +2404,15 @@ async function boot() {
   });
   if (!LWC) console.warn("dashboard: the chart library did not load");
 
-  if (!(await loadMe())) {
+  let authEnabled = await loadMe();
+  while (bootView(state.me, authEnabled) === "loading") {
+    // the server did not answer: keep only the loader up and ask again
+    $("boot-text").textContent = "ยังติดต่อเซิร์ฟเวอร์ไม่ได้ กำลังลองใหม่";
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    authEnabled = await loadMe();
+  }
+  if (bootView(state.me, authEnabled) === "login") {
+    showView("login");
     route(); // the 401 already sent the page to the sign-in route
     return;
   }
@@ -2405,6 +2441,7 @@ if (typeof document !== "undefined") {
     tweenNumber,
     flash,
     presenterKey,
+    bootView,
     playToggleAction,
     noteReplayAction,
     getReplaying: () => state.replaying,

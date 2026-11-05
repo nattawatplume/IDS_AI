@@ -440,10 +440,17 @@ assert.strictEqual(k({ key: " ", target: { tagName: "SELECT" } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "TEXTAREA" } }), null);
 assert.strictEqual(k({ key: "1", target: { tagName: "INPUT" } }), null);
 assert.strictEqual(k({ key: "?", target: { tagName: "TEXTAREA" } }), null);
+// a focused button, menu or link keeps Space for itself, but the page and help keys still work
 for (const tagName of ["BUTTON", "SUMMARY", "A"]) {
   assert.strictEqual(k({ key: " ", target: { tagName } }), null, tagName);
-  assert.strictEqual(k({ key: "2", target: { tagName } }), null, tagName);
+  assert.strictEqual(k({ code: "Space", target: { tagName } }), null, tagName);
+  assert.strictEqual(k({ key: "2", target: { tagName } }), "#/alerts", tagName);
+  assert.strictEqual(k({ code: "Digit4", target: { tagName } }), "#/results", tagName);
+  assert.strictEqual(k({ key: "?", target: { tagName } }), "help", tagName);
 }
+assert.strictEqual(k({ key: "2", target: { tagName: "SELECT" } }), null);
+assert.strictEqual(k({ key: "?", target: { tagName: "INPUT" } }), null);
+assert.strictEqual(k({ key: "3", target: { tagName: "DIV", isContentEditable: true } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "DIV", isContentEditable: true } }), null);
 assert.strictEqual(k({ key: " ", target: { tagName: "DIV" } }), "play");
 assert.strictEqual(k({ key: " " }), "play");
@@ -804,7 +811,7 @@ def test_login_and_activity_routes_present():
     for page in ("page-login", "page-activity"):
         assert f'"{page}"' in js, page
     assert 'type="password"' in html and 'autocomplete="current-password"' in html
-    assert "จดจำฉัน" in html and "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" not in html  # the server words the error
+    assert "จำฉันไว้" in html and "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" not in html  # the server words the error
 
 
 def test_login_page_has_no_signup():
@@ -1077,3 +1084,83 @@ def test_framed_login_hint_markup():
     assert "โดยตรง" in m.group(1)
     route_fn = js[js.index("function route()") : js.index("function isFramed(")]
     assert 'applyFramedHint(window, $("login-framed"), $("login-framed-link"))' in route_fn
+
+
+# ---- sign-in page: split layout, a loader until the session is known ----
+
+BOOT_VIEW_BODY = r"""
+const v = m.bootView;
+const ann = { username: "ann", role: "viewer", auth_enabled: true };
+assert.strictEqual(v(null, null), "loading");
+assert.strictEqual(v(undefined, undefined), "loading");
+assert.strictEqual(v(ann, null), "loading");
+assert.strictEqual(v(null, true), "login");
+assert.strictEqual(v(ann, true), "app");
+assert.strictEqual(v(null, false), "app");
+assert.strictEqual(v({ username: "local", role: "admin", auth_enabled: false }, false), "app");
+"""
+
+
+def test_boot_view(tmp_path):
+    _run_motion(tmp_path, "false", BOOT_VIEW_BODY)
+
+
+def test_boot_shows_only_loader_until_me_resolves():
+    html = text("index.html")
+    pages = re.findall(r'<section\b[^>]*\bclass="[^"]*\bpage\b[^"]*"[^>]*>', html)
+    assert len(pages) >= 8, pages
+    for tag in pages:
+        assert re.search(r"\shidden\b", tag), tag
+    for tag in ("header", "footer"):  # nothing but the background and the loader at first
+        found = re.search(rf"<{tag}\b[^>]*>", html).group(0)
+        assert re.search(r"\shidden\b", found), found
+    loader = re.search(r'<[a-z]+\b[^>]*\bid="boot-loader"[^>]*>', html)
+    assert loader, "no boot loader"
+    assert not re.search(r"\shidden\b", loader.group(0)), loader.group(0)
+    css = text("styles.css")
+    for body in re.findall(r"(?m)^[^{}\n]*(?:#boot-loader|\.boot-loader)\s*\{([^}]*)\}", css):
+        assert "display: none" not in body and "visibility: hidden" not in body
+    js = text("app.js")
+    boot = js[js.index("async function boot(") :]
+    assert "bootView(" in boot[: boot.index("\n}\n")]
+
+
+def test_login_markup():
+    html = text("index.html")
+    m = re.search(r'<section id="page-login"[^>]*>(.*?)</section>', html, re.S)
+    assert m, "no sign-in page"
+    page = m.group(1)
+    assert 'class="login-hero"' in page and "login-card" in page
+    assert page.index('class="login-hero"') < page.index('id="login-form"')
+    hero = page[page.index('class="login-hero"') : page.index('id="login-form"')]
+    tagline = re.search(r'<p class="login-tagline">(.*?)</p>', hero, re.S)
+    assert tagline and " ".join(re.sub(r"<[^>]+>", "", tagline.group(1)).split()) == (
+        "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
+    )
+    line = re.search(r'<svg class="login-line"[^>]*>', hero)
+    assert line and 'aria-hidden="true"' in line.group(0)
+    assert "<ul" not in hero and "<ol" not in hero and "<img" not in hero
+    button = re.search(r'<button id="login-submit"[^>]*>(.*?)</button>', page, re.S)
+    assert button and button.group(1).strip() == "เข้าสู่ระบบ"
+    assert 'type="submit"' in button.group(0) and "primary" in button.group(0)
+    remember = re.search(r'<input id="login-remember"[^>]*>\s*<span>(.*?)</span>', page, re.S)
+    assert remember and remember.group(1).strip() == "จำฉันไว้"
+    for i in ("login-user", "login-pass", "login-error", "login-framed", "login-framed-link"):
+        assert f'id="{i}"' in page, i
+    for word in ("ยินดีต้อนรับ", "ขับเคลื่อนด้วย", "อัจฉริยะ", "ล้ำสมัย", "ทรงพลัง"):
+        assert word not in html + text("app.js"), word
+
+
+def test_login_line_animates_but_rests_drawn():
+    css = text("styles.css").replace("\r\n", "\n")
+    rules = re.findall(r"(?m)^\.login-line[^{\n]*\{([^}]*)\}", css)
+    joined = " ".join(rules)
+    assert "stroke-dasharray" in joined and "animation" in joined
+    for body in rules:  # with the animation off (reduced motion) the line is still drawn
+        assert not re.search(r"opacity\s*:\s*0\b", body)
+        assert not re.search(r"animation[^;]*\bboth\b", body)
+        assert not re.search(r"stroke-dashoffset\s*:\s*[1-9]", body)
+    assert re.search(r"@keyframes [\w-]+\s*\{[^@]*stroke-dashoffset", css)
+    narrow = re.search(r"@media \(max-width: 720px\) \{(.*?)\n\}", css, re.S).group(1)
+    assert re.search(r"\.login-line\s*\{[^}]*display:\s*none", narrow)
+    assert re.search(r"#page-login[^{]*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)", narrow)

@@ -470,17 +470,62 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
   .kpi:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
 }
 
-/* ------------------------------------------------------------------ sign-in */
-body.login-mode .nav,
-body.login-mode .topbar-side,
+/* ------------------------------------------------------------------ boot loader */
+/* only this and the background show until /api/me answers; it fades in late, so a fast answer never shows it */
+.boot-loader {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  animation: loader-in 0.2s ease-out 0.4s backwards;
+}
+.boot-spinner { width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.14); border-top-color: #c4b5fd; animation: spin 0.9s linear infinite; }
+
+/* ------------------------------------------------------------------ sign-in: the logo and line left, the form right */
 body.login-mode #ws-banner { display: none; }
-.login-card { display: flex; flex-direction: column; gap: 16px; max-width: 380px; margin: 12vh auto 0; padding: 32px; }
-.login-card .field > input { width: 100%; }
-.login-mark { margin: 0; font-size: 20px; }
+#page-login:not([hidden]) {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 400px);
+  align-items: center;
+  gap: 32px 64px;
+  max-width: 1040px;
+  /* the viewport less main's padding and the one-line footer: no scroll at 1280 x 800 */
+  min-height: calc(100vh - 112px);
+  min-height: calc(100dvh - 112px);
+  margin: 0 auto;
+  padding: 24px 8px;
+}
+.login-hero { min-width: 0; }
+.login-brand { display: flex; align-items: center; gap: 12px; }
+.login-mark { width: 40px; height: 40px; flex: none; }
+.login-name { margin: 0; font-size: 28px; }
+.login-tagline { margin: 16px 0 0; max-width: 520px; font-size: 24px; line-height: 1.45; }
+/* a phrase per line: Thai has no spaces inside a phrase, so a free wrap splits words like ผิด|ปกติ */
+.login-tagline span { display: inline-block; }
+.login-line { display: block; width: 100%; max-width: 520px; height: auto; margin-top: 32px; overflow: visible; filter: drop-shadow(0 0 6px rgba(139, 92, 246, 0.55)); }
+.login-line path { stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.login-line-limit { stroke: rgba(255, 93, 115, 0.45); stroke-width: 1; stroke-dasharray: 4 6; }
+.login-line-rest { stroke: rgba(196, 181, 253, 0.16); stroke-width: 1.5; }
+/* drawn at rest (reduced motion keeps it so); the loop redraws it from the left */
+.login-line-trace { stroke: #c4b5fd; stroke-width: 2; stroke-dasharray: 1000; stroke-dashoffset: 0; animation: trace 9s ease-in-out infinite; }
+.login-card { display: flex; flex-direction: column; gap: 16px; width: 100%; margin: 0; padding: 32px; }
+.login-card .field { display: flex; }
+.login-card .field > input { width: 100%; min-height: 44px; padding: 8px 12px; }
+.login-card button.primary { width: 100%; min-height: 48px; font-size: 17px; }
+.login-note { margin: 0; text-align: center; }
 .login-framed { margin: 0; padding: 8px 12px; border-radius: var(--r-ctl); background: var(--chip); }
 .login-error { margin: 0; padding: 8px 12px; border-radius: var(--r-ctl); background: var(--fail-bg); color: var(--red); }
 .check { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--text); cursor: pointer; }
 .check input { min-height: 0; width: 16px; height: 16px; padding: 0; accent-color: var(--violet); }
+
+@media (max-width: 860px) {
+  #page-login:not([hidden]) { grid-template-columns: minmax(0, 1fr) minmax(0, 360px); gap: 32px; }
+  .login-tagline { font-size: 20px; }
+}
 
 /* ------------------------------------------------------------------ activity */
 td.detail { max-width: 360px; font-size: 13px; color: var(--dim); overflow-wrap: anywhere; white-space: normal; }
@@ -539,6 +584,13 @@ td.when { white-space: nowrap; }
   .user-menu { left: 16px; right: 16px; width: auto; }
   h1 { font-size: 24px; }
   .detail { grid-template-columns: minmax(0, 1fr); }
+  /* sign-in stacks: the logo and tagline above the form, no line */
+  body.login-mode main { padding-bottom: 32px; }
+  body.login-mode .footer { padding-bottom: 24px; }
+  #page-login:not([hidden]) { grid-template-columns: minmax(0, 1fr); align-content: start; gap: 24px; min-height: 0; padding: 32px 4px 0; }
+  .login-tagline { margin-top: 12px; font-size: 18px; }
+  .login-line { display: none; }
+  .login-card { padding: 24px; }
 }
 
 /* ------------------------------------------------------------------ motion */
@@ -554,6 +606,14 @@ td.when { white-space: nowrap; }
 @keyframes rise { 0% { transform: translateY(8px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
 @keyframes sweep { 0% { background-position: -120% 0; } 100% { background-position: 220% 0; } }
 @keyframes grow { 0% { transform: scaleX(0); } 100% { transform: scaleX(1); } }
+@keyframes spin { 100% { transform: rotate(360deg); } }
+@keyframes loader-in { 0% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes trace {
+  0% { stroke-dashoffset: 1000; opacity: 1; }
+  55% { stroke-dashoffset: 0; }
+  88% { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 0; }
+}
 .flash { animation: glow 0.9s ease-out; }
 .rise { animation: rise 0.25s ease-out backwards; }
 .pop { animation: pop 0.2s ease-out backwards; }
