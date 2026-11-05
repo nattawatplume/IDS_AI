@@ -951,6 +951,38 @@ def _when(us: int | None) -> str:
     return datetime.fromtimestamp(us / S_US, UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def parse_seed_users(text: str) -> list[tuple[str, str, str]]:
+    """Parse IDSAI_USERS (`username:role:password` per line; `#` comments, blank lines skipped).
+    The password is everything after the second colon. Errors name the 1-based line, never the
+    password. At least one admin is required."""
+    from idsai.product.auth import ROLES, check_password, check_username
+
+    out: list[tuple[str, str, str]] = []
+    for no, raw in enumerate(text.replace(chr(13), "").split(chr(10)), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            raise CliError(f"บรรทัด {no}: ต้องเป็นรูปแบบ ชื่อ:สิทธิ์:รหัสผ่าน")
+        name, role, pw = parts
+        try:
+            check_username(name)
+            check_password(pw)
+        except ValueError as e:
+            raise CliError(f"บรรทัด {no}: {e}") from None
+        if role not in ROLES:
+            raise CliError(f"บรรทัด {no}: สิทธิ์ต้องเป็นหนึ่งใน {', '.join(ROLES)}")
+        if name in RESERVED_USERNAMES:
+            raise CliError(f"บรรทัด {no}: ชื่อ {name} สงวนไว้ใช้ในบันทึกกิจกรรม เลือกชื่ออื่น")
+        if any(n == name for n, _, _ in out):
+            raise CliError(f"บรรทัด {no}: ชื่อ {name} ซ้ำ")
+        out.append((name, role, pw))
+    if not any(role == "admin" for _, role, _ in out):
+        raise CliError("ต้องมีบัญชี admin อย่างน้อยหนึ่งบัญชีใน IDSAI_USERS")
+    return out
+
+
 def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
     import duckdb
 
@@ -983,6 +1015,26 @@ def _cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
                     f"{u['username']}{shown}  {u['role']}{flag}  "
                     f"สร้างเมื่อ {_when(u['created_us'])}  เข้าล่าสุด {_when(u['last_seen_us'])}"
                 )
+            return 0
+        if act == "seed-env":
+            import os
+
+            text = os.environ.get("IDSAI_USERS", "")
+            if not text.strip():
+                raise CliError("ไม่พบตัวแปร IDSAI_USERS (หรือว่างเปล่า)")
+            accounts = parse_seed_users(text)  # validate everything before writing anything
+            created = updated = 0
+            for name, role, pw in accounts:
+                if store.get_user_by_name(name) is None:
+                    store.add_user(name, "", role, hash_password(pw), _now_us())
+                    created += 1
+                else:
+                    store.set_role(name, role)
+                    store.set_password(name, hash_password(pw))
+                    store.set_disabled(name, False)
+                    updated += 1
+                audit("user_seed", name, {"role": role})
+            _say(f"seeded {len(accounts)} accounts (created {created}, updated {updated})")
             return 0
         name = args.username
         if act == "add":
@@ -1206,6 +1258,7 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--display-name", default="", help="ชื่อที่แสดง (ไม่เกิน 64 ตัว)")
     u.add_argument("--password-stdin", action="store_true", help="อ่านรหัสผ่านหนึ่งบรรทัดจาก stdin")
     us.add_parser("list", help="แสดงผู้ใช้ทั้งหมด")
+    us.add_parser("seed-env", help="สร้าง/อัปเดตบัญชีจากตัวแปร IDSAI_USERS (ใช้ตอนบูตบนเซิร์ฟเวอร์)")
     u = us.add_parser("passwd", help="เปลี่ยนรหัสผ่าน (ออกจากระบบทุกอุปกรณ์)")
     u.add_argument("username")
     u.add_argument("--password-stdin", action="store_true", help="อ่านรหัสผ่านหนึ่งบรรทัดจาก stdin")
