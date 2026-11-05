@@ -72,6 +72,8 @@ const state = {
   me: null, // GET /api/me: { username, display_name, role, auth_enabled, prefs }
   started: false, // the data boot (symbols, series, alerts, websocket) has run
   view: "loading", // bootView(): only the loader shows until /api/me answers
+  bootError: null, // why the last /api/me gave no usable answer: { status } or { answered } or {}
+  pendingHelp: false, // a help route asked before the app was entered: opened by enterApp()
   evalBudget: null, // saved Eval budget (string, as the option value)
   audit: [], // Activity rows already loaded, newest first
   auditDone: false,
@@ -132,6 +134,21 @@ function bootView(me, authEnabled) {
   if (authEnabled !== true && authEnabled !== false) return "loading";
   if (me || !authEnabled) return "app";
   return "login";
+}
+
+// the loader's text while /api/me gives no usable answer: no answer at all (network) differs from
+// a server that answered with an error, so a broken deploy does not read as a dropped connection
+function bootRetryText(err) {
+  const status = err && err.status;
+  if (isNum(status)) return `เซิร์ฟเวอร์ตอบกลับผิดพลาด (รหัส ${status}) กำลังลองใหม่`;
+  if (err && err.answered) return "เซิร์ฟเวอร์ตอบกลับผิดพลาด กำลังลองใหม่";
+  return "ยังติดต่อเซิร์ฟเวอร์ไม่ได้ กำลังลองใหม่";
+}
+
+// ms before retry number `attempt` (0-based): 3 s, 6 s, 12 s, 24 s, then 30 s
+function bootRetryDelay(attempt) {
+  const n = Number.isInteger(attempt) && attempt > 0 ? attempt : 0;
+  return Math.min(3000 * 2 ** Math.min(n, 4), 30000);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -2027,7 +2044,10 @@ function parseRoute() {
 function route() {
   const hash = location.hash || "";
   const target = routeFor(hash);
-  if (target.help) openHelp();
+  if (target.help) {
+    if (state.view === "app") openHelp();
+    else state.pendingHelp = true; // no help over the loader or the sign-in page
+  }
   if (target.route !== hash) {
     location.replace(target.route); // the hashchange that follows renders the page
     return;
@@ -2123,13 +2143,24 @@ function adoptMe(me) {
 
 // whether sign-in is on: true or false once /api/me answers, null when it could not be reached
 async function loadMe() {
+  state.bootError = null;
   try {
     const me = await api("/api/me");
+    if (!me || typeof me !== "object" || Array.isArray(me)) {
+      // a 200 without an account is not "sign-in is off": keep asking
+      setMe(null);
+      state.bootError = { answered: true };
+      console.warn("dashboard: /api/me answered without an account", me);
+      return null;
+    }
     adoptMe(me);
-    return !!(me && me.auth_enabled);
+    return !!me.auth_enabled;
   } catch (e) {
     setMe(null);
-    return e.status === 401 ? true : null; // only sign-in answers 401
+    if (e.status === 401) return true; // only sign-in answers 401
+    state.bootError = isNum(e.status) ? { status: e.status } : {};
+    console.warn("dashboard: /api/me failed:", e.status || "no answer", e.message);
+    return null;
   }
 }
 
@@ -2350,6 +2381,10 @@ function fillSymbols() {
 // the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
 async function enterApp() {
   showView("app");
+  if (state.pendingHelp) {
+    state.pendingHelp = false;
+    openHelp();
+  }
   if (state.started) {
     // signed in again mid-session: the same page, fresh data
     applyRoleGates();
@@ -2405,10 +2440,10 @@ async function boot() {
   if (!LWC) console.warn("dashboard: the chart library did not load");
 
   let authEnabled = await loadMe();
-  while (bootView(state.me, authEnabled) === "loading") {
-    // the server did not answer: keep only the loader up and ask again
-    $("boot-text").textContent = "ยังติดต่อเซิร์ฟเวอร์ไม่ได้ กำลังลองใหม่";
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+  for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {
+    // no usable answer: keep only the loader up, say why, and ask again with a growing wait
+    $("boot-text").textContent = bootRetryText(state.bootError);
+    await new Promise((resolve) => setTimeout(resolve, bootRetryDelay(attempt)));
     authEnabled = await loadMe();
   }
   if (bootView(state.me, authEnabled) === "login") {
@@ -2442,6 +2477,10 @@ if (typeof document !== "undefined") {
     flash,
     presenterKey,
     bootView,
+    bootRetryText,
+    bootRetryDelay,
+    loadMe,
+    getBootError: () => state.bootError,
     playToggleAction,
     noteReplayAction,
     getReplaying: () => state.replaying,

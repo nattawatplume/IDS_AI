@@ -1164,3 +1164,77 @@ def test_login_line_animates_but_rests_drawn():
     narrow = re.search(r"@media \(max-width: 720px\) \{(.*?)\n\}", css, re.S).group(1)
     assert re.search(r"\.login-line\s*\{[^}]*display:\s*none", narrow)
     assert re.search(r"#page-login[^{]*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)", narrow)
+
+
+BOOT_RETRY_BODY = r"""
+const t = m.bootRetryText;
+const NO_ANSWER = "ยังติดต่อเซิร์ฟเวอร์ไม่ได้ กำลังลองใหม่";
+assert.strictEqual(t(null), NO_ANSWER);
+assert.strictEqual(t({}), NO_ANSWER);
+assert.strictEqual(t({ status: 502 }), "เซิร์ฟเวอร์ตอบกลับผิดพลาด (รหัส 502) กำลังลองใหม่");
+assert.strictEqual(t({ status: 403 }), "เซิร์ฟเวอร์ตอบกลับผิดพลาด (รหัส 403) กำลังลองใหม่");
+assert.strictEqual(t({ answered: true }), "เซิร์ฟเวอร์ตอบกลับผิดพลาด กำลังลองใหม่");
+const d = m.bootRetryDelay;
+const want = [3000, 6000, 12000, 24000, 30000, 30000, 30000];
+assert.deepStrictEqual([0, 1, 2, 3, 4, 5, 50].map(d), want);
+assert.strictEqual(d(-1), 3000);
+assert.strictEqual(d(undefined), 3000);
+assert.strictEqual(d(1e6), 30000);
+"""
+
+
+def test_boot_retry_text_and_backoff(tmp_path):
+    _run_motion(tmp_path, "false", BOOT_RETRY_BODY)
+
+
+LOAD_ME_BODY = r"""
+console.warn = () => {};
+const answer = (status, body) => async () => ({ ok: status < 400, status, json: async () => body });
+(async () => {
+  // a 200 without an account is unknown, never "sign-in is off"
+  for (const body of [null, "x", [], 7]) {
+    globalThis.fetch = answer(200, body);
+    assert.strictEqual(await m.loadMe(), null, JSON.stringify(body));
+    assert.strictEqual(m.getMe(), null);
+    assert.deepStrictEqual(m.getBootError(), { answered: true });
+    assert.strictEqual(m.bootView(m.getMe(), null), "loading");
+  }
+  globalThis.fetch = answer(502, { detail: "bad gateway" });
+  assert.strictEqual(await m.loadMe(), null);
+  assert.deepStrictEqual(m.getBootError(), { status: 502 });
+  globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+  assert.strictEqual(await m.loadMe(), null);
+  assert.deepStrictEqual(m.getBootError(), {});
+  globalThis.fetch = answer(401, { detail: "กรุณาเข้าสู่ระบบ" });
+  assert.strictEqual(await m.loadMe(), true);
+  assert.strictEqual(m.getBootError(), null);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_load_me_tells_unknown_from_auth_off(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "loadme.js"
+    script.write_text(SESSION_LOST_HEAD + LOAD_ME_BODY, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+    js = text("app.js")
+    load = js[js.index("async function loadMe(") : js.index("function showView(")]
+    assert "console.warn" in load and "e.status" in load
+    boot = js[js.index("async function boot(") :]
+    boot = boot[: boot.index("\n}\n")]
+    assert "bootRetryDelay(" in boot and "bootRetryText(" in boot and "3000)" not in boot
+
+
+def test_help_route_waits_for_the_app_view():
+    js = text("app.js")
+    route_fn = js[js.index("function route()") : js.index("function isFramed(")]
+    head = route_fn[: route_fn.index("const r = parseRoute();")]
+    assert "openHelp()" in head and 'state.view === "app"' in head and "pendingHelp = true" in head
+    enter = js[js.index("async function enterApp(") : js.index("async function boot(")]
+    assert "state.pendingHelp" in enter and "openHelp()" in enter
