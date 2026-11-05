@@ -137,3 +137,23 @@ def test_config_hash_platform_independent_paths():
     assert config_hash(load_settings(overrides={"paths": {"app_db": "data/other.duckdb"}})) != (
         config_hash(base)
     )
+
+
+def test_config_hash_ignores_the_auth_section():
+    base = config_hash(load_settings())
+    for auth in (
+        {"enabled": True},
+        {"cookie_secure": True},
+        {"enabled": True, "cookie_secure": True},
+    ):
+        assert config_hash(load_settings(overrides={"auth": auth})) == base
+    # other sections still change it
+    assert config_hash(load_settings(overrides={"live": {"symbols": ["ZZZBTC"]}})) != base
+
+
+def test_config_hash_matches_the_existing_demo_pack():
+    manifest = Path(__file__).resolve().parents[1] / "data" / "demo" / "manifest.json"
+    if not manifest.exists():
+        pytest.skip("data/demo/manifest.json is absent: no demo pack to compare against")
+    recorded = json.loads(manifest.read_text(encoding="utf-8"))["config_hash"]
+    assert config_hash(load_settings()) == recorded

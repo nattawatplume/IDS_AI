@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -98,6 +99,24 @@ class Store:
             "CREATE TABLE IF NOT EXISTS runs("
             "run_id VARCHAR PRIMARY KEY, experiment VARCHAR, variant VARCHAR, seed BIGINT, "
             "created_us BIGINT, metrics_json VARCHAR, record_json VARCHAR)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS users("
+            "user_id VARCHAR PRIMARY KEY, username VARCHAR UNIQUE, display_name VARCHAR, "
+            "role VARCHAR, pw_hash VARCHAR, created_us BIGINT, disabled BOOLEAN)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS sessions("
+            "token_hash VARCHAR PRIMARY KEY, user_id VARCHAR, created_us BIGINT, "
+            "expires_us BIGINT, remember BOOLEAN, last_seen_us BIGINT)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS user_prefs(user_id VARCHAR PRIMARY KEY, json VARCHAR)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS audit_log("
+            "ts_us BIGINT, user_id VARCHAR, username VARCHAR, action VARCHAR, "
+            "target VARCHAR, detail VARCHAR)"
         )
 
     # ---- trades ----
@@ -441,3 +460,161 @@ class Store:
         with self._lock:
             rows = self._db().execute(sql, args).fetchall()
         return [json.loads(r[0]) for r in rows]
+
+    # ---- users, sessions, prefs, audit ----
+
+    def _rows(self, sql: str, args: list[Any]) -> list[dict]:
+        with self._lock:
+            cur = self._db().execute(sql, args)
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+
+    def add_user(
+        self, username: str, display_name: str, role: str, pw_hash: str, now_us: int
+    ) -> str:
+        user_id = uuid.uuid4().hex
+        with self._lock:
+            con = self._db()
+            if con.execute("SELECT 1 FROM users WHERE username = ?", [username]).fetchone():
+                raise ValueError(f"username already taken: {username}")
+            try:
+                con.execute(
+                    "INSERT INTO users(user_id, username, display_name, role, pw_hash, "
+                    "created_us, disabled) VALUES (?, ?, ?, ?, ?, ?, FALSE)",
+                    [user_id, username, display_name, role, pw_hash, now_us],
+                )
+            except duckdb.ConstraintException as e:
+                raise ValueError(f"username already taken: {username}") from e
+        return user_id
+
+    def get_user_by_name(self, username: str) -> dict | None:
+        rows = self._rows("SELECT * FROM users WHERE username = ?", [username])
+        return rows[0] if rows else None
+
+    def get_user(self, user_id: str) -> dict | None:
+        rows = self._rows("SELECT * FROM users WHERE user_id = ?", [user_id])
+        return rows[0] if rows else None
+
+    def list_users(self) -> list[dict]:
+        return self._rows(
+            "SELECT u.user_id, u.username, u.display_name, u.role, u.created_us, u.disabled, "
+            "(SELECT MAX(s.last_seen_us) FROM sessions s WHERE s.user_id = u.user_id) "
+            "AS last_seen_us FROM users u ORDER BY u.created_us, u.username",
+            [],
+        )
+
+    def set_role(self, username: str, role: str) -> None:
+        with self._lock:
+            self._db().execute("UPDATE users SET role = ? WHERE username = ?", [role, username])
+
+    def _drop_user_sessions(self, username: str) -> None:
+        self._db().execute(
+            "DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM users WHERE username = ?)",
+            [username],
+        )
+
+    def set_disabled(self, username: str, flag: bool) -> None:
+        with self._lock:
+            self._db().execute("UPDATE users SET disabled = ? WHERE username = ?", [flag, username])
+            if flag:
+                self._drop_user_sessions(username)
+
+    def set_password(self, username: str, pw_hash: str) -> None:
+        with self._lock:
+            self._db().execute(
+                "UPDATE users SET pw_hash = ? WHERE username = ?", [pw_hash, username]
+            )
+            self._drop_user_sessions(username)
+
+    def has_enabled_admin(self) -> bool:
+        with self._lock:
+            row = (
+                self._db()
+                .execute("SELECT 1 FROM users WHERE role = 'admin' AND NOT disabled LIMIT 1")
+                .fetchone()
+            )
+        return row is not None
+
+    def create_session(
+        self, user_id: str, token_h: str, now_us: int, expires_us: int, remember: bool
+    ) -> None:
+        with self._lock:
+            self._db().execute(
+                "INSERT INTO sessions(token_hash, user_id, created_us, expires_us, remember, "
+                "last_seen_us) VALUES (?, ?, ?, ?, ?, ?)",
+                [token_h, user_id, now_us, expires_us, remember, now_us],
+            )
+
+    def get_session(self, token_h: str, now_us: int) -> dict | None:
+        rows = self._rows(
+            "SELECT u.user_id, u.username, u.display_name, u.role, s.remember, s.last_seen_us "
+            "FROM sessions s JOIN users u ON u.user_id = s.user_id "
+            "WHERE s.token_hash = ? AND s.expires_us > ? AND NOT u.disabled",
+            [token_h, now_us],
+        )
+        return rows[0] if rows else None
+
+    def touch_session(self, token_h: str, now_us: int) -> None:
+        with self._lock:
+            self._db().execute(
+                "UPDATE sessions SET last_seen_us = ? WHERE token_hash = ?", [now_us, token_h]
+            )
+
+    def delete_session(self, token_h: str) -> None:
+        with self._lock:
+            self._db().execute("DELETE FROM sessions WHERE token_hash = ?", [token_h])
+
+    def purge_sessions(self, now_us: int) -> int:
+        with self._lock:
+            con = self._db()
+            n = con.execute(
+                "SELECT count(*) FROM sessions WHERE expires_us <= ?", [now_us]
+            ).fetchone()[0]
+            con.execute("DELETE FROM sessions WHERE expires_us <= ?", [now_us])
+        return int(n)
+
+    def get_prefs(self, user_id: str) -> dict:
+        with self._lock:
+            row = (
+                self._db()
+                .execute("SELECT json FROM user_prefs WHERE user_id = ?", [user_id])
+                .fetchone()
+            )
+        return json.loads(row[0]) if row else {}
+
+    def set_prefs(self, user_id: str, prefs: dict) -> None:
+        with self._lock:
+            self._db().execute(
+                "INSERT OR REPLACE INTO user_prefs(user_id, json) VALUES (?, ?)",
+                [user_id, json.dumps(prefs, sort_keys=True)],
+            )
+
+    def add_audit(
+        self,
+        now_us: int,
+        user_id: str | None,
+        username: str,
+        action: str,
+        target: str = "",
+        detail: dict | None = None,
+    ) -> None:
+        with self._lock:
+            self._db().execute(
+                "INSERT INTO audit_log(ts_us, user_id, username, action, target, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [now_us, user_id, username, action, target, json.dumps(detail or {}, default=str)],
+            )
+
+    def list_audit(self, limit: int = 200, before_us: int | None = None) -> list[dict]:
+        limit = max(0, min(int(limit), 500))
+        sql = "SELECT ts_us, user_id, username, action, target, detail FROM audit_log"
+        args: list[Any] = []
+        if before_us is not None:
+            sql += " WHERE ts_us < ?"
+            args.append(before_us)
+        sql += " ORDER BY ts_us DESC, rowid DESC LIMIT ?"
+        args.append(limit)
+        rows = self._rows(sql, args)
+        for r in rows:
+            r["detail"] = json.loads(r["detail"]) if r["detail"] else {}
+        return rows

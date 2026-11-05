@@ -32,8 +32,28 @@ const UNKNOWN_MODE_TH =
 const RED_TEAM_MODES = ["replay", "sim"];
 const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
+// Eval targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6 (spec section 6).
+// "pair" cards need the AE-minus-baseline CI lower bound above 0; "reference" pairs show the
+// diff and CI only (the MVP spec asks the AE to beat iforest / robust_z / kk, not random / pca).
+const EVAL_TARGETS = [
+  { id: "real_recall", label: "recall_any ≥ 0.8 · REAL (real_t001)", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true },
+  ...["pump_burst", "pump_stealth", "wash_pingpong"].map((v) => ({
+    id: `semisyn_${v}`, label: `recall_any ≥ 0.8 · SEMI-SYN ${v}`, experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true,
+  })),
+  { id: "real_fa", label: "เตือนผิด ≤ งบ · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2 },
+  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
+  ...["baseline.iforest", "stat.robust_z", "baseline.kk"].map((b) => ({
+    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
+  })),
+  ...["baseline.random", "baseline.pca"].map((b) => ({
+    id: `ae_vs_${b}`, label: `AE เทียบ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0, reference: true,
+  })),
+  { id: "latency_p99", label: "compute latency p99 < 2 s", cmp: "none", threshold: 2 },
+];
+
 const state = {
   mode: null,
+  replaying: true, // a replay starts running; control() keeps this in step
   health: null,
   symbols: [],
   symbol: null,
@@ -46,7 +66,62 @@ const state = {
   route: null,
   detailChart: null,
   injections: [],
+  railIds: null, // alert ids already on the rail; null until the first render
+  alertCount: 0,
+  layersOpen: false,
+  me: null, // GET /api/me: { username, display_name, role, auth_enabled, prefs }
+  started: false, // the data boot (symbols, series, alerts, websocket) has run
+  evalBudget: null, // saved Eval budget (string, as the option value)
+  audit: [], // Activity rows already loaded, newest first
+  auditDone: false,
 };
+
+// ------------------------------------------------------------------ roles + sign-in state
+
+const ROLE_ORDER = ["viewer", "analyst", "admin"];
+const AUDIT_ACTIONS = [
+  "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
+  "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
+];
+const NEED_ANALYST_TH = "ต้องเป็น analyst";
+const DEFAULT_ROUTE = "#/monitor";
+
+function setMe(me) {
+  state.me = me && typeof me === "object" ? me : null;
+}
+
+// mirrors auth.role_at_least: an unknown role or an unknown need is never allowed
+function can(need) {
+  const role = state.me && state.me.role;
+  const have = ROLE_ORDER.indexOf(role);
+  const want = ROLE_ORDER.indexOf(need);
+  return have >= 0 && want >= 0 && have >= want;
+}
+
+// only an in-page route may be the sign-in return target: never a URL, never the sign-in page itself
+function safeNext(raw) {
+  if (typeof raw !== "string" || !raw.startsWith("#/") || raw.startsWith("#/login")) return DEFAULT_ROUTE;
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw.charCodeAt(i) < 32) return DEFAULT_ROUTE;
+  }
+  return raw;
+}
+
+// the session is gone (expired, signed out elsewhere): forget the user, or route() would send
+// the sign-in page straight back to `next`, and every page that fetches would 401 in a loop
+function sessionLost() {
+  setMe(null);
+  const chip = typeof document !== "undefined" ? $("user-chip") : null;
+  if (chip) chip.hidden = true;
+  goLogin();
+}
+
+function goLogin() {
+  const here = location.hash || "";
+  if (here.startsWith("#/login")) return;
+  const next = safeNext(here);
+  location.hash = next === DEFAULT_ROUTE && !here.startsWith(DEFAULT_ROUTE) ? "#/login" : `#/login?next=${encodeURIComponent(next)}`;
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -105,7 +180,7 @@ function fmtP(p) {
 
 function fmtNum(x, digits = 3) {
   if (!isNum(x)) return "–";
-  if (x !== 0 && Math.abs(x) < 10 ** -digits) return x.toExponential(1);
+  if (digits > 0 && x !== 0 && Math.abs(x) < 10 ** -digits) return x.toExponential(1);
   return x.toFixed(digits);
 }
 
@@ -125,6 +200,7 @@ async function api(path, options) {
   } catch (e) {
     body = null;
   }
+  if (res.status === 401 && path !== "/api/auth/login") sessionLost(); // a failed sign-in must not bounce to itself
   if (!res.ok) {
     const detail = body && body.detail;
     const msg =
@@ -175,6 +251,58 @@ function storageSet(key, value) {
   }
 }
 
+// ------------------------------------------------------------------ prefs
+
+const PREF_KEYS = { theme: "theme", symbol: "idsai.symbol", eval_budget: "idsai.eval_budget" };
+let prefsPending = {};
+let prefsTimer = null;
+
+function authOn() {
+  return !!(state.me && state.me.auth_enabled);
+}
+
+// the saved choices: the account's when auth is on, this browser's otherwise
+function loadedPrefs() {
+  if (authOn()) return state.me.prefs || {};
+  const out = {};
+  const theme = storageGet(PREF_KEYS.theme);
+  if (theme) out.theme = theme;
+  const symbol = storageGet(PREF_KEYS.symbol);
+  if (symbol) out.symbol = symbol;
+  const raw = storageGet(PREF_KEYS.eval_budget);
+  if (raw && Number.isFinite(Number(raw))) out.eval_budget = Number(raw);
+  return out;
+}
+
+function flushPrefs() {
+  const body = prefsPending;
+  prefsPending = {};
+  prefsTimer = null;
+  if (!Object.keys(body).length) return;
+  api("/api/me/prefs", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then(() => {
+      if (state.me) state.me.prefs = { ...state.me.prefs, ...body };
+    })
+    .catch((e) => console.warn("dashboard: prefs not saved:", e.message));
+}
+
+// auth off: this browser's localStorage, at once. auth on: the account, one PUT 500 ms after the last change
+function savePrefs(patch) {
+  if (!authOn()) {
+    for (const [k, v] of Object.entries(patch || {})) {
+      if (PREF_KEYS[k]) storageSet(PREF_KEYS[k], String(v));
+    }
+    return;
+  }
+  prefsPending = { ...prefsPending, ...patch };
+  if (prefsTimer !== null) clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(flushPrefs, 500);
+}
+
 function provenanceBadges(text) {
   const parts = String(text || "")
     .split("/")
@@ -188,11 +316,151 @@ function parentTechnique(id) {
 
 // ------------------------------------------------------------------ top bar
 
+const THEMES = ["auto", "dark", "light"];
+
+function currentTheme() {
+  const t = document.documentElement.dataset.theme;
+  return THEMES.includes(t) ? t : "auto";
+}
+
+function applyTheme(choice) {
+  const c = THEMES.includes(choice) ? choice : "auto";
+  if (c === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = c;
+  const btn = $("theme-toggle");
+  if (btn) {
+    btn.textContent = c.toUpperCase();
+    btn.title = `ธีม: ${c}`;
+  }
+  for (const b of document.querySelectorAll("[data-theme-choice]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === c));
+  }
+  storageSet("theme", c);
+  restyleCharts();
+}
+
+// a theme change the user made: apply it and remember it with the account
+function chooseTheme(choice) {
+  applyTheme(choice);
+  savePrefs({ theme: currentTheme() });
+}
+
+function bindTheme() {
+  const saved = storageGet("theme");
+  applyTheme(THEMES.includes(saved) ? saved : "auto");
+  $("theme-toggle").addEventListener("click", () => {
+    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  });
+  for (const b of document.querySelectorAll("[data-theme-choice]")) {
+    b.addEventListener("click", () => chooseTheme(b.dataset.themeChoice));
+  }
+}
+
+// ------------------------------------------------------------------ motion + presenter keys
+
+const PAGE_ORDER = ["#/monitor", "#/alerts", "#/redteam", "#/eval", "#/taxonomy", "#/about"];
+
+function reducedMotion() {
+  const mm = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null;
+  return !!(mm && mm.call(globalThis, "(prefers-reduced-motion: reduce)").matches);
+}
+
+// count a number up or down to `to`; snaps when motion is reduced
+function tweenNumber(node, to, digits, ms = 300) {
+  if (!node) return;
+  if (!isNum(to)) {
+    node.textContent = fmtNum(to, digits);
+    return;
+  }
+  const raf = typeof globalThis.requestAnimationFrame === "function" ? globalThis.requestAnimationFrame : null;
+  if (reducedMotion() || !raf) {
+    node.textContent = fmtNum(to, digits);
+    return;
+  }
+  const from = Number.parseFloat(node.textContent);
+  if (!Number.isFinite(from) || from === to) {
+    node.textContent = fmtNum(to, digits);
+    return;
+  }
+  if (node._tween) node._tween.cancelled = true;
+  const job = { cancelled: false };
+  node._tween = job;
+  const t0 = performance.now();
+  const step = (now) => {
+    if (job.cancelled) return;
+    const k = Math.min(1, (now - t0) / ms);
+    const eased = 1 - (1 - k) * (1 - k) * (1 - k);
+    node.textContent = fmtNum(k >= 1 ? to : from + (to - from) * eased, digits);
+    if (k < 1) raf(step);
+    else node._tween = null;
+  };
+  raf(step);
+}
+
+// re-trigger a one-shot CSS animation class
+function flash(node, cls = "flash") {
+  if (!node || reducedMotion()) return;
+  node.classList.remove(cls);
+  void node.offsetWidth; // restart the animation
+  node.classList.add(cls);
+}
+
+function presenterKey(ev) {
+  if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
+  const tag = ev.target && ev.target.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return null;
+  // ev.code is the physical key: it still works when a Thai layout changes ev.key
+  const code = ev.code || "";
+  if (ev.key === " " || code === "Space") return "toggle-play";
+  if (ev.key === "t" || ev.key === "T" || code === "KeyT") return "theme";
+  if (/^[1-6]$/.test(ev.key || "")) return `page:${ev.key}`;
+  const digit = /^(?:Digit|Numpad)([1-6])$/.exec(code);
+  if (digit) return `page:${digit[1]}`;
+  return null;
+}
+
+// what Space should do now: the opposite of the replay state, nothing in LIVE or unknown mode
+function playToggleAction(mode, playing) {
+  if (!mode || mode === "live") return null;
+  return playing ? "pause" : "play";
+}
+
+// one source of truth for the replay state, fed by control()'s successful answers
+function noteReplayAction(action) {
+  if (action === "play") state.replaying = true;
+  else if (action === "pause") state.replaying = false;
+}
+
+function onPresenterKey(ev) {
+  const act = presenterKey(ev);
+  if (!act) return;
+  ev.preventDefault();
+  if (act === "toggle-play") {
+    const next = playToggleAction(state.mode, state.replaying);
+    if (next) control(next);
+  } else if (act === "theme") {
+    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  } else {
+    location.hash = PAGE_ORDER[Number(act.slice(5)) - 1];
+  }
+}
+
+// the top-bar pulse: on while data flows, off on pause or a dropped connection
+function setLive(on) {
+  const dot = $("live-dot");
+  const clock = $("clock");
+  if (dot) {
+    dot.classList.toggle("live", !!on);
+    dot.classList.toggle("off", !on); // grey whatever the mode lamp said
+  }
+  if (clock) clock.classList.toggle("dim", !on);
+}
+
 function renderHealth(h) {
   state.health = h;
   setMode(h.mode);
-  if (isNum(h.event_us)) $("event-clock").textContent = fmtUs(h.event_us);
-  else if (isNum(state.lastBarUs)) $("event-clock").textContent = fmtUs(state.lastBarUs);
+  if (isNum(h.event_us)) $("clock").textContent = fmtUs(h.event_us);
+  else if (isNum(state.lastBarUs)) $("clock").textContent = fmtUs(state.lastBarUs);
 
   const checks = Array.isArray(h.checks) ? h.checks : [];
   const dot = $("auditor-dot");
@@ -206,6 +474,10 @@ function renderHealth(h) {
       : "กำลังอุ่นเครื่อง";
   }
   $("auditor-text").textContent = text;
+  const kpiAud = $("kpi-auditor");
+  kpiAud.textContent = text;
+  kpiAud.className = `kpi-value ${h.overall || ""}`;
+  $("auditor").title = text; // the warm-up wording lives in the tooltip, the bar stays short
   const list = clear($("auditor-checks"));
   for (const c of checks) {
     list.appendChild(
@@ -234,6 +506,10 @@ function redTeamAllowed(mode) {
 function setMode(mode) {
   if (!mode || mode === state.mode) return;
   state.mode = mode;
+  state.replaying = true; // a new mode starts with a running replay
+  const lamp = $("live-dot");
+  lamp.classList.remove("ok", "fail");
+  lamp.classList.add(mode === "live" ? "fail" : "ok");
   const badge = $("mode-badge");
   badge.textContent = String(mode).toUpperCase();
   badge.className = `badge badge-mode ${mode}`;
@@ -246,6 +522,31 @@ function setMode(mode) {
   for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
     node.disabled = !allowed;
   }
+  applyRoleGates();
+}
+
+// UI convenience only: the server enforces the role on every route
+function applyRoleGates() {
+  const ok = can("analyst");
+  const gate = (node) => {
+    if (ok) node.removeAttribute("title");
+    else node.title = NEED_ANALYST_TH;
+  };
+  for (const id of ["btn-play", "btn-pause", "speed-select", "seek-input", "btn-seek"]) {
+    const node = $(id);
+    node.disabled = !ok;
+    gate(node);
+  }
+  const allowed = redTeamAllowed(state.mode) && ok;
+  for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
+    node.disabled = !allowed;
+    gate(node);
+  }
+  for (const node of document.querySelectorAll(".feedback button, .feedback input")) {
+    node.disabled = !ok;
+    gate(node);
+  }
+  $("tab-activity").hidden = !can("admin");
 }
 
 function eventNowUs() {
@@ -261,7 +562,9 @@ function renderBudget() {
   const fill = $("budget-fill");
   if (!isNum(budget) || !isNum(now)) {
     $("budget-text").textContent = "–";
+    $("kpi-budget").textContent = "งบ –";
     fill.style.width = "0";
+    renderAlertsKpi(now);
     return;
   }
   const nSym = Math.max(state.symbols.length, 1);
@@ -272,8 +575,28 @@ function renderBudget() {
   const rate = n / nSym;
   const frac = budget > 0 ? rate / budget : 0;
   fill.style.width = `${Math.min(frac, 1) * 100}%`;
-  fill.className = `meter-fill${frac > 1 ? " over" : frac > 0.75 ? " near" : ""}`;
+  fill.className = `meter-fill${frac > 1 ? " over" : frac >= 0.8 ? " warn" : ""}`;
   $("budget-text").textContent = `${rate.toFixed(1)} / ${budget} ครั้งต่อสัญลักษณ์-วัน`;
+  $("kpi-budget").textContent = `งบ ${budget}`;
+  renderAlertsKpi(now);
+}
+
+// the KPI counts the selected symbol's alerts of the last 24 h (the unit of the budget above)
+function renderAlertsKpi(now = eventNowUs()) {
+  const box = $("kpi-alerts");
+  if (!state.symbol || !isNum(now)) {
+    box.textContent = "–";
+    state.alertCount = 0;
+    return;
+  }
+  let n = 0;
+  for (const a of state.alerts.values()) {
+    if (a.symbol === state.symbol && a.ts_event_us > now - DAY_US && a.ts_event_us <= now) n += 1;
+  }
+  const rose = n > state.alertCount;
+  state.alertCount = n;
+  tweenNumber(box, n, 0);
+  if (rose) flash(box.parentNode);
 }
 
 // ------------------------------------------------------------------ monitor chart
@@ -288,13 +611,14 @@ const chart = {
   markers: null,
   last: {}, // series key -> last plotted time (s)
   priceTimes: [], // sorted times of the price series, for snapping markers
+  now: { price: null, f: null }, // latest plotted values, shown while the pointer is away
 };
 
 function chartColors() {
   return {
-    bg: cssVar("--surface"),
-    text: cssVar("--muted"),
-    grid: cssVar("--border"),
+    bg: cssVar("--panel"),
+    text: cssVar("--dim"),
+    grid: cssVar("--line"),
     price: cssVar("--line-price"),
     f: cssVar("--line-f"),
     tau: cssVar("--tau"),
@@ -353,13 +677,73 @@ function initChart() {
     }),
     1,
   );
-  LANES.forEach(([key, title, color], i) => {
-    chart.lanes[key] = chart.api.addSeries(LWC.LineSeries, lineOptions(cssVar(color), title), 2 + i);
-  });
+  if (state.layersOpen) addLanes();
   chart.markers = LWC.createSeriesMarkers(chart.price, []);
   const panes = chart.api.panes();
   if (panes[0]) panes[0].setStretchFactor(3);
   if (panes[1]) panes[1].setStretchFactor(1.4);
+  // one chart, one crosshair: it already spans the price, F and layer panes; the readout follows it
+  chart.api.subscribeCrosshairMove(onCrosshair);
+  renderReadout(null, chart.now.price, chart.now.f);
+}
+
+function addLanes() {
+  LANES.forEach(([key, title, color], i) => {
+    chart.lanes[key] = chart.api.addSeries(LWC.LineSeries, lineOptions(cssVar(color), title), 2 + i);
+  });
+}
+
+function removeLanes() {
+  for (const [key] of LANES) {
+    if (chart.lanes[key]) chart.api.removeSeries(chart.lanes[key]);
+    chart.lanes[key] = null;
+    delete chart.last[key];
+  }
+}
+
+// the L1/L2/L3 panes are folded away by default; opening them re-reads the series
+function setLayersOpen(open) {
+  state.layersOpen = open;
+  const btn = $("layers-toggle");
+  btn.setAttribute("aria-expanded", String(open));
+  btn.textContent = open ? "ซ่อน L1/L2/L3" : "แสดง L1/L2/L3";
+  if (!chart.api) return;
+  if (open) {
+    addLanes();
+    loadSeries();
+  } else {
+    removeLanes();
+  }
+}
+
+function setInfoOpen(open) {
+  $("chart-info").setAttribute("aria-expanded", String(open));
+  $("chart-info-body").hidden = !open;
+}
+
+function bindMonitor() {
+  $("layers-toggle").addEventListener("click", () => setLayersOpen(!state.layersOpen));
+  $("chart-info").addEventListener("click", () => setInfoOpen($("chart-info-body").hidden));
+}
+
+function renderReadout(time, price, f) {
+  const parts = [];
+  if (isNum(time)) parts.push(fmtSec(time));
+  parts.push(`ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`);
+  parts.push(`F ${isNum(f) ? fmtNum(f, 2) : "–"}`);
+  $("readout").textContent = parts.join(" · ");
+}
+
+function onCrosshair(param) {
+  if (!param || !isNum(param.time) || !param.seriesData) {
+    renderReadout(null, chart.now.price, chart.now.f); // pointer left: show the latest
+    return;
+  }
+  const at = (series) => {
+    const pt = series && param.seriesData.get(series);
+    return pt && isNum(pt.value) ? pt.value : null;
+  };
+  renderReadout(param.time, at(chart.price), at(chart.f));
 }
 
 function restyleCharts() {
@@ -367,7 +751,9 @@ function restyleCharts() {
     chart.api.applyOptions(baseChartOptions());
     chart.price.applyOptions({ color: cssVar("--line-price") });
     chart.f.applyOptions({ color: cssVar("--line-f") });
-    LANES.forEach(([key, , color]) => chart.lanes[key].applyOptions({ color: cssVar(color) }));
+    LANES.forEach(([key, , color]) => {
+      if (chart.lanes[key]) chart.lanes[key].applyOptions({ color: cssVar(color) });
+    });
     if (chart.tauLine) chart.tauLine.applyOptions({ color: cssVar("--tau") });
   }
   if (state.detailChart) state.detailChart.restyle();
@@ -383,6 +769,19 @@ function seriesData(times, values) {
     out.push(isNum(values[i]) ? { time: t, value: values[i] } : { time: t });
   }
   return out;
+}
+
+function lastValue(data) {
+  for (let i = data.length - 1; i >= 0; i -= 1) if ("value" in data[i]) return data[i].value;
+  return null;
+}
+
+function showTau(tau) {
+  $("kpi-tau").textContent = fmtNum(tau, 2);
+}
+
+function showF(f) {
+  tweenNumber($("kpi-f"), f, 2);
 }
 
 function lastTime(data) {
@@ -427,12 +826,17 @@ async function loadSeries() {
   const f = seriesData(times, s.F || []);
   chart.f.setData(f);
   chart.last.f = lastTime(f);
+  chart.now = { price: lastValue(price), f: lastValue(f) };
+  renderReadout(null, chart.now.price, chart.now.f);
   for (const [key] of LANES) {
+    if (!chart.lanes[key]) continue;
     const d = seriesData(times, s[key] || []);
     chart.lanes[key].setData(d);
     chart.last[key] = lastTime(d);
   }
   setTau(s.tau);
+  showTau(s.tau);
+  showF(chart.now.f);
   $("chart-empty").hidden = price.length > 0;
   renderMarkers();
 }
@@ -452,7 +856,7 @@ function nearestTime(t) {
 }
 
 function sevColor(sev) {
-  return sev >= 3 ? cssVar("--fail") : sev >= 2 ? cssVar("--warn") : cssVar("--muted");
+  return sev >= 3 ? cssVar("--red") : cssVar("--amber");
 }
 
 function renderMarkers() {
@@ -489,6 +893,7 @@ function plot(key, series, t, value) {
   if (t <= last) return false; // stale (e.g. after a seek): dropped on purpose
   series.update({ time: t, value });
   chart.last[key] = t;
+  if (key === "price" || key === "f") chart.now[key] = value;
   return true;
 }
 
@@ -496,7 +901,7 @@ function onBar(bar) {
   if (!bar || !isNum(bar.t_us)) return;
   const closeUs = bar.t_us + S_US;
   if (!isNum(state.lastBarUs) || closeUs > state.lastBarUs) state.lastBarUs = closeUs;
-  if (state.mode === "live") $("event-clock").textContent = fmtUs(state.lastBarUs);
+  if (state.mode === "live") $("clock").textContent = fmtUs(state.lastBarUs);
   if (bar.symbol !== state.symbol || !chart.api) return;
   const t = toSec(closeUs); // a bar closes at t_us + 1 s, where its score row ends
   if (plot("price", chart.price, t, bar.close)) {
@@ -508,7 +913,7 @@ function onBar(bar) {
 function onScore(p) {
   if (!p || p.symbol !== state.symbol || !chart.api || !isNum(p.t_end_us)) return;
   const t = toSec(p.t_end_us);
-  plot("f", chart.f, t, p.F);
+  if (plot("f", chart.f, t, p.F)) showF(p.F);
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);
 }
 
@@ -516,10 +921,16 @@ function onScore(p) {
 
 async function control(action, value) {
   const status = $("replay-status");
+  if (!can("analyst")) {
+    status.textContent = NEED_ANALYST_TH;
+    return;
+  }
   status.textContent = "…";
   try {
     const body = value === undefined ? { action } : { action, value };
     const r = await postJson("/api/replay/control", body);
+    noteReplayAction(action);
+    if (action === "play" || action === "pause") setLive(state.replaying);
     status.textContent = `ตำแหน่ง ${fmtUs(r.cursor_us)}`;
   } catch (e) {
     status.textContent = e.message;
@@ -559,6 +970,7 @@ async function loadAlerts() {
 
 function alertsChanged() {
   renderAlertsTable();
+  renderRail();
   renderMarkers();
   renderBudget();
   checkInjections();
@@ -590,6 +1002,10 @@ function alertHref(id) {
   return `#/alerts/${encodeURIComponent(id)}`;
 }
 
+function sevKey(severity) {
+  return severity >= 3 ? "high" : severity === 2 ? "mid" : "low";
+}
+
 function renderAlertsTable() {
   const body = clear($("alerts-body"));
   const items = sortedAlerts();
@@ -598,7 +1014,7 @@ function renderAlertsTable() {
   for (const a of items) {
     const row = el(
       "tr",
-      { class: "clickable", tabindex: "0" },
+      { class: "clickable", tabindex: "0", "data-sev": sevKey(a.severity) },
       el("td", {}, el("span", { class: `sev sev-${a.severity}` }, SEVERITY_TH[a.severity] || a.severity)),
       el("td", { class: "mono" }, a.technique_id),
       el("td", {}, a.symbol),
@@ -616,6 +1032,26 @@ function renderAlertsTable() {
     });
     body.appendChild(row);
   }
+}
+
+// newest eight alerts beside the chart; a row that was not there before slides in
+function renderRail() {
+  const box = clear($("alert-rail"));
+  const items = sortedAlerts().slice(0, 8);
+  $("rail-empty").hidden = items.length > 0;
+  const seen = state.railIds;
+  for (const a of items) {
+    const fresh = seen !== null && !seen.has(a.alert_id);
+    box.appendChild(
+      el(
+        "a",
+        { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id) },
+        el("strong", { class: "mono" }, `${a.technique_id} · ${a.symbol}`),
+        el("span", { class: "muted small mono" }, `${fmtUs(a.ts_event_us).slice(11)} · p ${fmtP(a.fused_p)} · ${a.agreement}/3 ชั้น`),
+      ),
+    );
+  }
+  state.railIds = new Set(items.map((a) => a.alert_id));
 }
 
 async function loadTaxonomy() {
@@ -669,9 +1105,16 @@ async function showAlert(id) {
     ),
   );
 
+  const detail = el("div", { class: "detail" });
+  const main = el("div", { class: "detail-main" });
+  const side = el("div", { class: "detail-side" });
+  detail.appendChild(main);
+  detail.appendChild(side);
+  box.appendChild(detail);
+
   const explanation = (a.explanation && a.explanation.text_th) || a.explanation_th || "";
   const facts = (a.explanation && a.explanation.facts) || [];
-  box.appendChild(
+  side.appendChild(
     el(
       "div",
       { class: "card" },
@@ -693,12 +1136,9 @@ async function showAlert(id) {
   );
   const mini = el("div", { class: "chart-mini" });
   chartCard.appendChild(mini);
-  box.appendChild(chartCard);
+  main.appendChild(chartCard);
 
-  const grid = el("div", { class: "grid-2" });
-  box.appendChild(grid);
-
-  grid.appendChild(
+  side.appendChild(
     el(
       "div",
       { class: "card" },
@@ -720,9 +1160,9 @@ async function showAlert(id) {
     ),
   );
 
-  grid.appendChild(techniqueCard(tax, a.technique_id));
+  side.appendChild(techniqueCard(tax, a.technique_id));
 
-  grid.appendChild(
+  main.appendChild(
     el(
       "div",
       { class: "card" },
@@ -754,7 +1194,7 @@ async function showAlert(id) {
     ),
   );
 
-  grid.appendChild(
+  side.appendChild(
     el(
       "div",
       { class: "card" },
@@ -789,7 +1229,7 @@ async function showAlert(id) {
     ),
   );
 
-  box.appendChild(feedbackCard(a));
+  side.appendChild(feedbackCard(a));
   drawDetailChart(mini, a);
 }
 
@@ -831,12 +1271,17 @@ function feedbackCard(a) {
   };
   renderList(a.feedback);
   const send = async (verdict) => {
-    const name = analyst.value.trim();
+    if (!can("analyst")) {
+      status.textContent = NEED_ANALYST_TH;
+      return;
+    }
+    // signed in: the server records the session user, so no name is typed or remembered here
+    const name = authOn() ? state.me.username : analyst.value.trim();
     if (!name) {
       status.textContent = "ใส่ชื่อผู้วิเคราะห์ก่อน";
       return;
     }
-    storageSet("idsai.analyst", name);
+    if (!authOn()) storageSet("idsai.analyst", name);
     status.textContent = "กำลังบันทึก…";
     try {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
@@ -847,12 +1292,17 @@ function feedbackCard(a) {
       status.textContent = e.message;
     }
   };
+  const gate = can("analyst") ? {} : { disabled: true, title: NEED_ANALYST_TH };
+  if (!can("analyst")) {
+    analyst.disabled = true;
+    analyst.title = NEED_ANALYST_TH;
+  }
   append(card, [
     el(
       "div",
       { class: "feedback" },
-      el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
-      ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", onclick: () => send(v) }, VERDICT_TH[v])),
+      authOn() ? null : el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
+      ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", ...gate, onclick: () => send(v) }, VERDICT_TH[v])),
     ),
     status,
     list,
@@ -919,6 +1369,10 @@ function bindRedTeam() {
     ev.preventDefault();
     if (!redTeamAllowed(state.mode)) return;
     const status = $("rt-status");
+    if (!can("analyst")) {
+      status.textContent = NEED_ANALYST_TH;
+      return;
+    }
     const offset = Number($("rt-offset").value);
     if (!Number.isFinite(offset) || offset <= 0 || offset > 3600) {
       status.textContent = "offset ต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
@@ -940,7 +1394,7 @@ function bindRedTeam() {
     } catch (e) {
       status.textContent = e.message;
     } finally {
-      $("rt-submit").disabled = !redTeamAllowed(state.mode);
+      $("rt-submit").disabled = !(redTeamAllowed(state.mode) && can("analyst"));
     }
   });
 }
@@ -1044,7 +1498,28 @@ function renderInjections() {
   const box = clear($("rt-runs"));
   for (const run of state.injections) {
     const sc = run.scenario;
-    const timer = el("div", { class: "timer" });
+    const ring = svg("circle", {
+      id: "rt-ring",
+      class: "rt-ring-arc",
+      cx: 26,
+      cy: 26,
+      r: RING_R,
+      fill: "none",
+      "stroke-width": 4,
+      "stroke-dasharray": RING_C.toFixed(2),
+      "stroke-dashoffset": RING_C.toFixed(2),
+      transform: "rotate(-90 26 26)",
+    });
+    const ringSvg = svg(
+      "svg",
+      { viewBox: "0 0 52 52", class: "rt-ring", role: "img", "aria-label": "เวลาที่ผ่านไปเทียบกับช่วงตรวจจับ" },
+      svg("circle", { cx: 26, cy: 26, r: RING_R, fill: "none", "stroke-width": 4, class: "rt-ring-track" }),
+      ring,
+    );
+    const banner = el("div", { class: "rt-banner", id: "rt-banner" });
+    banner.hidden = true;
+    const detail = el("div", { class: "small timer-detail" });
+    const timer = el("div", { class: "timer rt-timer" }, ringSvg, el("div", { class: "rt-timer-text" }, banner, detail));
     const card = el(
       "div",
       { class: "card" },
@@ -1071,37 +1546,140 @@ function renderInjections() {
       timer,
     );
     run.node = timer;
+    run.ring = ring;
+    run.banner = banner;
+    run.detail = detail;
+    run.bannerState = null;
     box.appendChild(card);
   }
   tickInjections();
 }
 
+const RING_R = 22;
+const RING_C = 2 * Math.PI * RING_R;
+
+function bannerText(status, seconds) {
+  // the verdict line on a Red-Team card; empty while the run is still undecided
+  const n = Math.max(0, Math.round(Number(seconds) || 0));
+  if (status === "detected") return `ตรวจพบใน ${n} วินาที`;
+  if (status === "missed") return `ไม่พบภายใน ${n} วินาทีหลังจบเหตุการณ์`;
+  return "";
+}
+
 function tickInjections() {
   const now = eventNowUs();
   for (const run of state.injections) {
-    if (!run.node) continue;
-    clear(run.node);
+    if (!run.node || !run.ring) continue;
     const status = injectionStatus(run, now);
+    const windowS = Math.max(1, (run.t_end_us - run.t_start_us) / S_US + MATCH_AFTER_US / S_US);
+    const ev = isNum(now) && isNum(run.t_start_us) ? (now - run.t_start_us) / S_US : null;
+    let frac = ev === null ? 0 : Math.max(0, Math.min(1, ev / windowS));
+    if (status === "detected") frac = Math.max(0, Math.min(1, run.detected.eventS / windowS));
+    else if (status === "missed") frac = 1;
+    run.ring.setAttribute("stroke-dasharray", RING_C.toFixed(2));
+    run.ring.setAttribute("stroke-dashoffset", (RING_C * (1 - frac)).toFixed(2));
+    run.ring.setAttribute("class", `rt-ring-arc ${status}`);
+
+    const seconds = status === "detected" ? run.detected.eventS : MATCH_AFTER_US / S_US;
+    const verdict = status === "detected" || status === "missed";
+    run.banner.hidden = !verdict;
+    if (verdict) {
+      run.banner.textContent = bannerText(status, seconds);
+      if (run.bannerState !== status) { // class only on a state change: a tick never restarts the sweep
+        run.bannerState = status;
+        const hit = status === "detected";
+        run.banner.className = `rt-banner ${hit ? "hit" : "miss"}`;
+        if (hit && !reducedMotion()) run.banner.classList.add("sweep");
+      }
+    } else {
+      run.bannerState = null;
+      run.banner.className = "rt-banner";
+    }
+
+    clear(run.detail);
     if (status === "missed") {
-      run.node.textContent =
+      run.detail.textContent =
         "ไม่พบความผิดปกติทางสถิติภายในช่วงที่นับตามเกณฑ์ประเมิน (ถึงสิ้นสุดเหตุการณ์ + 300 s) · นับเป็นการตรวจไม่พบ";
     } else if (status === "detected") {
       const d = run.detected;
-      append(run.node, [
+      append(run.detail, [
         `ตรวจพบความผิดปกติทางสถิติ: ${d.eventS >= 0 ? "+" : ""}${d.eventS.toFixed(0)} s (เวลาเหตุการณ์) · ${d.wallS.toFixed(1)} s (เวลาจริง) `,
         el("a", { href: alertHref(d.alert_id), class: "small" }, "ดูการแจ้งเตือน"),
       ]);
     } else {
       const wall = (Date.now() - run.wallStart) / 1000;
-      const ev = isNum(now) && isNum(run.t_start_us) ? (now - run.t_start_us) / S_US : null;
       const evText =
         ev === null ? "–" : ev < 0 ? `อีก ${(-ev).toFixed(0)} s จะเริ่ม` : `+${ev.toFixed(0)} s`;
-      run.node.textContent = `รอการตรวจจับ… ${evText} (เวลาเหตุการณ์) · ${wall.toFixed(0)} s (เวลาจริง)`;
+      run.detail.textContent = `รอการตรวจจับ… ${evText} (เวลาเหตุการณ์) · ${wall.toFixed(0)} s (เวลาจริง)`;
     }
   }
 }
 
 // ------------------------------------------------------------------ eval
+
+function evalEmpty(report) {
+  return !report || !report.runs || !report.experiments;
+}
+
+// pass / miss / unmeasured: absent data is never a pass
+function targetVerdict(report, target) {
+  const none = { state: "unmeasured", value: null, ci: null, n: null };
+  if (evalEmpty(report) || target.cmp === "none") return none; // the report has no latency metric
+  if (target.cmp === "pair") {
+    const paired = report.paired_bootstrap;
+    if (!paired || Number(paired.budget) !== Number(target.budget)) return none;
+    const found = (paired.rows || []).find((r) => r.baseline === target.variant);
+    if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
+    const st = target.reference ? "reference" : found.ci[0] > target.threshold ? "pass" : "miss";
+    return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events };
+  }
+  const variants = report.experiments[target.experiment] || {};
+  const cell = (variants[target.variant] || {})[String(target.budget)];
+  const value = cell && cell.mean ? cell.mean[target.metric] : null;
+  if (!isNum(value)) return none;
+  const ci = cell.ci && Array.isArray(cell.ci[target.metric]) ? cell.ci[target.metric] : null;
+  const ok = target.cmp === ">=" ? value >= target.threshold : value <= target.threshold;
+  const out = { state: ok ? "pass" : "miss", value, ci, n: cell.n_events };
+  if (target.correct && isNum(cell.mean.recall_correct)) {
+    const cc = cell.ci && cell.ci.recall_correct;
+    out.correct = { value: cell.mean.recall_correct, ci: Array.isArray(cc) ? cc : null };
+  }
+  return out;
+}
+
+const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด", reference: "อ้างอิง" };
+
+function fmtSigned(x) {
+  return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
+}
+
+function targetCard(target, verdict, index) {
+  const paired = target.cmp === "pair";
+  const goal =
+    target.cmp === "none"
+      ? `< ${target.threshold} s`
+      : target.reference
+        ? "ไม่มีเป้า (อ้างอิง)"
+        : paired
+          ? "CI ขอบล่าง > 0"
+          : `${target.cmp === ">=" ? "≥" : "≤"} ${target.threshold}`;
+  const none = verdict.state === "unmeasured";
+  return el(
+    "div",
+    { class: `target ${verdict.state} rise`, style: `animation-delay: ${index * 50}ms` },
+    el("span", { class: "label" }, target.label),
+    el("strong", { class: `verdict ${verdict.state}` }, TARGET_STATE_TH[verdict.state]),
+    el("span", { class: "mono big" }, none ? "–" : paired ? fmtSigned(verdict.value) : fmtNum(verdict.value, 3)),
+    el(
+      "span",
+      { class: "small mono muted" },
+      none ? `เป้า ${goal}` : `${verdict.ci ? ciText(verdict.value, verdict.ci) : "ไม่มี CI"} · n ${verdict.n ?? "–"} · เป้า ${goal}`,
+    ),
+    verdict.correct
+      ? el("span", { class: "small mono muted" }, `recall_correct ${ciText(verdict.correct.value, verdict.correct.ci)}`)
+      : null,
+  );
+}
 
 async function showEval() {
   const box = clear($("eval-body"));
@@ -1114,15 +1692,8 @@ async function showEval() {
     return;
   }
   clear(box);
-  if (!report || !report.runs || !report.experiments) {
-    box.appendChild(
-      el(
-        "div",
-        { class: "empty" },
-        el("p", {}, "ยังไม่มีรายงานผลการประเมิน"),
-        el("p", { class: "small" }, "รัน uv run idsai eval แล้วตามด้วย uv run idsai report จากนั้นเปิดหน้านี้ใหม่"),
-      ),
-    );
+  if (evalEmpty(report)) {
+    box.appendChild(el("p", { class: "empty" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่"));
     return;
   }
   box.appendChild(
@@ -1140,6 +1711,15 @@ async function showEval() {
     ),
   );
 
+  box.appendChild(el("h2", { class: "section-label" }, "เป้าหมาย (งบ 2 ครั้ง/สัญลักษณ์-วัน)"));
+  box.appendChild(el("div", { class: "targets" }, EVAL_TARGETS.map((t, i) => targetCard(t, targetVerdict(report, t), i))));
+
+  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
+  if (report.retrain_decision) {
+    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
+    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
+  }
+
   const budgets = new Set();
   for (const variants of Object.values(report.experiments)) {
     for (const cells of Object.values(variants)) Object.keys(cells).forEach((b) => budgets.add(b));
@@ -1150,7 +1730,8 @@ async function showEval() {
     { "aria-label": "งบการแจ้งเตือน" },
     sorted.map((b) => el("option", { value: b }, `${b} ครั้ง/สัญลักษณ์-วัน`)),
   );
-  select.value = sorted.includes("2") ? "2" : sorted[0] || "";
+  const saved = state.evalBudget;
+  select.value = sorted.includes(saved) ? saved : sorted.includes("2") ? "2" : sorted[0] || "";
   const tables = el("div");
   box.appendChild(el("div", { class: "toolbar" }, el("label", { class: "field" }, el("span", {}, "งบการแจ้งเตือน"), select)));
   box.appendChild(tables);
@@ -1160,16 +1741,21 @@ async function showEval() {
       tables.appendChild(experimentTable(exp, variants, select.value));
     }
   };
-  select.addEventListener("change", draw);
+  select.addEventListener("change", () => {
+    draw();
+    const b = Number(select.value);
+    if (Number.isFinite(b)) {
+      state.evalBudget = String(b);
+      savePrefs({ eval_budget: b });
+    }
+  });
   draw();
 
-  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
-  if (report.retrain_decision) {
-    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
-    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
-  }
-  if ((report.notes || []).length) {
-    box.appendChild(el("div", { class: "card" }, el("h3", {}, "หมายเหตุ"), el("ul", { class: "small" }, report.notes.map((n) => el("li", {}, n)))));
+  const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
+  if (notes.length) {
+    box.appendChild(
+      el("details", { class: "card notes-box" }, el("summary", {}, "หมายเหตุวิธีวัด"), el("ul", { class: "small" }, notes.map((n) => el("li", {}, n)))),
+    );
   }
 }
 
@@ -1216,7 +1802,7 @@ function experimentTable(exp, variants, budget) {
         el("td", { class: "num mono" }, `${fmtNum(m.precision, 3)} (prevalence ${fmtNum(m.prevalence, 4)})`),
         el("td", { class: "num mono" }, fmtNum(m.ttd_median_s, 0)),
         el("td", { class: "num" }, cell.n_events),
-        el("td", { class: "small muted" }, flags.join(" · ")),
+        el("td", { class: "small muted notes" }, flags.join(" · ")),
       ),
     );
   }
@@ -1252,6 +1838,7 @@ function experimentTable(exp, variants, budget) {
 
 function pairedCard(paired) {
   const card = el("div", { class: "card" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
+  if ((paired.rows || []).length) card.appendChild(forestPlot(paired));
   const rows = (paired.rows || []).map((row) =>
     el(
       "tr",
@@ -1280,7 +1867,6 @@ function pairedCard(paired) {
   } else {
     card.appendChild(el("p", { class: "muted small" }, "ยังไม่มีผล"));
   }
-  if ((paired.notes || []).length) card.appendChild(el("ul", { class: "small" }, paired.notes.map((n) => el("li", {}, n))));
   return card;
 }
 
@@ -1291,6 +1877,29 @@ function svg(tag, attrs, ...children) {
   for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, String(v));
   for (const c of children) node.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
   return node;
+}
+
+// AE minus each baseline: one CI per row; right of 0 = AE better
+function forestPlot(paired) {
+  const rows = (paired.rows || []).filter((r) => isNum(r.diff_mean) && Array.isArray(r.ci) && isNum(r.ci[0]) && isNum(r.ci[1]));
+  const W = 520;
+  const rowH = 28;
+  const left = 120;
+  const top = 8;
+  const H = top + rowH * rows.length + 28;
+  const lim = Math.max(0.1, ...rows.map((r) => Math.max(Math.abs(r.ci[0]), Math.abs(r.ci[1]))));
+  const x = (v) => left + ((v + lim) / (2 * lim)) * (W - left - 12);
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "forest", role: "img", "aria-label": "ผลต่าง recall ของ AE เทียบแต่ละ baseline พร้อม 95% CI" });
+  root.appendChild(svg("line", { x1: x(0), x2: x(0), y1: top, y2: H - 22, class: "zero" }));
+  [-lim, 0, lim].forEach((v) => root.appendChild(svg("text", { x: x(v), y: H - 6, "text-anchor": "middle", class: "tick" }, v.toFixed(2))));
+  rows.forEach((r, i) => {
+    const cy = top + rowH * i + rowH / 2;
+    const tone = r.ci[0] > 0 ? "good" : r.ci[1] < 0 ? "bad" : "flat";
+    root.appendChild(svg("text", { x: left - 8, y: cy + 4, "text-anchor": "end" }, r.baseline));
+    root.appendChild(svg("line", { x1: x(r.ci[0]), x2: x(r.ci[1]), y1: cy, y2: cy, class: `ci-line ${tone}`, style: `transform-origin: ${x(r.diff_mean)}px ${cy}px` }));
+    root.appendChild(svg("circle", { cx: x(r.diff_mean), cy, r: 3.5, class: `pt ${tone}` }));
+  });
+  return root;
 }
 
 function whiskerChart(series, order) {
@@ -1367,14 +1976,14 @@ async function showTaxonomy() {
     box.appendChild(
       el(
         "div",
-        { class: "card" },
+        { class: "tax-row" },
         el("h3", {}, el("span", { class: "mono" }, id), ` ${t.name_th || ""}`),
         el("p", { class: "small" }, t.definition_th || ""),
         el("p", { class: "small muted" }, t.observability_th || ""),
         (t.sub_techniques || []).length
           ? el(
               "ul",
-              { class: "small" },
+              { class: "small tax-subs" },
               t.sub_techniques.map((s) => el("li", {}, el("span", { class: "mono" }, s.id), ` ${s.name_th || ""}: ${s.definition_th || ""}`)),
             )
           : null,
@@ -1387,6 +1996,8 @@ async function showTaxonomy() {
 // ------------------------------------------------------------------ router
 
 const PAGES = {
+  login: "page-login",
+  activity: "page-activity",
   monitor: "page-monitor",
   alerts: "page-alerts",
   alert: "page-alert",
@@ -1408,13 +2019,24 @@ function parseRoute() {
     }
     return { name: "alert", id };
   }
-  const name = hash.replace(/^#\//, "");
-  return { name: PAGES[name] ? name : "monitor" };
+  const [path, query] = hash.replace(/^#\//, "").split("?");
+  if (path === "login") return { name: "login", next: safeNext(new URLSearchParams(query || "").get("next")) };
+  return { name: PAGES[path] ? path : "monitor" };
 }
 
 function route() {
   const r = parseRoute();
+  if (r.name === "activity" && !can("admin")) {
+    // a convenience redirect: GET /api/audit answers 403 for anyone else anyway
+    location.hash = DEFAULT_ROUTE;
+    return;
+  }
+  if (r.name === "login" && state.me) {
+    location.hash = r.next; // already signed in (or auth is off): nothing to do here
+    return;
+  }
   state.route = r.name;
+  document.body.classList.toggle("login-mode", r.name === "login");
   if (r.name !== "alert") destroyDetailChart();
   for (const [name, id] of Object.entries(PAGES)) $(id).hidden = name !== r.name;
   const tab = r.name === "alert" ? "alerts" : r.name;
@@ -1430,7 +2052,175 @@ function route() {
     showEval();
   } else if (r.name === "taxonomy") {
     showTaxonomy();
+  } else if (r.name === "activity") {
+    showActivity();
+  } else if (r.name === "login") {
+    $("login-user").focus();
   }
+}
+
+// ------------------------------------------------------------------ sign-in, user chip
+
+let loginFails = 0;
+
+function showLoginError(text) {
+  const box = $("login-error");
+  box.hidden = !text;
+  box.textContent = text || "";
+}
+
+function renderUserChip() {
+  const chip = $("user-chip");
+  const on = authOn();
+  chip.hidden = !on;
+  $("theme-toggle").hidden = on; // with an account the theme lives in the user menu
+  if (!on) return;
+  $("user-name").textContent = state.me.display_name || state.me.username;
+  $("user-role").textContent = String(state.me.role || "").toUpperCase();
+}
+
+// the sign-in answer or /api/me: apply the account, its saved choices, and the role gates
+function adoptMe(me) {
+  setMe(me);
+  const prefs = loadedPrefs();
+  if (prefs.theme && THEMES.includes(prefs.theme)) applyTheme(prefs.theme);
+  if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
+  renderUserChip();
+  applyRoleGates();
+}
+
+async function loadMe() {
+  try {
+    adoptMe(await api("/api/me"));
+    return true;
+  } catch (e) {
+    setMe(null);
+    return false;
+  }
+}
+
+function bindLogin() {
+  $("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("login-submit");
+    const username = $("login-user").value.trim();
+    const password = $("login-pass").value;
+    if (!username || !password) return;
+    btn.disabled = true;
+    showLoginError("");
+    try {
+      const me = await postJson("/api/auth/login", {
+        username,
+        password,
+        remember: $("login-remember").checked,
+      });
+      loginFails = 0;
+      $("login-pass").value = "";
+      const next = parseRoute().next || DEFAULT_ROUTE;
+      adoptMe({ ...me, auth_enabled: true });
+      location.hash = next;
+      await enterApp();
+    } catch (e) {
+      loginFails += 1;
+      $("login-pass").value = "";
+      showLoginError(
+        loginFails >= 5 ? `${e.message} · ลองผิดหลายครั้ง ระบบอาจล็อกชั่วคราว รอ 1 นาทีแล้วลองใหม่` : e.message,
+      );
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("btn-logout").addEventListener("click", async () => {
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } catch (e) {
+      /* the session is gone either way */
+    }
+    location.hash = "#/login";
+    location.reload(); // drop every bit of the last user's data from memory
+  });
+  document.addEventListener("click", (ev) => {
+    const chip = $("user-chip");
+    if (chip.open && !chip.contains(ev.target)) chip.open = false;
+  });
+}
+
+// ------------------------------------------------------------------ activity (admin)
+
+const AUDIT_PAGE = 100;
+
+function auditFilters() {
+  return { user: $("audit-user").value.trim().toLowerCase(), action: $("audit-action").value };
+}
+
+// the server may send the detail as JSON text or already parsed: either way it is shown as plain text
+function auditDetail(d) {
+  if (d === null || d === undefined || d === "") return "–";
+  if (typeof d === "string") return d;
+  try {
+    return JSON.stringify(d);
+  } catch (e) {
+    return "–";
+  }
+}
+
+// every field is untrusted (a failed sign-in's username is whatever was typed): text nodes only, no links
+function renderAudit() {
+  const want = auditFilters();
+  const rows = state.audit.filter(
+    (r) => (!want.user || String(r.username || "").toLowerCase().includes(want.user)) && (!want.action || r.action === want.action),
+  );
+  const body = clear($("audit-body"));
+  for (const r of rows) {
+    body.appendChild(
+      el(
+        "tr",
+        {},
+        el("td", { class: "mono when" }, fmtUs(r.ts_us)),
+        el("td", {}, r.username === null || r.username === undefined || r.username === "" ? "–" : r.username),
+        el("td", { class: "mono" }, r.action),
+        el("td", {}, r.target || "–"),
+        el("td", { class: "mono detail" }, auditDetail(r.detail)),
+      ),
+    );
+  }
+  $("audit-empty").hidden = rows.length > 0;
+  $("audit-more").hidden = state.auditDone;
+  $("audit-status").textContent = `${rows.length} จาก ${state.audit.length} รายการที่โหลดแล้ว`;
+}
+
+async function loadAudit(older) {
+  const q = new URLSearchParams({ limit: String(AUDIT_PAGE) });
+  const last = state.audit[state.audit.length - 1];
+  if (older && last) q.set("before_us", String(last.ts_us));
+  const btn = $("audit-more");
+  btn.disabled = true;
+  try {
+    const rows = await api(`/api/audit?${q}`);
+    const list = Array.isArray(rows) ? rows : [];
+    state.audit = older ? state.audit.concat(list) : list;
+    state.auditDone = list.length < AUDIT_PAGE;
+  } catch (e) {
+    $("audit-status").textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+  renderAudit();
+}
+
+function showActivity() {
+  const sel = $("audit-action");
+  if (!sel.options.length) {
+    sel.appendChild(el("option", { value: "" }, "ทั้งหมด"));
+    for (const a of AUDIT_ACTIONS) sel.appendChild(el("option", { value: a }, a));
+  }
+  loadAudit(false);
+}
+
+function bindActivity() {
+  $("audit-user").addEventListener("input", renderAudit);
+  $("audit-action").addEventListener("change", renderAudit);
+  $("audit-more").addEventListener("click", () => loadAudit(true));
 }
 
 // ------------------------------------------------------------------ websocket
@@ -1463,12 +2253,23 @@ function connect() {
     }
   });
   ws.addEventListener("message", safely((ev) => dispatch(JSON.parse(ev.data))));
-  ws.addEventListener("close", () => {
-    if (state.ws === ws) scheduleReconnect();
-  });
+  ws.addEventListener("close", (ev) => onWsClose(ws, ev && ev.code));
   ws.addEventListener("error", () => {
     /* close follows */
   });
+}
+
+function onWsClose(ws, code) {
+  setLive(false);
+  if (state.ws !== ws) return;
+  if (code === 4401) {
+    // no valid session: retrying cannot help. Sign in, then enterApp connects again
+    state.ws = null;
+    state.wsRetry = 0;
+    sessionLost();
+    return;
+  }
+  scheduleReconnect();
 }
 
 function scheduleReconnect() {
@@ -1481,6 +2282,7 @@ function scheduleReconnect() {
 function dispatch(msg) {
   if (!msg || typeof msg !== "object") return;
   const { type, data } = msg;
+  setLive(state.replaying || state.mode === "live"); // paused replay: off, whatever the server still sends
   if (type === "bar") onBar(data);
   else if (type === "score") onScore(data);
   else if (type === "alert") onAlert(data);
@@ -1495,28 +2297,29 @@ function fillSymbols() {
     for (const s of state.symbols) sel.appendChild(el("option", { value: s }, s));
     sel.value = state.symbol || "";
   }
+  $("kpi-symbol").textContent = state.symbol || "–";
 }
 
-async function boot() {
-  window.addEventListener("hashchange", safely(route));
-  bindReplay();
-  bindRedTeam();
-  $("symbol-select").addEventListener("change", (ev) => {
-    state.symbol = ev.target.value;
-    $("rt-symbol").value = state.symbol;
+// the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
+async function enterApp() {
+  if (state.started) {
+    // signed in again mid-session: the same page, fresh data
+    applyRoleGates();
+    route();
+    loadAlerts();
     loadSeries();
-  });
-  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  if (media && media.addEventListener) media.addEventListener("change", safely(restyleCharts));
-  if (!LWC) console.warn("dashboard: the chart library did not load");
-
+    if (!state.ws) connect(); // the 4401 close left no socket
+    return;
+  }
+  state.started = true;
   route();
   try {
     state.symbols = await api("/api/symbols");
   } catch (e) {
     state.symbols = [];
   }
-  state.symbol = state.symbols[0] || null;
+  const savedSymbol = loadedPrefs().symbol;
+  state.symbol = state.symbols.includes(savedSymbol) ? savedSymbol : state.symbols[0] || null;
   fillSymbols();
   try {
     renderHealth(await api("/api/health"));
@@ -1527,6 +2330,35 @@ async function boot() {
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
+}
+
+async function boot() {
+  window.addEventListener("hashchange", safely(route));
+  bindTheme();
+  bindLogin();
+  bindActivity();
+  document.addEventListener("keydown", safely(onPresenterKey));
+  bindReplay();
+  bindMonitor();
+  bindRedTeam();
+  $("symbol-select").addEventListener("change", (ev) => {
+    state.symbol = ev.target.value;
+    $("rt-symbol").value = state.symbol;
+    $("kpi-symbol").textContent = state.symbol || "–";
+    savePrefs({ symbol: state.symbol });
+    state.alertCount = 0;
+    renderAlertsKpi();
+    loadSeries();
+  });
+  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  if (media && media.addEventListener) media.addEventListener("change", safely(restyleCharts));
+  if (!LWC) console.warn("dashboard: the chart library did not load");
+
+  if (!(await loadMe())) {
+    route(); // the 401 already sent the page to the sign-in route
+    return;
+  }
+  await enterApp();
 }
 
 if (typeof document !== "undefined") {
@@ -1540,6 +2372,30 @@ if (typeof document !== "undefined") {
     firstDetection,
     resetRuns,
     injectionStatus,
+    bannerText,
     redTeamAllowed,
+    reducedMotion,
+    EVAL_TARGETS,
+    targetVerdict,
+    evalEmpty,
+    forestPlot,
+    tweenNumber,
+    flash,
+    presenterKey,
+    playToggleAction,
+    noteReplayAction,
+    getReplaying: () => state.replaying,
+    PAGE_ORDER,
+    safeNext,
+    can,
+    setMe,
+    savePrefs,
+    api,
+    onWsClose,
+    getMe: () => state.me,
+    setWs: (w) => {
+      state.ws = w;
+    },
+    getWs: () => state.ws,
   };
 }

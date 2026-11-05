@@ -135,6 +135,13 @@ class LiveCfg(_Cfg):
     bar_grace_s: int = 2
 
 
+class AuthCfg(_Cfg):
+    enabled: bool = False
+    cookie_secure: bool = False
+    remember_days: int = Field(default=30, gt=0)
+    session_hours: int = Field(default=12, gt=0)
+
+
 class Settings(_Cfg):
     paths: PathsCfg = PathsCfg()
     features: FeatureCfg = FeatureCfg()
@@ -143,6 +150,7 @@ class Settings(_Cfg):
     splits: SplitsCfg
     ae: AECfg = AECfg()
     live: LiveCfg = LiveCfg()
+    auth: AuthCfg = AuthCfg()
     detectors: list[str] = ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"]
     mode: Literal["replay", "live"] = "replay"
     port: int = 8800
@@ -181,8 +189,11 @@ def load_settings(path: str | Path | None = None, overrides: dict | None = None)
 
 
 def config_hash(s: Settings) -> str:
-    """12-hex sha256 of the canonical JSON dump of the settings."""
-    blob = json.dumps(s.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    """12-hex sha256 of the canonical JSON dump of the settings, minus `auth`: sign-in changes no
+    model, feature or detection output, so it must not invalidate packs, bundles or run records."""
+    blob = json.dumps(
+        s.model_dump(mode="json", exclude={"auth"}), sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 

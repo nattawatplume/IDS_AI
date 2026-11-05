@@ -14,6 +14,7 @@ from idsai.config import Settings
 from idsai.data.replay import Replayer
 from idsai.data.store import Store
 from idsai.pipeline.stream import MODES, StreamPipeline
+from idsai.product.auth import LoginLimiter
 
 
 @dataclass
@@ -24,6 +25,8 @@ class AppState:
     keeps the Red-Team scenarios of this app in memory, never in the store. `mode` must be the
     pipeline's: the Red-Team refusal rests on it. `budget_per_symbol_day` is the alert budget the
     loaded Chief was fitted to (the dashboard's budget meter); None falls back to the config's.
+    `auth_enabled` turns on sign-in (off: every request is the built-in admin `local`); `limiter`
+    holds the in-memory login lock of this app.
     """
 
     cfg: Settings
@@ -35,6 +38,8 @@ class AppState:
     symbols: list[str] | None = None
     injected: list[dict[str, Any]] = field(default_factory=list)
     budget_per_symbol_day: float | None = None
+    auth_enabled: bool = False
+    limiter: LoginLimiter = field(default_factory=LoginLimiter)
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:

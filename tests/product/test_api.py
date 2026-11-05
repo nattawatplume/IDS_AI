@@ -352,6 +352,7 @@ def test_nan_in_ws_message_is_strict_json(client, env):
 def test_symbols_taxonomy_experiments(client, env, tmp_path):
     assert client.get("/api/symbols").json() == [SYM, "OTHERBTC"]
     assert "MM-T001" in client.get("/api/taxonomy").json()
+    env.cfg.paths.report_json = tmp_path / "missing.json"
     assert client.get("/api/experiments").json() == {"runs": 0}
     report = tmp_path / "report.json"
     report.write_text('{"runs": 3, "x": NaN}', encoding="utf-8")

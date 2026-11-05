@@ -5,6 +5,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -58,6 +59,15 @@ def test_root_serves_the_dashboard_with_attribution(client):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
     for needle in ("Market IDS", "Binance Vision", "tradingview", "CC BY-NC-SA 4.0"):
         assert needle in r.text
+
+
+def test_dashboard_files_revalidate_on_every_load(client):
+    for path in ("/", "/app.js", "/styles.css"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache", path
+        assert r.headers.get("etag"), path  # revalidation can still answer 304
+        again = client.get(path, headers={"if-none-match": r.headers["etag"]})
+        assert again.status_code == 304, path
 
 
 @pytest.mark.parametrize(
@@ -223,7 +233,8 @@ def test_live_mode_gates_replay_and_red_team():
 
 def test_red_team_form_starts_disabled_until_health_confirms_the_mode():
     html = text("index.html")
-    form = html[html.index('<form id="redteam-form"') : html.index("</form>")]
+    start = html.index('<form id="redteam-form"')
+    form = html[start : html.index("</form>", start)]
     controls = re.findall(r"<(?:select|input|button)\b[^>]*>", form)
     assert len(controls) == 5
     for tag in controls:
@@ -306,7 +317,8 @@ def test_time_to_detect_counts_only_new_alerts(tmp_path):
 
 
 HTML_TAGS = set(
-    "a button dd div dl dt em h1 h2 h3 h4 input label li ol option p section select small span"
+    "a button dd details div dl dt em h1 h2 h3 h4 input label li ol option p section select "
+    "small span summary"
     " strong table tbody td th thead tr ul".split()
 )
 
@@ -314,3 +326,583 @@ HTML_TAGS = set(
 def test_el_builds_only_known_tags():
     tags = set(re.findall(r'\bel\("([^"]+)"', text("app.js")))
     assert tags and tags <= HTML_TAGS, sorted(tags - HTML_TAGS)
+
+
+def test_both_themes_define_every_token():
+    css = text("styles.css")
+    tokens = ["--bg", "--panel", "--line", "--ink", "--dim", "--amber", "--red", "--green"]
+    blocks = [css.split(':root[data-theme="dark"]')[1], css.split(':root[data-theme="light"]')[1]]
+    for t in tokens:
+        assert re.search(rf"{t}\s*:", css.split("@media")[0]), t  # bare :root
+        for b in blocks:
+            assert re.search(rf"{t}\s*:", b.split("}")[0]), t
+
+
+def test_theme_toggle_exists_and_is_wired():
+    assert 'id="theme-toggle"' in text("index.html")
+    js = text("app.js")
+    assert "function applyTheme(" in js and 'storageSet("theme"' in js
+
+
+def test_no_capsule_tabs_or_shadows():
+    css = text("styles.css")
+    assert "box-shadow" not in css
+    assert not re.search(r"border-radius:\s*(?:[5-9]|\d{2,})px", css)
+
+
+def test_auditor_popup_is_anchored_inside_the_viewport_when_narrow():
+    css = text("styles.css")
+    m = re.search(r"@media \(max-width: 760px\) \{(.*?)\n\}", css, re.S)
+    assert m, "no narrow media block"
+    block = m.group(1)
+    assert re.search(r"\.auditor\s*\{\s*position:\s*static", block)
+    assert re.search(
+        r"\.auditor-checks\s*\{[^}]*left:\s*16px[^}]*right:\s*16px[^}]*width:\s*auto", block
+    )
+
+
+MOTION_JS = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: %s });
+const m = require(process.argv[2]);
+%s
+console.log("ok");
+"""
+
+PRESENTER_BODY = r"""
+const k = m.presenterKey;
+assert.strictEqual(k({ key: " ", target: { tagName: "INPUT" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "SELECT" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "TEXTAREA" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "DIV" } }), "toggle-play");
+assert.strictEqual(k({ key: "4", target: { tagName: "BODY" } }), "page:4");
+assert.strictEqual(k({ key: "7", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "t", target: { tagName: "BODY" } }), "theme");
+assert.strictEqual(k({ key: "t", ctrlKey: true, target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "1", metaKey: true, target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "1", altKey: true, target: { tagName: "BODY" } }), null);
+// a Thai layout changes ev.key: the physical ev.code still drives the keys
+assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "BODY" } }), "theme");
+assert.strictEqual(k({ key: "ๅ", code: "Digit1", target: { tagName: "BODY" } }), "page:1");
+assert.strictEqual(k({ key: "ภ", code: "Digit6", target: { tagName: "BODY" } }), "page:6");
+assert.strictEqual(k({ key: "ๅ", code: "Numpad3", target: { tagName: "BODY" } }), "page:3");
+assert.strictEqual(k({ key: "ๅ", code: "Digit7", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "ๅ", code: "Digit0", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "Spacebar", code: "Space", target: { tagName: "BODY" } }),
+  "toggle-play");
+assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "INPUT" } }), null);
+assert.strictEqual(k({ key: "ะ", code: "KeyT", ctrlKey: true, target: { tagName: "BODY" } }), null);
+assert.strictEqual(m.PAGE_ORDER.length, 6);
+assert.strictEqual(m.PAGE_ORDER[0], "#/monitor");
+"""
+
+TWEEN_BODY = r"""
+const node = { textContent: "0" };
+m.tweenNumber(node, 3.87, 2);
+assert.strictEqual(node.textContent, "3.87");
+assert.strictEqual(m.reducedMotion(), true);
+"""
+
+
+def _run_motion(tmp_path, reduced, body):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "motion.js"
+    script.write_text(MOTION_JS % (reduced, body), encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+def test_presenter_keys_skip_fields(tmp_path):
+    _run_motion(tmp_path, "false", PRESENTER_BODY)
+
+
+def test_tween_snaps_under_reduced_motion(tmp_path):
+    _run_motion(tmp_path, "true", TWEEN_BODY)
+
+
+def test_reduced_motion_disables_animation():
+    css = text("styles.css")
+    block = css.split("prefers-reduced-motion: reduce")[1]
+    assert "animation" in block and "transition" in block
+    for name in ("pulse", "glow", "pop", "rise", "sweep", "grow"):
+        assert f"@keyframes {name}" in css, name
+
+
+PLAY_BODY = r"""
+assert.strictEqual(m.playToggleAction("live", false), null);
+assert.strictEqual(m.playToggleAction("live", true), null);
+assert.strictEqual(m.playToggleAction(null, true), null);
+assert.strictEqual(m.playToggleAction("replay", true), "pause");
+assert.strictEqual(m.playToggleAction("replay", false), "play");
+// state follows what control() reports, so Space always does the opposite
+assert.strictEqual(m.getReplaying(), true);
+m.noteReplayAction("pause");
+assert.strictEqual(m.playToggleAction("replay", m.getReplaying()), "play");
+m.noteReplayAction("play"); // e.g. the Play button
+assert.strictEqual(m.playToggleAction("replay", m.getReplaying()), "pause");
+m.noteReplayAction("speed");
+assert.strictEqual(m.getReplaying(), true);
+"""
+
+
+def test_space_toggle_follows_replay_state_and_skips_live(tmp_path):
+    _run_motion(tmp_path, "false", PLAY_BODY)
+    js = text("app.js")
+    assert "noteReplayAction(action)" in js and "presenterPlaying" not in js
+
+
+# ---- monitor: kpi strip, alert rail, synced crosshair ----
+
+
+def test_monitor_has_kpi_strip_rail_and_info():
+    html = text("index.html")
+    for i in [
+        "kpi-symbol", "kpi-f", "kpi-tau", "kpi-alerts", "kpi-budget", "kpi-auditor",
+        "alert-rail", "layers-toggle", "chart-info", "chart-info-body",
+    ]:  # fmt: skip
+        assert f'id="{i}"' in html, i
+    assert "ค่า p รวม" in html and "ความหายากเทียบตลาดปกติ" in html
+
+
+def test_ws_close_turns_live_dot_off():
+    js = text("app.js")
+    assert "function setLive(" in js
+    close = js.split('addEventListener("close"')[1][:400]
+    assert "setLive(false)" in close
+    body = js.split("function setLive(")[1].split("\n}\n")[0]
+    assert 'classList.toggle("off", !on)' in body
+    css = text("styles.css")
+    off = css.index(".dot.off")
+    assert "var(--dim)" in css[off : css.index("}", off)]
+    assert off > css.index(".dot.ok") and off > css.index(".dot.fail")  # source order: off wins
+
+
+def test_alerts_kpi_counts_the_selected_symbol_only():
+    js = text("app.js")
+    kpi = js.split("function renderAlertsKpi(")[1].split("\n}\n")[0]
+    assert "a.symbol === state.symbol" in kpi and "DAY_US" in kpi
+    assert '"–"' in kpi
+    assert 'id="kpi-alerts">–<' in text("index.html")
+    change = js.split('$("symbol-select").addEventListener("change"')[1][:400]
+    assert "renderAlertsKpi()" in change
+
+
+def test_resting_styles_are_visible_when_animation_does_not_run():
+    css = text("styles.css").replace("\r\n", "\n")
+    for sel in (r"\.rise", r"\.rail-row\.enter", r"\.forest \.ci-line", r"\.pop"):
+        rules = re.findall(r"(?m)^" + sel + r"\s*\{([^}]*)\}", css)
+        assert rules, sel
+        for body in rules:
+            assert not re.search(r"opacity\s*:\s*0\b", body), sel
+            assert "scaleX(0)" not in body, sel
+            assert not re.search(r"animation[^;]*\bboth\b", body), sel
+
+
+def test_low_severity_is_grey_and_forest_points_avoid_the_dot_rule():
+    css = text("styles.css")
+    assert 'tr[data-sev="low"] td:first-child { border-left-color: var(--dim)' in css
+    assert ".rail-row.sev-1 { border-left-color: var(--dim)" in css
+    js = text("app.js")
+    assert "class: `pt ${tone}`" in js and "class: `dot ${tone}`" not in js
+
+
+def test_red_team_miss_is_grey_and_the_banner_class_changes_only_with_state():
+    css = text("styles.css")
+    assert re.search(r"\.rt-banner\.hit\s*\{[^}]*var\(--amber\)", css)
+    miss = re.search(r"\.rt-banner\.miss\s*\{([^}]*)\}", css).group(1)
+    assert "var(--dim)" in miss and "--red" not in miss
+    assert not re.search(r"\.rt-ring-arc\.missed\s*\{[^}]*--red", css)
+    tick = text("app.js").split("function tickInjections()")[1].split("\n}\n")[0]
+    block = tick.split("run.bannerState !== status")[1].split("} else {")[0]
+    assert "run.banner.className" in block and "sweep" in block
+    assert "run.banner.className" not in tick.split("run.bannerState !== status")[0]
+
+
+# ---- alerts list and detail ----
+
+
+def test_alert_rows_carry_severity_and_detail_has_two_columns():
+    js = text("app.js")
+    table = js.split("function renderAlertsTable()")[1].split("\n}\n")[0]
+    assert "data-sev" in table
+    assert "detail-main" in js and "detail-side" in js
+    css = text("styles.css")
+    assert "[data-sev=" in css and ".detail-side" in css
+
+
+BANNER_BODY = r"""
+assert.strictEqual(m.bannerText("detected", 42), "ตรวจพบใน 42 วินาที");
+assert.strictEqual(m.bannerText("missed", 300), "ไม่พบภายใน 300 วินาทีหลังจบเหตุการณ์");
+assert.strictEqual(m.bannerText("detected", 41.6), "ตรวจพบใน 42 วินาที");
+assert.strictEqual(m.bannerText("waiting", 5), "");
+assert.strictEqual(m.bannerText("detected", -3), "ตรวจพบใน 0 วินาที");
+"""
+
+
+def test_banner_text_for_hit_and_miss(tmp_path):
+    _run_motion(tmp_path, "false", BANNER_BODY)
+
+
+def test_red_team_ring_and_one_row_form():
+    html = text("index.html")
+    js = text("app.js")
+    assert 'id="rt-ring"' in js or 'id: "rt-ring"' in js or "rt-ring" in js
+    assert "rt-banner" in js and "stroke-dashoffset" in js
+    assert 'class="form-grid rt-row"' in html or "rt-row" in html
+
+
+VERDICT_BODY = r"""
+const cell = (mean, ci, n) => ({
+  mean: { recall_any: mean, fa_per_symbol_day: 1.65, fa_per_symbol_day_hard: 11.2 },
+  ci: { recall_any: ci }, n_events: n });
+const report = (full, rows) => ({
+  runs: 5, experiments: { real_t001: { full: { "2": full } } },
+  paired_bootstrap: { budget: 2, metric: "recall_any", rows } });
+const T = (id) => m.EVAL_TARGETS.find((t) => t.id === id);
+const miss = m.targetVerdict(report(cell(0.739, [0.68, 0.801], 200), []), T("real_recall"));
+assert.strictEqual(miss.state, "miss");
+assert.strictEqual(miss.value, 0.739);
+assert.strictEqual(miss.n, 200);
+assert.deepStrictEqual(miss.ci, [0.68, 0.801]);
+assert.strictEqual(
+  m.targetVerdict(report(cell(0.85, null, 200), []), T("real_recall")).state, "pass");
+assert.strictEqual(m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa")).state, "pass");
+assert.strictEqual(
+  m.targetVerdict(report(cell(0.85, null, 200), []), T("real_fa_hard")).state, "miss");
+// variant absent / experiment absent / budget absent: never pass
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: { real_t001: {} } }, T("real_recall")).state,
+  "unmeasured");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: {} }, T("semisyn_pump_burst")).state, "unmeasured");
+const noBudget = { runs: 5, experiments: { real_t001: { full: { "5": cell(0.9, null, 9) } } } };
+assert.strictEqual(m.targetVerdict(noBudget, T("real_recall")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict(report({ mean: {}, n_events: 3 }, []), T("real_recall")).state, "unmeasured");
+// paired: the CI lower bound must clear 0; a baseline wholly better is a miss
+const rows = [
+  { baseline: "baseline.random", diff_mean: 0.639, ci: [0.57, 0.7], n_events: 200 },
+  { baseline: "baseline.iforest", diff_mean: 0.2, ci: [0.1, 0.3], n_events: 200 },
+  { baseline: "baseline.kk", diff_mean: -0.17, ci: [-0.222, -0.121], n_events: 200 },
+  { baseline: "stat.robust_z", diff_mean: 0.005, ci: [-0.03, 0.04], n_events: 200 },
+];
+const r = report(cell(0.74, null, 200), rows);
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.iforest")).state, "pass");
+// random / pca are reference cards: the diff and CI show, but never a pass
+const ref = m.targetVerdict(r, T("ae_vs_baseline.random"));
+assert.strictEqual(ref.state, "reference");
+assert.strictEqual(ref.value, 0.639);
+assert.deepStrictEqual(ref.ci, [0.57, 0.7]);
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.pca")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.random")).state, "unmeasured");
+const ids = m.EVAL_TARGETS.map((t) => t.id);
+assert.ok(!ids.includes("ae_vs_baseline.random") || T("ae_vs_baseline.random").reference === true);
+assert.ok(T("ae_vs_baseline.pca").reference === true);
+for (const b of ["baseline.iforest", "stat.robust_z", "baseline.kk"]) {
+  assert.ok(!T(`ae_vs_${b}`).reference, b);
+}
+// latency has no metric in report.json: always unmeasured, never a pass
+assert.strictEqual(m.targetVerdict(r, T("latency_p99")).state, "unmeasured");
+assert.strictEqual(
+  m.targetVerdict(report(cell(0.9, null, 9), []), T("latency_p99")).state, "unmeasured");
+// recall_correct rides along on the recall cards
+const withCorrect = {
+  mean: { recall_any: 1, recall_correct: 0.001 },
+  ci: { recall_any: [1, 1], recall_correct: [0, 0.003] }, n_events: 401 };
+const wash = m.targetVerdict(
+  { runs: 5, experiments: { semisyn: { wash_pingpong: { "2": withCorrect } } } },
+  T("semisyn_wash_pingpong"));
+assert.strictEqual(wash.state, "pass");
+assert.strictEqual(wash.correct.value, 0.001);
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.kk")).state, "miss");
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_stat.robust_z")).state, "miss");
+assert.strictEqual(
+  m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.kk")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict(null, T("real_recall")).state, "unmeasured");
+assert.strictEqual(m.evalEmpty({ runs: 0 }), true);
+assert.strictEqual(m.evalEmpty(null), true);
+assert.strictEqual(m.evalEmpty({ runs: 3, experiments: {} }), false);
+"""
+
+
+def test_target_verdicts(tmp_path):
+    _run_motion(tmp_path, "false", VERDICT_BODY)
+
+
+def test_target_verdicts_against_the_real_report(tmp_path):
+    rpt = Path(__file__).resolve().parents[2] / "data" / "report.json"
+    if not rpt.is_file():
+        pytest.skip("data/report.json is not present")
+    body = (
+        f"const rep = JSON.parse(require('fs').readFileSync({str(rpt)!r}, 'utf8'));\n"
+        + r"""
+const got = {};
+for (const t of m.EVAL_TARGETS) {
+  const v = m.targetVerdict(rep, t);
+  got[t.id] = [v.state, v.value === null ? null : Math.round(v.value * 1000) / 1000];
+}
+const want = {
+  real_recall: ["miss", 0.739], real_fa: ["pass", 1.65], real_fa_hard: ["miss", 11.17],
+  semisyn_pump_burst: ["miss", 0.295], semisyn_pump_stealth: ["miss", 0.351],
+  semisyn_wash_pingpong: ["pass", 1],
+  "ae_vs_baseline.iforest": ["miss"], "ae_vs_stat.robust_z": ["miss"],
+  "ae_vs_baseline.kk": ["miss"],
+  "ae_vs_baseline.random": ["reference"], "ae_vs_baseline.pca": ["reference"],
+  latency_p99: ["unmeasured", null],
+};
+for (const [id, [state, value]] of Object.entries(want)) {
+  assert.strictEqual(got[id][0], state, id + " " + JSON.stringify(got[id]));
+  if (value !== undefined) assert.strictEqual(got[id][1], value, id);
+}
+"""
+    )
+    _run_motion(tmp_path, "false", body)
+
+
+def test_ablation_notes_cell_wraps():
+    css = text("styles.css")
+    assert re.search(r"td\.notes[^}]*max-width", css)
+    js = text("app.js")
+    assert 'class: "small muted notes"' in js and "หมายเหตุวิธีวัด" in js
+    assert 'el("details"' in js and "uv run idsai report" in js
+
+
+def test_long_explanations_live_on_about():
+    html = text("index.html")
+    mon = re.search(r'<section id="page-monitor".*?</section>', html, re.S).group(0)
+    for m in re.finditer(r'<p\b([^>]*)>(.*?)</p>', mon, re.S):
+        if 'id="chart-info-body"' in m.group(1):
+            continue
+        assert len(" ".join(m.group(2).split())) <= 120, m.group(2)[:60]
+    about = re.search(r'<section id="page-about".*?</section>', html, re.S).group(0)
+    assert "τ saturated" in about or "τ-saturated" in about
+    assert "งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้" in about
+    assert "autocorrelation" in about
+    assert "อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้" in about
+
+
+# ---- sign-in, roles, prefs, activity ----
+
+
+def test_login_and_activity_routes_present():
+    html, js = text("index.html"), text("app.js")
+    for route in ("#/login", "#/activity"):
+        assert route in html + js, route
+    ids = set(re.findall(r'\bid="([\w-]+)"', html))
+    for i in (
+        "page-login", "login-form", "login-user", "login-pass", "login-remember", "login-error",
+        "user-chip", "user-name", "user-role", "btn-logout",
+        "page-activity", "audit-body", "audit-user", "audit-action", "audit-more", "audit-empty",
+    ):
+        assert i in ids, i
+    assert 'data-route="activity"' in html
+    for page in ("page-login", "page-activity"):
+        assert f'"{page}"' in js, page
+    assert 'type="password"' in html and 'autocomplete="current-password"' in html
+    assert "จดจำฉัน" in html and "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" not in html  # the server words the error
+
+
+def test_login_page_has_no_signup():
+    low = (text("index.html") + text("app.js")).lower()
+    for word in ("สมัคร", "sign up", "signup", "sign-up", "register", "ลืมรหัส"):
+        assert word not in low, word
+
+
+def test_activity_renders_audit_fields_as_text_only():
+    js = text("app.js")
+    body = js[js.index("function renderAudit(") : js.index("async function loadAudit(")]
+    assert '"href"' not in body and "href:" not in body and "innerHTML" not in body
+    assert 'el("td"' in body
+    assert 'data-route="activity"' in text("index.html")
+
+
+def test_mutating_buttons_check_can():
+    js = text("app.js")
+    control = js[js.index("async function control(") : js.index("function bindReplay(")]
+    assert (
+        'can("analyst")' in control
+        and control.index('can("analyst")') < control.index("postJson(")
+    )
+    fb = js[js.index("function feedbackCard(") : js.index("async function drawDetailChart(")]
+    assert 'can("analyst")' in fb and fb.index('can("analyst")') < fb.index("postJson(")
+    rt = js[js.index('$("redteam-form").addEventListener') : js.index("function addInjection(")]
+    assert 'can("analyst")' in rt and rt.index('can("analyst")') < rt.index("postJson(")
+    gates = js[js.index("function applyRoleGates(") :]
+    assert "ต้องเป็น analyst" in js and "title" in gates[:1500]
+
+
+def test_401_goes_to_login_with_next():
+    js = text("app.js")
+    body = js[js.index("async function api(") : js.index("function postJson(")]
+    assert "401" in body and "sessionLost(" in body
+    assert "/api/auth/login" in body  # a failed sign-in must not bounce back to itself
+
+
+AUTH_BODY = r"""
+const s = m.safeNext;
+assert.strictEqual(s("#/eval"), "#/eval");
+assert.strictEqual(s("#/alerts/abc%20d"), "#/alerts/abc%20d");
+for (const bad of ["https://x", "//x", "", null, undefined, "eval", "javascript:alert(1)",
+  "#/login?next=%23%2Fx", "#/\nx", 42]) {
+  assert.strictEqual(s(bad), "#/monitor", String(bad));
+}
+"""
+
+CAN_BODY = r"""
+m.setMe(null);
+assert.strictEqual(m.can("viewer"), false);
+for (const [role, want] of [
+  ["viewer", [true, false, false]],
+  ["analyst", [true, true, false]],
+  ["admin", [true, true, true]],
+]) {
+  m.setMe({ role });
+  const got = ["viewer", "analyst", "admin"].map((n) => m.can(n));
+  assert.deepStrictEqual(got, want, role);
+}
+m.setMe({ role: "admin" });
+assert.strictEqual(m.can("root"), false);
+m.setMe({ role: "root" });
+assert.strictEqual(m.can("viewer"), false);
+"""
+
+PREFS_HEAD = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: false });
+const m = require(process.argv[2]);
+"""
+PREFS_BODY = r"""
+const store = {};
+globalThis.window = { localStorage: {
+  getItem: (k) => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); } } };
+const calls = [];
+globalThis.fetch = async (path, opts) => {
+  calls.push([path, opts]); return { ok: true, status: 200, json: async () => ({}) }; };
+(async () => {
+  m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
+  m.savePrefs({ symbol: "ETHUSDT" });
+  assert.strictEqual(store["idsai.symbol"], "ETHUSDT");
+  await new Promise((r) => setTimeout(r, 700));
+  assert.strictEqual(calls.length, 0, "auth off never calls the server");
+  m.setMe({ username: "ann", role: "viewer", auth_enabled: true, prefs: {} });
+  m.savePrefs({ theme: "light" });
+  m.savePrefs({ eval_budget: 2 });
+  assert.strictEqual(calls.length, 0, "debounced");
+  await new Promise((r) => setTimeout(r, 700));
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0][0], "/api/me/prefs");
+  assert.strictEqual(calls[0][1].method, "PUT");
+  assert.deepStrictEqual(JSON.parse(calls[0][1].body), { theme: "light", eval_budget: 2 });
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_next_param_only_accepts_hash_routes(tmp_path):
+    _run_motion(tmp_path, "false", AUTH_BODY)
+
+
+def test_can_matches_role_order(tmp_path):
+    _run_motion(tmp_path, "false", CAN_BODY)
+
+
+def test_prefs_save_is_debounced_and_local_when_auth_is_off(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "prefs.js"
+    script.write_text(
+        PREFS_HEAD + PREFS_BODY,
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+def test_auth_off_keeps_todays_flow():
+    js = text("app.js")
+    assert "auth_enabled" in js
+    html = text("index.html")
+    chip = re.search(r'<details id="user-chip"[^>]*>', html)
+    assert chip and "hidden" in chip.group(0)  # only shown once /api/me says auth is on
+    login = re.search(r'<section id="page-login"[^>]*>', html)
+    assert login and "hidden" in login.group(0)
+
+
+
+SESSION_LOST_HEAD = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: false });
+const m = require(process.argv[2]);
+globalThis.document = { getElementById: () => null, body: { classList: { toggle() {} } } };
+globalThis.location = { hash: "#/eval" };
+const reply = (status) => async () => ({
+  ok: status < 400, status, json: async () => ({ detail: "กรุณาเข้าสู่ระบบ" }) });
+"""
+
+SESSION_LOST_BODY = r"""
+(async () => {
+  // a 401 mid-session forgets the user and lands on the sign-in route with next kept
+  m.setMe({ username: "ann", role: "viewer", auth_enabled: true, prefs: {} });
+  globalThis.fetch = reply(401);
+  await assert.rejects(() => m.api("/api/experiments"), (e) => e.status === 401);
+  assert.strictEqual(m.getMe(), null, "stale user must be cleared or route() bounces back");
+  assert.strictEqual(location.hash, "#/login?next=%23%2Feval");
+  // already on the sign-in route: a further 401 does not rewrite it (no next chain)
+  await assert.rejects(() => m.api("/api/alerts"));
+  assert.strictEqual(location.hash, "#/login?next=%23%2Feval");
+  // a failed sign-in is not a lost session
+  m.setMe({ role: "viewer", auth_enabled: true });
+  location.hash = "#/login";
+  await assert.rejects(() => m.api("/api/auth/login", { method: "POST" }));
+  assert.notStrictEqual(m.getMe(), null);
+  // WS close 4401: no reconnect, user cleared, sign-in route;
+  // other codes keep the socket for the retry loop
+  location.hash = "#/alerts";
+  const ws = {};
+  m.setWs(ws);
+  m.onWsClose(ws, 4401);
+  assert.strictEqual(m.getWs(), null);
+  assert.strictEqual(m.getMe(), null);
+  assert.strictEqual(location.hash, "#/login?next=%23%2Falerts");
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_lost_session_routes_to_login_and_ws_4401_stops_reconnecting(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "lost.js"
+    script.write_text(SESSION_LOST_HEAD + SESSION_LOST_BODY, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+    js = text("app.js")
+    close = js[js.index("function onWsClose(") : js.index("function scheduleReconnect(")]
+    assert "4401" in close and close.index("4401") < close.index("scheduleReconnect()")
+    enter = js[js.index("async function enterApp(") : js.index("async function boot(")]
+    assert "if (!state.ws) connect();" in enter  # signing in again reopens the socket
+
+
+def test_login_form_posts_so_a_credential_never_reaches_the_url():
+    form = re.search(r'<form id="login-form"[^>]*>', text("index.html")).group(0)
+    assert 'method="post"' in form
+
+
+def test_feedback_form_uses_the_session_user_when_auth_is_on():
+    js = text("app.js")
+    body = js[js.index("function feedbackCard"):]
+    body = body[: body.index("\n}\n")]
+    assert "state.me.username" in body  # the analyst is the signed-in user, not a typed name
+    assert "authOn()" in body

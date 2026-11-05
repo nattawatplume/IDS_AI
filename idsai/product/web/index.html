@@ -10,43 +10,81 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-name">Market IDS</span>
+      <span class="brand-name">MARKET·IDS</span>
       <span id="mode-badge" class="badge badge-mode">…</span>
     </div>
+    <nav class="tabs" aria-label="หน้า">
+      <a href="#/monitor" data-route="monitor">Monitor</a>
+      <a href="#/alerts" data-route="alerts">Alerts</a>
+      <a href="#/redteam" data-route="redteam">Red-Team</a>
+      <a href="#/eval" data-route="eval">Eval</a>
+      <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
+      <a href="#/about" data-route="about">About</a>
+      <a href="#/activity" data-route="activity" id="tab-activity" hidden>Activity</a>
+    </nav>
     <div class="topbar-stats">
-      <div class="stat">
-        <span class="stat-label">เวลาเหตุการณ์</span>
-        <span id="event-clock" class="stat-value mono">–</span>
+      <div class="stat" title="เวลาเหตุการณ์">
+        <span id="live-dot" class="dot"></span>
+        <span id="clock" class="clock">–</span>
       </div>
       <details id="auditor" class="stat auditor">
         <summary>
           <span class="stat-label">Auditor</span>
-          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text">กำลังโหลด…</span></span>
+          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text" class="small">กำลังโหลด…</span></span>
         </summary>
         <ul id="auditor-checks" class="auditor-checks"></ul>
       </details>
-      <div class="stat budget">
-        <span class="stat-label">งบการแจ้งเตือน (24 ชม.ล่าสุด)</span>
+      <div class="stat budget" title="งบการแจ้งเตือน (24 ชม.ล่าสุด)">
+        <span class="stat-label">งบ</span>
         <span class="stat-value">
-          <span class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
-          <span id="budget-text" class="mono">–</span>
+          <span id="budget-meter" class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
+          <span id="budget-text" class="mono small">–</span>
         </span>
       </div>
+      <details id="user-chip" class="stat user-chip" hidden>
+        <summary>
+          <span id="user-name" class="small">–</span>
+          <span id="user-role" class="badge">–</span>
+        </summary>
+        <div class="user-menu">
+          <div class="menu-label">ธีม</div>
+          <div class="menu-row">
+            <button type="button" class="mini" data-theme-choice="auto">AUTO</button>
+            <button type="button" class="mini" data-theme-choice="dark">DARK</button>
+            <button type="button" class="mini" data-theme-choice="light">LIGHT</button>
+          </div>
+          <button id="btn-logout" type="button">ออกจากระบบ</button>
+        </div>
+      </details>
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="ธีม">AUTO</button>
     </div>
   </header>
-
-  <nav class="tabs" aria-label="หน้า">
-    <a href="#/monitor" data-route="monitor">Monitor</a>
-    <a href="#/alerts" data-route="alerts">Alerts</a>
-    <a href="#/redteam" data-route="redteam">Red-Team</a>
-    <a href="#/eval" data-route="eval">Eval</a>
-    <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
-    <a href="#/about" data-route="about">About</a>
-  </nav>
 
   <div id="ws-banner" class="banner banner-warn" role="status" hidden></div>
 
   <main>
+    <!-- Sign-in -->
+    <section id="page-login" class="page" hidden>
+      <form id="login-form" class="card login-card" method="post" autocomplete="on">
+        <h1 class="login-mark">MARKET·IDS</h1>
+        <p class="muted small">เข้าสู่ระบบเพื่อดูแดชบอร์ด</p>
+        <label class="field">
+          <span>ชื่อผู้ใช้</span>
+          <input id="login-user" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required>
+        </label>
+        <label class="field">
+          <span>รหัสผ่าน</span>
+          <input id="login-pass" type="password" name="password" autocomplete="current-password" maxlength="256" required>
+        </label>
+        <label class="check">
+          <input id="login-remember" type="checkbox">
+          <span>จดจำฉัน</span>
+        </label>
+        <p id="login-error" class="small login-error" role="alert" hidden></p>
+        <button id="login-submit" type="submit" class="primary">เข้าสู่ระบบ</button>
+      </form>
+    </section>
+
     <!-- Monitor -->
     <section id="page-monitor" class="page" hidden>
       <div class="toolbar">
@@ -76,15 +114,35 @@
           <span id="replay-status" class="muted small"></span>
         </div>
       </div>
-      <div class="card chart-card">
-        <div id="chart" class="chart"></div>
-        <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+      <div class="kpis">
+        <div class="kpi"><span class="kpi-label">สัญลักษณ์</span><span class="kpi-value mono" id="kpi-symbol">–</span></div>
+        <div class="kpi"><span class="kpi-label">ค่า F ล่าสุด / τ</span><span class="kpi-value mono"><span id="kpi-f">–</span><small class="kpi-sub">/ <span id="kpi-tau">–</span></small></span></div>
+        <div class="kpi"><span class="kpi-label">แจ้งเตือน 24 ชม.</span><span class="kpi-value mono kpi-alert"><span id="kpi-alerts">–</span><small class="kpi-sub" id="kpi-budget">งบ –</small></span></div>
+        <div class="kpi"><span class="kpi-label">Auditor</span><span class="kpi-value" id="kpi-auditor">–</span></div>
       </div>
-      <p class="legend small muted">
-        บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
-        F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
-        L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
-      </p>
+      <div class="monitor-body">
+        <div class="monitor-main">
+          <div class="chart-card">
+            <div class="chart-bar">
+              <span id="readout" class="readout mono small">–</span>
+              <button id="layers-toggle" class="mini" type="button" aria-expanded="false">แสดง L1/L2/L3</button>
+              <button id="chart-info" class="mini" type="button" aria-expanded="false" aria-label="คำอธิบายกราฟ">i</button>
+            </div>
+            <p id="chart-info-body" class="legend small muted" hidden>
+              บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
+              F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
+              L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
+            </p>
+            <div id="chart" class="chart"></div>
+            <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+          </div>
+        </div>
+        <aside class="rail" aria-label="แจ้งเตือนล่าสุด">
+          <h2 class="rail-title">แจ้งเตือนล่าสุด</h2>
+          <div id="alert-rail" class="rail-list"></div>
+          <p id="rail-empty" class="empty small" hidden>ยังไม่มีการแจ้งเตือน</p>
+        </aside>
+      </div>
     </section>
 
     <!-- Alerts triage -->
@@ -114,7 +172,7 @@
       <p class="muted small">ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่กำลังเล่นย้อนหลัง (เฉพาะสำเนาในหน่วยความจำ) แล้วจับเวลาจนระบบพบความผิดปกติทางสถิติ</p>
       <!-- fail closed: disabled until /api/health confirms replay or sim (app.js setMode) -->
       <div id="redteam-refused" class="banner banner-fail">Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)</div>
-      <form id="redteam-form" class="card form-grid">
+      <form id="redteam-form" class="card form-grid rt-row">
         <label class="field">
           <span>รูปแบบ (family)</span>
           <select id="rt-family" disabled>
@@ -159,6 +217,33 @@
       <div id="taxonomy-body" class="cards"></div>
     </section>
 
+    <!-- Activity (admin) -->
+    <section id="page-activity" class="page" hidden>
+      <h1>Activity</h1>
+      <p class="muted small">บันทึกการใช้งานของผู้ใช้ทุกคน เรียงใหม่สุดก่อน (เฉพาะ admin)</p>
+      <div class="toolbar">
+        <label class="field">
+          <span>ผู้ใช้</span>
+          <input id="audit-user" type="text" maxlength="64" placeholder="ทั้งหมด" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>การกระทำ</span>
+          <select id="audit-action"></select>
+        </label>
+        <span id="audit-status" class="muted small"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="audit-table">
+          <thead>
+            <tr><th>เวลา (UTC)</th><th>ผู้ใช้</th><th>การกระทำ</th><th>เป้าหมาย</th><th>รายละเอียด</th></tr>
+          </thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+      <p id="audit-empty" class="empty" hidden>ยังไม่มีบันทึก</p>
+      <p><button id="audit-more" type="button">โหลดเก่ากว่านี้</button></p>
+    </section>
+
     <!-- About -->
     <section id="page-about" class="page prose" hidden>
       <h1>เกี่ยวกับ Market IDS</h1>
@@ -182,6 +267,19 @@
         <li>ชุดเดโมมีแค่ไม่กี่วัน ใช้สาธิตการทำงาน ไม่ใช้วัดผล</li>
       </ul>
       <p class="muted small">รายละเอียดอยู่ใน docs/ETHICS.md และ docs/DATA_LIMITATIONS.md ของโปรเจกต์</p>
+
+      <h2>วิธีอ่านกราฟและคะแนน</h2>
+      <ul>
+        <li>กราฟบนคือราคาปิด ลูกศรคือจุดที่พบความผิดปกติทางสถิติ กราฟล่างคือ F (ค่า p รวม) แสดงเป็น −log10 p ยิ่งสูงยิ่งหายากเทียบตลาดปกติ เส้นประ τ คือเกณฑ์แจ้งเตือน</li>
+        <li>L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้นแยกกัน</li>
+      </ul>
+
+      <h2>ข้อควรระวังในการอ่านผลประเมิน</h2>
+      <ul>
+        <li>หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้</li>
+        <li>τ saturated: งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้ τ จึงถูกตั้งที่ค่า F บวกที่เล็กที่สุด
+          หรือเหนือค่า F ทั้งหมดเมื่อไม่มีค่า F บวกเลย (เช่น กฎที่ไม่เคยทำงานในช่วงสอบเทียบ) งบจึงไม่ได้ถูกทดสอบกับข้อมูลจริง</li>
+      </ul>
 
       <h2>ที่มาของข้อมูลและซอฟต์แวร์</h2>
       <ul>
