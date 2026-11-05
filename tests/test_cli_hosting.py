@@ -98,7 +98,24 @@ def test_public_host_allowlist(env):
     app = create_app(state, allowed_hosts=cli.allowed_hosts("0.0.0.0", [PUBLIC]))
     with TestClient(app) as c:
         assert c.get("/api/health", headers={"host": PUBLIC}).status_code == 200
-        assert c.get("/api/health", headers={"host": "evil.com"}).status_code == 400
+        assert c.get("/api/symbols", headers={"host": PUBLIC}).status_code == 401  # past the check
+        assert c.get("/api/symbols", headers={"host": "evil.com"}).status_code == 400
+
+
+def test_health_probe_skips_host_check(env):
+    _, _, state = env
+    app = create_app(state, allowed_hosts=cli.allowed_hosts("0.0.0.0", [PUBLIC]))
+    probe = {"host": "10.0.0.5:7860"}  # the Space's own probe, by its internal IP
+    with TestClient(app) as c:
+        assert c.get("/api/health", headers=probe).status_code == 200
+        assert c.head("/api/health", headers=probe).status_code != 400
+        assert c.get("/api/me", headers=probe).status_code == 400
+        assert c.get("/api/symbols", headers=probe).status_code == 400
+        assert c.post("/api/health", headers=probe).status_code == 400
+        assert c.get("/api/health/", headers=probe).status_code == 400
+        with pytest.raises(Exception):  # noqa: B017 - the handshake is refused before accept
+            with c.websocket_connect("/ws/stream", headers=probe):
+                pass
 
 
 def test_public_host_case_and_port(env):
@@ -170,15 +187,21 @@ class RoundPipe:
         self.mode = "replay"
         self.stop = stop
         self.before = before  # called with (round number, replayer) before a round plays
+        self.end_speed: float | None = None  # what the analyst left the speed at, if set
         self.rounds: list[tuple[Replayer, tuple, int]] = []  # (source, first event, trades)
+        self.speeds: list[float] = []  # each round's speed as it started
 
     async def run(self, rp):
         if self.before is not None:
             self.before(len(self.rounds) + 1, rp)
+        speed = rp.speed
+        self.speeds.append(speed)
+        rp.set_speed(0.0)  # play at max speed so the test is fast
         first, trades = None, 0
         async for ev in rp:
             first = ev if first is None else first
             trades += ev[0] == "trade"
+        rp.set_speed(speed if self.end_speed is None else self.end_speed)
         self.rounds.append((rp, first, trades))
         if len(self.rounds) >= self.stop:
             asyncio.current_task().cancel()
@@ -231,7 +254,9 @@ def test_loop_restarts(replay_env):
     sources = [rp for rp, _, _ in pipe.rounds]
     assert len(sources) == 3 and len({id(rp) for rp in sources}) == 3
     assert seen == [True, True, True]  # each round plays the replayer the routes see
-    assert state.replayer is sources[-1] and state.replayer.speed == 0.0
+    assert state.replayer is sources[-1]
+    # round 1 ran at max speed (0): the next rounds fall back to the serve default
+    assert pipe.speeds == [0.0, cli.DEFAULT_SPEED, cli.DEFAULT_SPEED]
     for _, first, n in pipe.rounds[1:]:
         assert first == ("seek", START)
         assert n == trades.height
@@ -240,6 +265,16 @@ def test_loop_restarts(replay_env):
         msgs.append(q.get_nowait())
     restarted = [m for m in msgs if isinstance(m, dict) and m.get("event") == "replay_restarted"]
     assert restarted and restarted[0] == {"event": "replay_restarted", "t_us": START}
+
+
+def test_loop_carries_a_nonzero_speed(replay_env):
+    cfg, store, _, pipes = replay_env
+    state, background = cli.prepare_replay(serve_args(True), cfg, store)
+    pipe = pipes[0]
+    pipe.end_speed = 5.0  # an analyst set 5x during each round
+    run_background(background)
+    assert pipe.speeds == [0.0, 5.0, 5.0]
+    assert state.replayer.speed == 5.0
 
 
 def test_loop_restarts_after_inject(replay_env):

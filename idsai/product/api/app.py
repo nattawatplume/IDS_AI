@@ -225,16 +225,26 @@ BAD_HOST_TH = (
 )
 
 
+def _health_probe(scope: Scope) -> bool:
+    return (
+        scope["type"] == "http"
+        and scope.get("method") in ("GET", "HEAD")
+        and scope.get("path") == "/api/health"
+    )
+
+
 class HostAllowlist:
     """ASGI middleware: HTTP and WebSocket requests whose `Host` (port ignored, IPv6 in brackets)
-    is not in `allowed` get 400 with a Thai hint; a WebSocket is refused before it is accepted."""
+    is not in `allowed` get 400 with a Thai hint; a WebSocket is refused before it is accepted.
+    `GET`/`HEAD /api/health` skips the check: a host's own probes (e.g. Hugging Face) call it by
+    an internal IP, and it returns nothing private."""
 
     def __init__(self, app: ASGIApp, allowed: list[str]):
         self.app = app
         self.allowed = {h.lower() for h in allowed}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] in ("http", "websocket"):
+        if scope["type"] in ("http", "websocket") and not _health_probe(scope):
             raw = dict(scope.get("headers") or []).get(b"host", b"").decode("latin-1")
             parsed = parse_host_header(raw)
             if parsed is None or parsed.host.lower() not in self.allowed:

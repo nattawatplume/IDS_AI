@@ -2075,6 +2075,7 @@ function route() {
   } else if (r.name === "activity") {
     showActivity();
   } else if (r.name === "login") {
+    applyFramedHint(window, $("login-framed"), $("login-framed-link"));
     $("login-user").focus();
   }
 }
@@ -2082,6 +2083,23 @@ function route() {
 // ------------------------------------------------------------------ sign-in, user chip
 
 let loginFails = 0;
+
+// inside someone else's frame (e.g. the huggingface.co Space page) the browser drops the
+// SameSite=Strict cookie, so sign-in cannot stick: say so and link to the site itself
+function isFramed(win) {
+  try {
+    return win.top !== win;
+  } catch (e) {
+    return true; // a cross-origin top that cannot even be compared is still a frame
+  }
+}
+
+function applyFramedHint(win, box, link) {
+  const framed = isFramed(win);
+  box.hidden = !framed;
+  if (framed) link.href = win.location.href;
+  return framed;
+}
 
 function showLoginError(text) {
   const box = $("login-error");
@@ -2408,6 +2426,8 @@ if (typeof document !== "undefined") {
     getReplaying: () => state.replaying,
     PAGE_ORDER,
     safeNext,
+    isFramed,
+    applyFramedHint,
     can,
     setMe,
     savePrefs,

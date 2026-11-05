@@ -628,6 +628,18 @@ def test_wildcard_bind_explains_which_hosts_are_accepted(demo, monkeypatch, caps
     assert "--host <IP" in capsys.readouterr().err
 
 
+def test_wildcard_bind_note_lists_public_hosts(demo, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "run_server", lambda app, h, port, bg: bg().close())
+    s = load_settings(demo.cfg_path)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        if not store.has_enabled_admin():
+            store.add_user("root", "", "admin", "x", 1)
+    argv = ["serve", "--host", "0.0.0.0", "--auth", "--public-host", "x.hf.space"]
+    assert cli.main(["--config", str(demo.cfg_path), *argv]) == 0
+    note = [ln for ln in capsys.readouterr().err.splitlines() if "หมายเหตุ" in ln]
+    assert note and "x.hf.space" in note[0]
+
+
 def test_serve_with_auth_gates_the_api_and_purges_expired_sessions(demo, monkeypatch):
     from idsai.product.auth import hash_password
 

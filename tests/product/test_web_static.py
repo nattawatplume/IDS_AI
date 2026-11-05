@@ -939,3 +939,41 @@ def test_on_alert_handles_replay_restarted():
     assert '"replay_restarted"' in body and "restartRuns(" in body
     check = js.split("function checkInjections()")[1].split("\n}\n")[0]
     assert "closed" in check
+
+
+FRAMED_BODY = r"""
+const url = "https://x.hf.space/#/login?next=%23%2Falerts";
+const box = () => ({ hidden: true });
+const link = () => ({ href: "#" });
+// opened directly: no hint, the link is left alone
+const top = { location: { href: url } };
+top.top = top;
+let b = box(), a = link();
+assert.strictEqual(m.applyFramedHint(top, b, a), false);
+assert.strictEqual(b.hidden, true);
+assert.strictEqual(a.href, "#");
+// inside another site's frame: the hint shows and links to this very page
+const framed = { top: {}, location: { href: url } };
+b = box(); a = link();
+assert.strictEqual(m.applyFramedHint(framed, b, a), true);
+assert.strictEqual(b.hidden, false);
+assert.strictEqual(a.href, url);
+// a top that throws on access still counts as a frame
+const odd = { location: { href: url } };
+Object.defineProperty(odd, "top", { get() { throw new Error("blocked"); } });
+assert.strictEqual(m.isFramed(odd), true);
+"""
+
+
+def test_framed_login_shows_a_direct_link(tmp_path):
+    _run_motion(tmp_path, "false", FRAMED_BODY)
+
+
+def test_framed_login_hint_markup():
+    html, js = text("index.html"), text("app.js")
+    m = re.search(r'<p id="login-framed"[^>]*hidden>(.*?)</p>', html, re.S)
+    assert m, "no hidden framed hint on the login page"
+    assert 'id="login-framed-link"' in m.group(1) and 'target="_top"' in m.group(1)
+    assert "โดยตรง" in m.group(1)
+    route_fn = js[js.index("function route()") : js.index("function isFramed(")]
+    assert 'applyFramedHint(window, $("login-framed"), $("login-framed-link"))' in route_fn

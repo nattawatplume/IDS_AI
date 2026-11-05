@@ -94,6 +94,8 @@ HF sets `SPACE_HOST` (for example `plume-market-ids.hf.space`). If `SPACE_HOST` 
 - **`--public-host NAME`** (repeatable):
   - each NAME is added to the Host-header allowlist and to the same-origin check, so the WebSocket and POSTs from `https://NAME` are accepted;
   - NAME must be a bare hostname with no scheme, port or path, otherwise it is a usage error (exit 1).
+  - `GET`/`HEAD /api/health` skips the Host check, because HF's own probes call it by an internal IP; every other route stays checked.
+- The login page shows a short Thai hint with a `target="_top"` link to the same URL when it is opened inside a frame.
 - **`--secure-cookies`** sets `cfg.auth.cookie_secure = True` for this run. HF serves over HTTPS. Only the browser sees the `Secure` attribute, because uvicorn sits behind HF's TLS proxy.
 - **`--loop`** applies to replay only. In live mode it is a usage error.
 
@@ -103,6 +105,7 @@ When `--loop` is set and the replay delivers its last event, serve starts the re
 1. It begins from the same start time, using the original trades. Red-Team injections are dropped, because they were made on the in-memory copy.
 2. It deletes replay alerts at or after the start, the same call serve makes at startup, so the list does not fill with duplicates.
 3. It broadcasts the same event the dashboard already handles for a seek, so charts and the rail reset.
+4. It keeps the ending replay's speed, except max speed (0): then the new round runs at the serve default (60x), so one click on "เร็วสุด" does not keep the CPU busy round after round.
 
 Red-Team runs still pending at the restart end as "missed (replay restarted)" and are not left hanging.
 

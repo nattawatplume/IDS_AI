@@ -86,12 +86,15 @@ def test_dockerfile():
         "EXPOSE 7860",
         "USER user",
         "useradd -m -u 1000 user",
+        "mkdir -p /home/user/app && chown user:user /home/user/app",
         "uv sync --frozen --no-dev",
         "idsai demo-pack",
         "deploy/check_no_hu.py",
         "deploy/start.sh",
     ):
         assert want in text
+    # the app dir exists and belongs to uid 1000 before the image switches to that user
+    assert text.index("chown user:user /home/user/app") < text.index("USER user")
 
 
 def _workflow(name: str) -> tuple[dict, str]:
@@ -159,6 +162,9 @@ def test_readme_hosting_section():
         "60 วัน",
     ):
         assert want in section
+    # GitHub runs `schedule` only from the default branch: the wake-up waits for the merge
+    assert "ตัวปลุกทุก 6 ชม. ก็เหมือนกัน จะเริ่มทำงานหลังรวม PR เข้า `main`" in section
+    assert "48 ชม." in section
     for n in range(1, 8):
         assert f"\n{n}. " in section
     assert "ยังไม่มีหน้า Dashboard" not in text

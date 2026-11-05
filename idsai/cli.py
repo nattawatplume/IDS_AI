@@ -805,7 +805,8 @@ def looping(
     """`serve --loop`: play `state.replayer` to its end, then again from `start_us`, forever.
 
     An ended replay cannot seek, so each round gets a new replayer from the original trades (no
-    Red-Team injection survives a round) at the old one's speed. Its first event is
+    Red-Team injection survives a round) at the old one's speed, except that max speed (0) falls
+    back to `DEFAULT_SPEED` so one click never pegs the CPU round after round. Its first event is
     `("seek", start_us)`: the pipeline drops its state and the replay alerts from `start_us` on.
     The routes read `state.replayer` per call, so swapping it is enough.
     """
@@ -815,7 +816,7 @@ def looping(
         while True:
             rp = state.replayer
             await pipeline.run(rp)
-            rp = make_replayer(rp.speed)
+            rp = make_replayer(rp.speed or DEFAULT_SPEED)
             rp.seek(start_us)
             state.replayer = rp
             state.injected.clear()
@@ -1148,7 +1149,8 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
             )
         if host in WILDCARD_BINDS:
             _warn(
-                f"หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ {', '.join(allowed_hosts(host))} "
+                "หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ "
+                f"{', '.join(allowed_hosts(host, args.public_host))} "
                 "ถ้าให้เครื่องอื่นเรียก ให้เปิดด้วย --host <IP ของเครื่องนี้> แล้วเรียกผ่าน IP นั้น"
             )
         if args.mode == "live":

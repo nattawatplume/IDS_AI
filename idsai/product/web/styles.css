@@ -527,6 +527,7 @@ body.login-mode #ws-banner { display: none; }
 }
 .login-card .field > input { width: 100%; }
 .login-mark { margin: 0; font-size: 15px; letter-spacing: 0.14em; }
+.login-framed { margin: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--radius); }
 .login-error { margin: 0; padding: 6px 10px; border: 1px solid var(--red); border-radius: var(--radius); color: var(--red); }
 .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; }
 .check input { min-height: 0; width: 16px; height: 16px; padding: 0; accent-color: var(--amber); }

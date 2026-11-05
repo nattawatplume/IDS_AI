@@ -102,7 +102,7 @@ uv run idsai serve --mode replay
 3. ในหน้า Space ไปที่ Settings → Variables and secrets → New secret ตั้งชื่อ `IDSAI_USERS` ใส่ค่าบัญชีผู้ใช้ บัญชีละหนึ่งบรรทัด รูปแบบ `ชื่อ:สิทธิ์:รหัสผ่าน` (ต้องมี `admin` อย่างน้อยหนึ่งบัญชี ชื่อยาว 3–32 ตัว รหัสผ่านยาวอย่างน้อย 10 ตัว)
 4. ที่ Hugging Face ไปที่ Settings → Access Tokens → Create new token เลือกชนิด Write แล้วคัดลอกโทเคนไว้
 5. ที่หน้า GitHub ของโปรเจกต์ไปที่ Settings → Secrets and variables → Actions แล้วเพิ่ม: secret ชื่อ `HF_TOKEN` (ค่าคือโทเคนจากข้อ 4), variable ชื่อ `HF_SPACE` (ค่าเช่น `nattawatplume/market-ids`) และ variable ชื่อ `SPACE_URL` (ค่าเช่น `nattawatplume-market-ids.hf.space` ไม่ต้องมี `https://`)
-6. หลังตั้งค่าครบ การส่งขึ้น Space จะเริ่มเองทุกครั้งที่มีการ push เข้าสาขา `feat/mvp` หรือ `main` (หรือหลังรวม PR เข้า `main`) ดูความคืบหน้าที่แท็บ Actions → "Deploy to Hugging Face Space" ส่วนปุ่ม Run workflow สำหรับกดเองจะโผล่ก็ต่อเมื่อไฟล์ workflow นี้อยู่บนสาขา `main` แล้วเท่านั้น
+6. หลังตั้งค่าครบ การส่งขึ้น Space จะเริ่มเองทุกครั้งที่มีการ push เข้าสาขา `feat/mvp` หรือ `main` (หรือหลังรวม PR เข้า `main`) ดูความคืบหน้าที่แท็บ Actions → "Deploy to Hugging Face Space" ส่วนปุ่ม Run workflow สำหรับกดเองจะโผล่ก็ต่อเมื่อไฟล์ workflow นี้อยู่บนสาขา `main` แล้วเท่านั้น ตัวปลุกทุก 6 ชม. ก็เหมือนกัน จะเริ่มทำงานหลังรวม PR เข้า `main` แล้วเท่านั้น ก่อนหน้านั้น Space อาจหลับถ้าไม่มีคนเปิดนาน 48 ชม.
 7. รอให้ Space สร้างเสร็จ (ครั้งแรกประมาณ 10–15 นาที) แล้วเปิด URL ของ Space และเข้าสู่ระบบด้วยบัญชีจากข้อ 3
 
 ข้อควรรู้:
