@@ -188,11 +188,39 @@ function parentTechnique(id) {
 
 // ------------------------------------------------------------------ top bar
 
+const THEMES = ["auto", "dark", "light"];
+
+function currentTheme() {
+  const t = document.documentElement.dataset.theme;
+  return THEMES.includes(t) ? t : "auto";
+}
+
+function applyTheme(choice) {
+  const c = THEMES.includes(choice) ? choice : "auto";
+  if (c === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = c;
+  const btn = $("theme-toggle");
+  if (btn) {
+    btn.textContent = c.toUpperCase();
+    btn.title = `ธีม: ${c}`;
+  }
+  storageSet("theme", c);
+  restyleCharts();
+}
+
+function bindTheme() {
+  const saved = storageGet("theme");
+  applyTheme(THEMES.includes(saved) ? saved : "auto");
+  $("theme-toggle").addEventListener("click", () => {
+    applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  });
+}
+
 function renderHealth(h) {
   state.health = h;
   setMode(h.mode);
-  if (isNum(h.event_us)) $("event-clock").textContent = fmtUs(h.event_us);
-  else if (isNum(state.lastBarUs)) $("event-clock").textContent = fmtUs(state.lastBarUs);
+  if (isNum(h.event_us)) $("clock").textContent = fmtUs(h.event_us);
+  else if (isNum(state.lastBarUs)) $("clock").textContent = fmtUs(state.lastBarUs);
 
   const checks = Array.isArray(h.checks) ? h.checks : [];
   const dot = $("auditor-dot");
@@ -206,6 +234,7 @@ function renderHealth(h) {
       : "กำลังอุ่นเครื่อง";
   }
   $("auditor-text").textContent = text;
+  $("auditor").title = text; // the warm-up wording lives in the tooltip, the bar stays short
   const list = clear($("auditor-checks"));
   for (const c of checks) {
     list.appendChild(
@@ -234,6 +263,7 @@ function redTeamAllowed(mode) {
 function setMode(mode) {
   if (!mode || mode === state.mode) return;
   state.mode = mode;
+  $("live-dot").className = `dot ${mode === "live" ? "fail" : "ok"}`;
   const badge = $("mode-badge");
   badge.textContent = String(mode).toUpperCase();
   badge.className = `badge badge-mode ${mode}`;
@@ -292,9 +322,9 @@ const chart = {
 
 function chartColors() {
   return {
-    bg: cssVar("--surface"),
-    text: cssVar("--muted"),
-    grid: cssVar("--border"),
+    bg: cssVar("--panel"),
+    text: cssVar("--dim"),
+    grid: cssVar("--line"),
     price: cssVar("--line-price"),
     f: cssVar("--line-f"),
     tau: cssVar("--tau"),
@@ -496,7 +526,7 @@ function onBar(bar) {
   if (!bar || !isNum(bar.t_us)) return;
   const closeUs = bar.t_us + S_US;
   if (!isNum(state.lastBarUs) || closeUs > state.lastBarUs) state.lastBarUs = closeUs;
-  if (state.mode === "live") $("event-clock").textContent = fmtUs(state.lastBarUs);
+  if (state.mode === "live") $("clock").textContent = fmtUs(state.lastBarUs);
   if (bar.symbol !== state.symbol || !chart.api) return;
   const t = toSec(closeUs); // a bar closes at t_us + 1 s, where its score row ends
   if (plot("price", chart.price, t, bar.close)) {
@@ -1499,6 +1529,7 @@ function fillSymbols() {
 
 async function boot() {
   window.addEventListener("hashchange", safely(route));
+  bindTheme();
   bindReplay();
   bindRedTeam();
   $("symbol-select").addEventListener("change", (ev) => {

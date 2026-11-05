@@ -10,39 +10,39 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-name">Market IDS</span>
+      <span class="brand-name">MARKET·IDS</span>
       <span id="mode-badge" class="badge badge-mode">…</span>
     </div>
+    <nav class="tabs" aria-label="หน้า">
+      <a href="#/monitor" data-route="monitor">Monitor</a>
+      <a href="#/alerts" data-route="alerts">Alerts</a>
+      <a href="#/redteam" data-route="redteam">Red-Team</a>
+      <a href="#/eval" data-route="eval">Eval</a>
+      <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
+      <a href="#/about" data-route="about">About</a>
+    </nav>
     <div class="topbar-stats">
-      <div class="stat">
-        <span class="stat-label">เวลาเหตุการณ์</span>
-        <span id="event-clock" class="stat-value mono">–</span>
+      <div class="stat" title="เวลาเหตุการณ์">
+        <span id="live-dot" class="dot"></span>
+        <span id="clock" class="clock">–</span>
       </div>
       <details id="auditor" class="stat auditor">
         <summary>
           <span class="stat-label">Auditor</span>
-          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text">กำลังโหลด…</span></span>
+          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text" class="small">กำลังโหลด…</span></span>
         </summary>
         <ul id="auditor-checks" class="auditor-checks"></ul>
       </details>
-      <div class="stat budget">
-        <span class="stat-label">งบการแจ้งเตือน (24 ชม.ล่าสุด)</span>
+      <div class="stat budget" title="งบการแจ้งเตือน (24 ชม.ล่าสุด)">
+        <span class="stat-label">งบ</span>
         <span class="stat-value">
-          <span class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
-          <span id="budget-text" class="mono">–</span>
+          <span id="budget-meter" class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
+          <span id="budget-text" class="mono small">–</span>
         </span>
       </div>
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="ธีม">AUTO</button>
     </div>
   </header>
-
-  <nav class="tabs" aria-label="หน้า">
-    <a href="#/monitor" data-route="monitor">Monitor</a>
-    <a href="#/alerts" data-route="alerts">Alerts</a>
-    <a href="#/redteam" data-route="redteam">Red-Team</a>
-    <a href="#/eval" data-route="eval">Eval</a>
-    <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
-    <a href="#/about" data-route="about">About</a>
-  </nav>
 
   <div id="ws-banner" class="banner banner-warn" role="status" hidden></div>
 

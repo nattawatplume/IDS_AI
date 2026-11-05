@@ -314,3 +314,25 @@ HTML_TAGS = set(
 def test_el_builds_only_known_tags():
     tags = set(re.findall(r'\bel\("([^"]+)"', text("app.js")))
     assert tags and tags <= HTML_TAGS, sorted(tags - HTML_TAGS)
+
+
+def test_both_themes_define_every_token():
+    css = text("styles.css")
+    tokens = ["--bg", "--panel", "--line", "--ink", "--dim", "--amber", "--red", "--green"]
+    blocks = [css.split(':root[data-theme="dark"]')[1], css.split(':root[data-theme="light"]')[1]]
+    for t in tokens:
+        assert re.search(rf"{t}\s*:", css.split("@media")[0]), t  # bare :root
+        for b in blocks:
+            assert re.search(rf"{t}\s*:", b.split("}")[0]), t
+
+
+def test_theme_toggle_exists_and_is_wired():
+    assert 'id="theme-toggle"' in text("index.html")
+    js = text("app.js")
+    assert "function applyTheme(" in js and 'storageSet("theme"' in js
+
+
+def test_no_capsule_tabs_or_shadows():
+    css = text("styles.css")
+    assert "box-shadow" not in css
+    assert not re.search(r"border-radius:\s*(?:[5-9]|\d{2,})px", css)
