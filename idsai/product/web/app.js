@@ -1297,7 +1297,28 @@ function renderInjections() {
   const box = clear($("rt-runs"));
   for (const run of state.injections) {
     const sc = run.scenario;
-    const timer = el("div", { class: "timer" });
+    const ring = svg("circle", {
+      id: "rt-ring",
+      class: "rt-ring-arc",
+      cx: 26,
+      cy: 26,
+      r: RING_R,
+      fill: "none",
+      "stroke-width": 4,
+      "stroke-dasharray": RING_C.toFixed(2),
+      "stroke-dashoffset": RING_C.toFixed(2),
+      transform: "rotate(-90 26 26)",
+    });
+    const ringSvg = svg(
+      "svg",
+      { viewBox: "0 0 52 52", class: "rt-ring", role: "img", "aria-label": "เวลาที่ผ่านไปเทียบกับช่วงตรวจจับ" },
+      svg("circle", { cx: 26, cy: 26, r: RING_R, fill: "none", "stroke-width": 4, class: "rt-ring-track" }),
+      ring,
+    );
+    const banner = el("div", { class: "rt-banner", id: "rt-banner" });
+    banner.hidden = true;
+    const detail = el("div", { class: "small timer-detail" });
+    const timer = el("div", { class: "timer rt-timer" }, ringSvg, el("div", { class: "rt-timer-text" }, banner, detail));
     const card = el(
       "div",
       { class: "card" },
@@ -1324,32 +1345,71 @@ function renderInjections() {
       timer,
     );
     run.node = timer;
+    run.ring = ring;
+    run.banner = banner;
+    run.detail = detail;
+    run.bannerState = null;
     box.appendChild(card);
   }
   tickInjections();
 }
 
+const RING_R = 22;
+const RING_C = 2 * Math.PI * RING_R;
+
+function bannerText(status, seconds) {
+  // the verdict line on a Red-Team card; empty while the run is still undecided
+  const n = Math.max(0, Math.round(Number(seconds) || 0));
+  if (status === "detected") return `ตรวจพบใน ${n} วินาที`;
+  if (status === "missed") return `ไม่พบภายใน ${n} วินาที`;
+  return "";
+}
+
 function tickInjections() {
   const now = eventNowUs();
   for (const run of state.injections) {
-    if (!run.node) continue;
-    clear(run.node);
+    if (!run.node || !run.ring) continue;
     const status = injectionStatus(run, now);
+    const windowS = Math.max(1, (run.t_end_us - run.t_start_us) / S_US + MATCH_AFTER_US / S_US);
+    const ev = isNum(now) && isNum(run.t_start_us) ? (now - run.t_start_us) / S_US : null;
+    let frac = ev === null ? 0 : Math.max(0, Math.min(1, ev / windowS));
+    if (status === "detected") frac = Math.max(0, Math.min(1, run.detected.eventS / windowS));
+    else if (status === "missed") frac = 1;
+    run.ring.setAttribute("stroke-dasharray", RING_C.toFixed(2));
+    run.ring.setAttribute("stroke-dashoffset", (RING_C * (1 - frac)).toFixed(2));
+    run.ring.setAttribute("class", `rt-ring-arc ${status}`);
+
+    const seconds = status === "detected" ? run.detected.eventS : MATCH_AFTER_US / S_US;
+    const verdict = status === "detected" || status === "missed";
+    run.banner.hidden = !verdict;
+    if (verdict) {
+      const cls = status === "detected" ? "hit" : "miss";
+      run.banner.className = `rt-banner ${cls}`;
+      run.banner.textContent = bannerText(status, seconds);
+      if (run.bannerState !== status) {
+        run.bannerState = status;
+        if (!reducedMotion()) run.banner.classList.add("sweep");
+      }
+    } else {
+      run.bannerState = null;
+      run.banner.className = "rt-banner";
+    }
+
+    clear(run.detail);
     if (status === "missed") {
-      run.node.textContent =
+      run.detail.textContent =
         "ไม่พบความผิดปกติทางสถิติภายในช่วงที่นับตามเกณฑ์ประเมิน (ถึงสิ้นสุดเหตุการณ์ + 300 s) · นับเป็นการตรวจไม่พบ";
     } else if (status === "detected") {
       const d = run.detected;
-      append(run.node, [
+      append(run.detail, [
         `ตรวจพบความผิดปกติทางสถิติ: ${d.eventS >= 0 ? "+" : ""}${d.eventS.toFixed(0)} s (เวลาเหตุการณ์) · ${d.wallS.toFixed(1)} s (เวลาจริง) `,
         el("a", { href: alertHref(d.alert_id), class: "small" }, "ดูการแจ้งเตือน"),
       ]);
     } else {
       const wall = (Date.now() - run.wallStart) / 1000;
-      const ev = isNum(now) && isNum(run.t_start_us) ? (now - run.t_start_us) / S_US : null;
       const evText =
         ev === null ? "–" : ev < 0 ? `อีก ${(-ev).toFixed(0)} s จะเริ่ม` : `+${ev.toFixed(0)} s`;
-      run.node.textContent = `รอการตรวจจับ… ${evText} (เวลาเหตุการณ์) · ${wall.toFixed(0)} s (เวลาจริง)`;
+      run.detail.textContent = `รอการตรวจจับ… ${evText} (เวลาเหตุการณ์) · ${wall.toFixed(0)} s (เวลาจริง)`;
     }
   }
 }
@@ -1800,6 +1860,7 @@ if (typeof document !== "undefined") {
     firstDetection,
     resetRuns,
     injectionStatus,
+    bannerText,
     redTeamAllowed,
     reducedMotion,
     tweenNumber,

@@ -385,6 +385,20 @@ button.selected { outline: 2px solid var(--amber); outline-offset: 1px; }
 .prose li { margin: 4px 0; }
 .footer { max-width: 1200px; margin: 0 auto; padding: 12px 16px 24px; border-top: 1px solid var(--line); }
 .back { font-size: 13px; }
+.rt-row .form-actions { grid-column: auto; }
+@media (min-width: 900px) { .rt-row { grid-template-columns: 1.4fr 0.8fr 1fr 1fr auto; } }
+.rt-timer { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 400; }
+.rt-ring { width: 52px; height: 52px; flex: none; }
+.rt-ring-track { stroke: var(--line); }
+.rt-ring-arc { stroke: var(--amber); stroke-linecap: butt; transition: stroke-dashoffset 0.9s linear, stroke 0.3s; }
+.rt-ring-arc.detected { stroke: var(--green); }
+.rt-ring-arc.missed { stroke: var(--red); }
+.rt-timer-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rt-banner { font-family: var(--mono); font-size: 20px; font-weight: 600; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; }
+.rt-banner[hidden] { display: none; }
+.rt-banner.hit { color: var(--green); border-color: var(--green); }
+.rt-banner.miss { color: var(--red); border-color: var(--red); }
+.rt-banner.sweep { background-image: linear-gradient(100deg, transparent 30%, color-mix(in srgb, currentColor 22%, transparent) 50%, transparent 70%); background-size: 60% 100%; background-repeat: no-repeat; animation: sweep 0.9s ease-out 1; }
 .timer { font-family: var(--mono); font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
 /* ---- monitor: kpi strip, chart left, alert rail right ---- */

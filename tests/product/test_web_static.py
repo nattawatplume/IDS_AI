@@ -460,3 +460,24 @@ def test_alert_rows_carry_severity_and_detail_has_two_columns():
     assert "detail-main" in js and "detail-side" in js
     css = text("styles.css")
     assert "[data-sev=" in css and ".detail-side" in css
+
+
+BANNER_BODY = r"""
+assert.strictEqual(m.bannerText("detected", 42), "ตรวจพบใน 42 วินาที");
+assert.strictEqual(m.bannerText("missed", 300), "ไม่พบภายใน 300 วินาที");
+assert.strictEqual(m.bannerText("detected", 41.6), "ตรวจพบใน 42 วินาที");
+assert.strictEqual(m.bannerText("waiting", 5), "");
+assert.strictEqual(m.bannerText("detected", -3), "ตรวจพบใน 0 วินาที");
+"""
+
+
+def test_banner_text_for_hit_and_miss(tmp_path):
+    _run_motion(tmp_path, "false", BANNER_BODY)
+
+
+def test_red_team_ring_and_one_row_form():
+    html = text("index.html")
+    js = text("app.js")
+    assert 'id="rt-ring"' in js or 'id: "rt-ring"' in js or "rt-ring" in js
+    assert "rt-banner" in js and "stroke-dashoffset" in js
+    assert 'class="form-grid rt-row"' in html or "rt-row" in html
