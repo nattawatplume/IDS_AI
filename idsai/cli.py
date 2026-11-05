@@ -40,6 +40,7 @@ DEFAULT_HOST = "127.0.0.1"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")  # as Starlette parses the Host header
 DEFAULT_SPEED = 60.0
 GRACEFUL_SHUTDOWN_S = 5
+SESSION_PURGE_S = 3600  # expired sessions are deleted at startup and then once an hour
 DEMO_DIR = "demo"
 MANIFEST = "manifest.json"
 DEMO_PUMPS = 3
@@ -818,6 +819,7 @@ def prepare_replay(
         replayer,
         symbols=[symbol],
         budget_per_symbol_day=doc.get("budget_per_symbol_day"),
+        auth_enabled=auth_enabled(args, cfg),
     )
     # alerts a previous session raised at or after the start would be shown as "future" ones and
     # be raised again: drop them as a seek to `start` does (feedback rows stay)
@@ -897,6 +899,7 @@ def prepare_live(
         None,
         symbols=symbols,
         budget_per_symbol_day=doc.get("budget_per_symbol_day"),
+        auth_enabled=auth_enabled(args, cfg),
     )
     return state, lambda: pipeline.run(warmup_then_live(archive, sensor))
 
@@ -989,6 +992,32 @@ def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
     return 0
 
 
+def with_session_purge(
+    store: "Store", background: Callable[[], Coroutine[Any, Any, None]]
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """`background` plus a task that deletes expired sessions every `SESSION_PURGE_S`; the purge
+    keeps running after the pipeline ends (the server still does) and stops with the server."""
+    import asyncio
+    import contextlib
+
+    async def purge() -> None:
+        while True:
+            await asyncio.sleep(SESSION_PURGE_S)
+            store.purge_sessions(_now_us())
+
+    async def run() -> None:
+        task = asyncio.create_task(purge())
+        try:
+            await background()
+            await task
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    return run
+
+
 def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     from idsai.product.api import create_app
 
@@ -1005,9 +1034,10 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
             state, background = prepare_live(args, cfg, store)
         else:
             state, background = prepare_replay(args, cfg, store)
+        store.purge_sessions(_now_us())
         app = create_app(state, allowed_hosts=allowed_hosts(host))
         _say(f"เปิดที่ http://{host if ':' not in host else f'[{host}]'}:{port} (กด Ctrl+C เพื่อหยุด)")
-        run_server(app, host, port, background)
+        run_server(app, host, port, with_session_purge(store, background))
     return 0
 
 

@@ -125,6 +125,28 @@ def test_serve_loopback_without_auth_still_allowed(tmp_path):
         check_serve_auth("0.0.0.0", True, st)
 
 
+def test_session_purge_runs_hourly_and_outlives_the_pipeline(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(cli, "SESSION_PURGE_S", 0.01)
+    calls: list[int] = []
+    store = type("S", (), {"purge_sessions": lambda self, now: calls.append(now) or 0})()
+    ran = []
+
+    async def pipeline() -> None:
+        ran.append(1)  # ends at once, as a finished replay does
+
+    async def main() -> None:
+        task = asyncio.create_task(cli.with_session_purge(store, pipeline)())
+        await asyncio.sleep(0.1)
+        assert not task.done()  # still purging after the pipeline ended
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(main())
+    assert ran == [1] and len(calls) >= 2
+
+
 def test_auth_flag_overrides_config():
     parser = cli.build_parser()
     on = load_settings(overrides={"auth": {"enabled": True}})

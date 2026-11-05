@@ -628,6 +628,34 @@ def test_wildcard_bind_explains_which_hosts_are_accepted(demo, monkeypatch, caps
     assert "--host <IP" in capsys.readouterr().err
 
 
+def test_serve_with_auth_gates_the_api_and_purges_expired_sessions(demo, monkeypatch):
+    from idsai.product.auth import hash_password
+
+    pw = "boss-password-1"
+    s = load_settings(demo.cfg_path)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        if store.get_user_by_name("boss") is None:
+            store.add_user("boss", "Boss", "admin", hash_password(pw), 1)
+        store.create_session(store.get_user_by_name("boss")["user_id"], "stale", 1, 2, False)
+    seen = {}
+
+    def fake_run_server(app, host, port, background):
+        background().close()
+        with TestClient(app, base_url="http://127.0.0.1:8800") as c:
+            seen["anon"] = c.get("/api/symbols").status_code
+            seen["health"] = c.get("/api/health").status_code
+            seen["login"] = c.post(
+                "/api/auth/login", json={"username": "boss", "password": pw}
+            ).status_code
+            seen["me"] = c.get("/api/me").json()["role"]
+
+    monkeypatch.setattr(cli, "run_server", fake_run_server)
+    assert cli.main(["--config", str(demo.cfg_path), "serve", "--auth"]) == 0
+    assert seen == {"anon": 401, "health": 200, "login": 200, "me": "admin"}
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        assert store.purge_sessions(10**18) == 1  # the stale one was gone at startup
+
+
 def test_help_imports_no_models_and_names_every_experiment():
     import subprocess
     import sys
