@@ -32,6 +32,25 @@ const UNKNOWN_MODE_TH =
 const RED_TEAM_MODES = ["replay", "sim"];
 const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
+// Eval targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6 (spec section 6).
+// "pair" cards need the AE-minus-baseline CI lower bound above 0; "reference" pairs show the
+// diff and CI only (the MVP spec asks the AE to beat iforest / robust_z / kk, not random / pca).
+const EVAL_TARGETS = [
+  { id: "real_recall", label: "recall_any ≥ 0.8 · REAL (real_t001)", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true },
+  ...["pump_burst", "pump_stealth", "wash_pingpong"].map((v) => ({
+    id: `semisyn_${v}`, label: `recall_any ≥ 0.8 · SEMI-SYN ${v}`, experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true,
+  })),
+  { id: "real_fa", label: "เตือนผิด ≤ งบ · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2 },
+  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
+  ...["baseline.iforest", "stat.robust_z", "baseline.kk"].map((b) => ({
+    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
+  })),
+  ...["baseline.random", "baseline.pca"].map((b) => ({
+    id: `ae_vs_${b}`, label: `AE เทียบ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0, reference: true,
+  })),
+  { id: "latency_p99", label: "compute latency p99 < 2 s", cmp: "none", threshold: 2 },
+];
+
 const state = {
   mode: null,
   replaying: true, // a replay starts running; control() keeps this in step
@@ -273,9 +292,13 @@ function presenterKey(ev) {
   if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
   const tag = ev.target && ev.target.tagName;
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return null;
-  if (ev.key === " ") return "toggle-play";
-  if (ev.key === "t" || ev.key === "T") return "theme";
+  // ev.code is the physical key: it still works when a Thai layout changes ev.key
+  const code = ev.code || "";
+  if (ev.key === " " || code === "Space") return "toggle-play";
+  if (ev.key === "t" || ev.key === "T" || code === "KeyT") return "theme";
   if (/^[1-6]$/.test(ev.key || "")) return `page:${ev.key}`;
+  const digit = /^(?:Digit|Numpad)([1-6])$/.exec(code);
+  if (digit) return `page:${digit[1]}`;
   return null;
 }
 
@@ -309,7 +332,10 @@ function onPresenterKey(ev) {
 function setLive(on) {
   const dot = $("live-dot");
   const clock = $("clock");
-  if (dot) dot.classList.toggle("live", !!on);
+  if (dot) {
+    dot.classList.toggle("live", !!on);
+    dot.classList.toggle("off", !on); // grey whatever the mode lamp said
+  }
   if (clock) clock.classList.toggle("dim", !on);
 }
 
@@ -396,6 +422,7 @@ function renderBudget() {
     $("budget-text").textContent = "–";
     $("kpi-budget").textContent = "งบ –";
     fill.style.width = "0";
+    renderAlertsKpi(now);
     return;
   }
   const nSym = Math.max(state.symbols.length, 1);
@@ -409,7 +436,21 @@ function renderBudget() {
   fill.className = `meter-fill${frac > 1 ? " over" : frac >= 0.8 ? " warn" : ""}`;
   $("budget-text").textContent = `${rate.toFixed(1)} / ${budget} ครั้งต่อสัญลักษณ์-วัน`;
   $("kpi-budget").textContent = `งบ ${budget}`;
+  renderAlertsKpi(now);
+}
+
+// the KPI counts the selected symbol's alerts of the last 24 h (the unit of the budget above)
+function renderAlertsKpi(now = eventNowUs()) {
   const box = $("kpi-alerts");
+  if (!state.symbol || !isNum(now)) {
+    box.textContent = "–";
+    state.alertCount = 0;
+    return;
+  }
+  let n = 0;
+  for (const a of state.alerts.values()) {
+    if (a.symbol === state.symbol && a.ts_event_us > now - DAY_US && a.ts_event_us <= now) n += 1;
+  }
   const rose = n > state.alertCount;
   state.alertCount = n;
   tweenNumber(box, n, 0);
@@ -1361,7 +1402,7 @@ function bannerText(status, seconds) {
   // the verdict line on a Red-Team card; empty while the run is still undecided
   const n = Math.max(0, Math.round(Number(seconds) || 0));
   if (status === "detected") return `ตรวจพบใน ${n} วินาที`;
-  if (status === "missed") return `ไม่พบภายใน ${n} วินาที`;
+  if (status === "missed") return `ไม่พบภายใน ${n} วินาทีหลังจบเหตุการณ์`;
   return "";
 }
 
@@ -1383,12 +1424,12 @@ function tickInjections() {
     const verdict = status === "detected" || status === "missed";
     run.banner.hidden = !verdict;
     if (verdict) {
-      const cls = status === "detected" ? "hit" : "miss";
-      run.banner.className = `rt-banner ${cls}`;
       run.banner.textContent = bannerText(status, seconds);
-      if (run.bannerState !== status) {
+      if (run.bannerState !== status) { // class only on a state change: a tick never restarts the sweep
         run.bannerState = status;
-        if (!reducedMotion()) run.banner.classList.add("sweep");
+        const hit = status === "detected";
+        run.banner.className = `rt-banner ${hit ? "hit" : "miss"}`;
+        if (hit && !reducedMotion()) run.banner.classList.add("sweep");
       }
     } else {
       run.bannerState = null;
@@ -1416,20 +1457,6 @@ function tickInjections() {
 
 // ------------------------------------------------------------------ eval
 
-// targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6
-const EVAL_BASELINES = ["baseline.random", "baseline.kk", "baseline.iforest", "baseline.pca", "stat.robust_z"];
-const EVAL_TARGETS = [
-  { id: "real_recall", label: "recall ≥ 0.8 · ตลาดจริง (real_t001)", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8 },
-  ...["pump_burst", "pump_stealth", "wash_pingpong"].map((v) => ({
-    id: `semisyn_${v}`, label: `recall ≥ 0.8 · ${v}`, experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8,
-  })),
-  { id: "real_fa", label: "เตือนผิด ≤ งบ · ตลาดจริง", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2 },
-  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · ตลาดจริง", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
-  ...EVAL_BASELINES.map((b) => ({
-    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
-  })),
-];
-
 function evalEmpty(report) {
   return !report || !report.runs || !report.experiments;
 }
@@ -1437,13 +1464,14 @@ function evalEmpty(report) {
 // pass / miss / unmeasured: absent data is never a pass
 function targetVerdict(report, target) {
   const none = { state: "unmeasured", value: null, ci: null, n: null };
-  if (evalEmpty(report)) return none;
+  if (evalEmpty(report) || target.cmp === "none") return none; // the report has no latency metric
   if (target.cmp === "pair") {
     const paired = report.paired_bootstrap;
     if (!paired || Number(paired.budget) !== Number(target.budget)) return none;
     const found = (paired.rows || []).find((r) => r.baseline === target.variant);
     if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
-    return { state: found.ci[0] > target.threshold ? "pass" : "miss", value: found.diff_mean, ci: found.ci, n: found.n_events };
+    const st = target.reference ? "reference" : found.ci[0] > target.threshold ? "pass" : "miss";
+    return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events };
   }
   const variants = report.experiments[target.experiment] || {};
   const cell = (variants[target.variant] || {})[String(target.budget)];
@@ -1451,10 +1479,15 @@ function targetVerdict(report, target) {
   if (!isNum(value)) return none;
   const ci = cell.ci && Array.isArray(cell.ci[target.metric]) ? cell.ci[target.metric] : null;
   const ok = target.cmp === ">=" ? value >= target.threshold : value <= target.threshold;
-  return { state: ok ? "pass" : "miss", value, ci, n: cell.n_events };
+  const out = { state: ok ? "pass" : "miss", value, ci, n: cell.n_events };
+  if (target.correct && isNum(cell.mean.recall_correct)) {
+    const cc = cell.ci && cell.ci.recall_correct;
+    out.correct = { value: cell.mean.recall_correct, ci: Array.isArray(cc) ? cc : null };
+  }
+  return out;
 }
 
-const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด" };
+const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด", reference: "อ้างอิง" };
 
 function fmtSigned(x) {
   return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
@@ -1462,7 +1495,14 @@ function fmtSigned(x) {
 
 function targetCard(target, verdict, index) {
   const paired = target.cmp === "pair";
-  const goal = paired ? "CI ขอบล่าง > 0" : `${target.cmp === ">=" ? "≥" : "≤"} ${target.threshold}`;
+  const goal =
+    target.cmp === "none"
+      ? `< ${target.threshold} s`
+      : target.reference
+        ? "ไม่มีเป้า (อ้างอิง)"
+        : paired
+          ? "CI ขอบล่าง > 0"
+          : `${target.cmp === ">=" ? "≥" : "≤"} ${target.threshold}`;
   const none = verdict.state === "unmeasured";
   return el(
     "div",
@@ -1475,6 +1515,9 @@ function targetCard(target, verdict, index) {
       { class: "small mono muted" },
       none ? `เป้า ${goal}` : `${verdict.ci ? ciText(verdict.value, verdict.ci) : "ไม่มี CI"} · n ${verdict.n ?? "–"} · เป้า ${goal}`,
     ),
+    verdict.correct
+      ? el("span", { class: "small mono muted" }, `recall_correct ${ciText(verdict.correct.value, verdict.correct.ci)}`)
+      : null,
   );
 }
 
@@ -1686,7 +1729,7 @@ function forestPlot(paired) {
     const tone = r.ci[0] > 0 ? "good" : r.ci[1] < 0 ? "bad" : "flat";
     root.appendChild(svg("text", { x: left - 8, y: cy + 4, "text-anchor": "end" }, r.baseline));
     root.appendChild(svg("line", { x1: x(r.ci[0]), x2: x(r.ci[1]), y1: cy, y2: cy, class: `ci-line ${tone}`, style: `transform-origin: ${x(r.diff_mean)}px ${cy}px` }));
-    root.appendChild(svg("circle", { cx: x(r.diff_mean), cy, r: 3.5, class: `dot ${tone}` }));
+    root.appendChild(svg("circle", { cx: x(r.diff_mean), cy, r: 3.5, class: `pt ${tone}` }));
   });
   return root;
 }
@@ -1909,6 +1952,8 @@ async function boot() {
     state.symbol = ev.target.value;
     $("rt-symbol").value = state.symbol;
     $("kpi-symbol").textContent = state.symbol || "–";
+    state.alertCount = 0;
+    renderAlertsKpi();
     loadSeries();
   });
   const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;

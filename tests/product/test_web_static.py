@@ -5,6 +5,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -58,6 +59,15 @@ def test_root_serves_the_dashboard_with_attribution(client):
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
     for needle in ("Market IDS", "Binance Vision", "tradingview", "CC BY-NC-SA 4.0"):
         assert needle in r.text
+
+
+def test_dashboard_files_revalidate_on_every_load(client):
+    for path in ("/", "/app.js", "/styles.css"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache", path
+        assert r.headers.get("etag"), path  # revalidation can still answer 304
+        again = client.get(path, headers={"if-none-match": r.headers["etag"]})
+        assert again.status_code == 304, path
 
 
 @pytest.mark.parametrize(
@@ -367,6 +377,16 @@ assert.strictEqual(k({ key: "t", target: { tagName: "BODY" } }), "theme");
 assert.strictEqual(k({ key: "t", ctrlKey: true, target: { tagName: "BODY" } }), null);
 assert.strictEqual(k({ key: "1", metaKey: true, target: { tagName: "BODY" } }), null);
 assert.strictEqual(k({ key: "1", altKey: true, target: { tagName: "BODY" } }), null);
+// a Thai layout changes ev.key: the physical ev.code still drives the keys
+assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "BODY" } }), "theme");
+assert.strictEqual(k({ key: "ๅ", code: "Digit1", target: { tagName: "BODY" } }), "page:1");
+assert.strictEqual(k({ key: "ภ", code: "Digit6", target: { tagName: "BODY" } }), "page:6");
+assert.strictEqual(k({ key: "ๅ", code: "Numpad3", target: { tagName: "BODY" } }), "page:3");
+assert.strictEqual(k({ key: "ๅ", code: "Digit7", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "ๅ", code: "Digit0", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "Spacebar", code: "Space", target: { tagName: "BODY" } }), "toggle-play");
+assert.strictEqual(k({ key: "ะ", code: "KeyT", target: { tagName: "INPUT" } }), null);
+assert.strictEqual(k({ key: "ะ", code: "KeyT", ctrlKey: true, target: { tagName: "BODY" } }), null);
 assert.strictEqual(m.PAGE_ORDER.length, 6);
 assert.strictEqual(m.PAGE_ORDER[0], "#/monitor");
 """
@@ -448,6 +468,53 @@ def test_ws_close_turns_live_dot_off():
     assert "function setLive(" in js
     close = js.split('addEventListener("close"')[1][:400]
     assert "setLive(false)" in close
+    body = js.split("function setLive(")[1].split("\n}\n")[0]
+    assert 'classList.toggle("off", !on)' in body
+    css = text("styles.css")
+    off = css.index(".dot.off")
+    assert "var(--dim)" in css[off : css.index("}", off)]
+    assert off > css.index(".dot.ok") and off > css.index(".dot.fail")  # source order: off wins
+
+
+def test_alerts_kpi_counts_the_selected_symbol_only():
+    js = text("app.js")
+    kpi = js.split("function renderAlertsKpi(")[1].split("\n}\n")[0]
+    assert "a.symbol === state.symbol" in kpi and "DAY_US" in kpi
+    assert '"–"' in kpi
+    assert 'id="kpi-alerts">–<' in text("index.html")
+    change = js.split('$("symbol-select").addEventListener("change"')[1][:400]
+    assert "renderAlertsKpi()" in change
+
+
+def test_resting_styles_are_visible_when_animation_does_not_run():
+    css = text("styles.css").replace("\r\n", "\n")
+    for sel in (r"\.rise", r"\.rail-row\.enter", r"\.forest \.ci-line", r"\.pop"):
+        rules = re.findall(r"(?m)^" + sel + r"\s*\{([^}]*)\}", css)
+        assert rules, sel
+        for body in rules:
+            assert not re.search(r"opacity\s*:\s*0\b", body), sel
+            assert "scaleX(0)" not in body, sel
+            assert not re.search(r"animation[^;]*\bboth\b", body), sel
+
+
+def test_low_severity_is_grey_and_forest_points_avoid_the_dot_rule():
+    css = text("styles.css")
+    assert 'tr[data-sev="low"] td:first-child { border-left-color: var(--dim)' in css
+    assert ".rail-row.sev-1 { border-left-color: var(--dim)" in css
+    js = text("app.js")
+    assert "class: `pt ${tone}`" in js and "class: `dot ${tone}`" not in js
+
+
+def test_red_team_miss_is_grey_and_the_banner_class_changes_only_with_state():
+    css = text("styles.css")
+    assert re.search(r"\.rt-banner\.hit\s*\{[^}]*var\(--amber\)", css)
+    miss = re.search(r"\.rt-banner\.miss\s*\{([^}]*)\}", css).group(1)
+    assert "var(--dim)" in miss and "--red" not in miss
+    assert not re.search(r"\.rt-ring-arc\.missed\s*\{[^}]*--red", css)
+    tick = text("app.js").split("function tickInjections()")[1].split("\n}\n")[0]
+    block = tick.split("run.bannerState !== status")[1].split("} else {")[0]
+    assert "run.banner.className" in block and "sweep" in block
+    assert "run.banner.className" not in tick.split("run.bannerState !== status")[0]
 
 
 # ---- alerts list and detail ----
@@ -464,7 +531,7 @@ def test_alert_rows_carry_severity_and_detail_has_two_columns():
 
 BANNER_BODY = r"""
 assert.strictEqual(m.bannerText("detected", 42), "ตรวจพบใน 42 วินาที");
-assert.strictEqual(m.bannerText("missed", 300), "ไม่พบภายใน 300 วินาที");
+assert.strictEqual(m.bannerText("missed", 300), "ไม่พบภายใน 300 วินาทีหลังจบเหตุการณ์");
 assert.strictEqual(m.bannerText("detected", 41.6), "ตรวจพบใน 42 วินาที");
 assert.strictEqual(m.bannerText("waiting", 5), "");
 assert.strictEqual(m.bannerText("detected", -3), "ตรวจพบใน 0 วินาที");
@@ -505,14 +572,33 @@ assert.strictEqual(m.targetVerdict(report({ mean: {}, n_events: 3 }, []), T("rea
 // paired: the CI lower bound must clear 0; a baseline wholly better is a miss
 const rows = [
   { baseline: "baseline.random", diff_mean: 0.639, ci: [0.57, 0.7], n_events: 200 },
+  { baseline: "baseline.iforest", diff_mean: 0.2, ci: [0.1, 0.3], n_events: 200 },
   { baseline: "baseline.kk", diff_mean: -0.17, ci: [-0.222, -0.121], n_events: 200 },
   { baseline: "stat.robust_z", diff_mean: 0.005, ci: [-0.03, 0.04], n_events: 200 },
 ];
 const r = report(cell(0.74, null, 200), rows);
-assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.random")).state, "pass");
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.iforest")).state, "pass");
+// random / pca are reference cards: the diff and CI show, but never a pass
+const ref = m.targetVerdict(r, T("ae_vs_baseline.random"));
+assert.strictEqual(ref.state, "reference");
+assert.strictEqual(ref.value, 0.639);
+assert.deepStrictEqual(ref.ci, [0.57, 0.7]);
+assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.pca")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.random")).state, "unmeasured");
+const ids = m.EVAL_TARGETS.map((t) => t.id);
+assert.ok(!ids.includes("ae_vs_baseline.random") || T("ae_vs_baseline.random").reference === true);
+assert.ok(T("ae_vs_baseline.pca").reference === true);
+for (const b of ["baseline.iforest", "stat.robust_z", "baseline.kk"]) assert.ok(!T(`ae_vs_${b}`).reference, b);
+// latency has no metric in report.json: always unmeasured, never a pass
+assert.strictEqual(m.targetVerdict(r, T("latency_p99")).state, "unmeasured");
+assert.strictEqual(m.targetVerdict(report(cell(0.9, null, 9), []), T("latency_p99")).state, "unmeasured");
+// recall_correct rides along on the recall cards
+const withCorrect = { mean: { recall_any: 1, recall_correct: 0.001 }, ci: { recall_any: [1, 1], recall_correct: [0, 0.003] }, n_events: 401 };
+const wash = m.targetVerdict({ runs: 5, experiments: { semisyn: { wash_pingpong: { "2": withCorrect } } } }, T("semisyn_wash_pingpong"));
+assert.strictEqual(wash.state, "pass");
+assert.strictEqual(wash.correct.value, 0.001);
 assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.kk")).state, "miss");
 assert.strictEqual(m.targetVerdict(r, T("ae_vs_stat.robust_z")).state, "miss");
-assert.strictEqual(m.targetVerdict(r, T("ae_vs_baseline.pca")).state, "unmeasured");
 assert.strictEqual(m.targetVerdict({ runs: 5, experiments: {} }, T("ae_vs_baseline.kk")).state, "unmeasured");
 assert.strictEqual(m.targetVerdict(null, T("real_recall")).state, "unmeasured");
 assert.strictEqual(m.evalEmpty({ runs: 0 }), true);
@@ -523,6 +609,33 @@ assert.strictEqual(m.evalEmpty({ runs: 3, experiments: {} }), false);
 
 def test_target_verdicts(tmp_path):
     _run_motion(tmp_path, "false", VERDICT_BODY)
+
+
+def test_target_verdicts_against_the_real_report(tmp_path):
+    rpt = Path(__file__).resolve().parents[2] / "data" / "report.json"
+    if not rpt.is_file():
+        pytest.skip("data/report.json is not present")
+    body = (
+        "const rep = JSON.parse(require('fs').readFileSync(%r, 'utf8'));\n" % str(rpt)
+        + r"""
+const got = {};
+for (const t of m.EVAL_TARGETS) {
+  const v = m.targetVerdict(rep, t);
+  got[t.id] = [v.state, v.value === null ? null : Math.round(v.value * 1000) / 1000];
+}
+const want = {
+  real_recall: ["miss", 0.739], real_fa: ["pass", 1.65], real_fa_hard: ["miss", 11.17],
+  semisyn_pump_burst: ["miss", 0.295], semisyn_pump_stealth: ["miss", 0.351], semisyn_wash_pingpong: ["pass", 1],
+  "ae_vs_baseline.iforest": ["miss"], "ae_vs_stat.robust_z": ["miss"], "ae_vs_baseline.kk": ["miss"],
+  "ae_vs_baseline.random": ["reference"], "ae_vs_baseline.pca": ["reference"], latency_p99: ["unmeasured", null],
+};
+for (const [id, [state, value]] of Object.entries(want)) {
+  assert.strictEqual(got[id][0], state, id + " " + JSON.stringify(got[id]));
+  if (value !== undefined) assert.strictEqual(got[id][1], value, id);
+}
+"""
+    )
+    _run_motion(tmp_path, "false", body)
 
 
 def test_ablation_notes_cell_wraps():
