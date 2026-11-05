@@ -405,3 +405,26 @@ def test_reduced_motion_disables_animation():
     assert "animation" in block and "transition" in block
     for name in ("pulse", "glow", "pop", "rise", "sweep", "grow"):
         assert f"@keyframes {name}" in css, name
+
+
+PLAY_BODY = r"""
+assert.strictEqual(m.playToggleAction("live", false), null);
+assert.strictEqual(m.playToggleAction("live", true), null);
+assert.strictEqual(m.playToggleAction(null, true), null);
+assert.strictEqual(m.playToggleAction("replay", true), "pause");
+assert.strictEqual(m.playToggleAction("replay", false), "play");
+// state follows what control() reports, so Space always does the opposite
+assert.strictEqual(m.getReplaying(), true);
+m.noteReplayAction("pause");
+assert.strictEqual(m.playToggleAction("replay", m.getReplaying()), "play");
+m.noteReplayAction("play"); // e.g. the Play button
+assert.strictEqual(m.playToggleAction("replay", m.getReplaying()), "pause");
+m.noteReplayAction("speed");
+assert.strictEqual(m.getReplaying(), true);
+"""
+
+
+def test_space_toggle_follows_replay_state_and_skips_live(tmp_path):
+    _run_motion(tmp_path, "false", PLAY_BODY)
+    js = text("app.js")
+    assert "noteReplayAction(action)" in js and "presenterPlaying" not in js

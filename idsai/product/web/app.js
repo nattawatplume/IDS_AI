@@ -34,6 +34,7 @@ const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
 const state = {
   mode: null,
+  replaying: true, // a replay starts running; control() keeps this in step
   health: null,
   symbols: [],
   symbol: null,
@@ -275,15 +276,25 @@ function presenterKey(ev) {
   return null;
 }
 
-let presenterPlaying = false;
+// what Space should do now: the opposite of the replay state, nothing in LIVE or unknown mode
+function playToggleAction(mode, playing) {
+  if (!mode || mode === "live") return null;
+  return playing ? "pause" : "play";
+}
+
+// one source of truth for the replay state, fed by control()'s successful answers
+function noteReplayAction(action) {
+  if (action === "play") state.replaying = true;
+  else if (action === "pause") state.replaying = false;
+}
 
 function onPresenterKey(ev) {
   const act = presenterKey(ev);
   if (!act) return;
   ev.preventDefault();
   if (act === "toggle-play") {
-    presenterPlaying = !presenterPlaying;
-    control(presenterPlaying ? "play" : "pause");
+    const next = playToggleAction(state.mode, state.replaying);
+    if (next) control(next);
   } else if (act === "theme") {
     applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
   } else {
@@ -338,6 +349,7 @@ function redTeamAllowed(mode) {
 function setMode(mode) {
   if (!mode || mode === state.mode) return;
   state.mode = mode;
+  state.replaying = true; // a new mode starts with a running replay
   $("live-dot").className = `dot ${mode === "live" ? "fail" : "ok"}`;
   const badge = $("mode-badge");
   badge.textContent = String(mode).toUpperCase();
@@ -625,6 +637,7 @@ async function control(action, value) {
   try {
     const body = value === undefined ? { action } : { action, value };
     const r = await postJson("/api/replay/control", body);
+    noteReplayAction(action);
     status.textContent = `ตำแหน่ง ${fmtUs(r.cursor_us)}`;
   } catch (e) {
     status.textContent = e.message;
@@ -1652,6 +1665,9 @@ if (typeof document !== "undefined") {
     tweenNumber,
     flash,
     presenterKey,
+    playToggleAction,
+    noteReplayAction,
+    getReplaying: () => state.replaying,
     PAGE_ORDER,
   };
 }
