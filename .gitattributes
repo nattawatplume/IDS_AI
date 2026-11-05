@@ -2,3 +2,4 @@
 *.parquet binary
 *.zip binary
 *.png binary
+deploy/*.sh text eol=lf
