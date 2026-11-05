@@ -51,7 +51,8 @@
     </div>
   </header>
 
-  <div id="ws-banner" class="banner banner-warn" role="status" hidden></div>
+  <div id="ws-banner" class="ws-toast" role="status" hidden></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
   <main>
     <!-- Sign-in -->
@@ -197,19 +198,19 @@
       </div>
     </section>
 
-    <!-- Alerts triage -->
+    <!-- Alerts: filter chips, then one card per alert, newest first -->
     <section id="page-alerts" class="page" hidden>
       <h1>การแจ้งเตือน</h1>
-      <p class="muted small">ทุกรายการคือช่วงเวลาที่พบความผิดปกติทางสถิติเมื่อเทียบกับตลาดปกติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร</p>
-      <div class="table-wrap">
-        <table class="table" id="alerts-table">
-          <thead>
-            <tr><th>ระดับ</th><th>เทคนิค</th><th>สัญลักษณ์</th><th>เวลา (UTC)</th><th>ค่า p รวม</th><th>เห็นพ้อง</th><th>สถานะ</th></tr>
-          </thead>
-          <tbody id="alerts-body"></tbody>
-        </table>
+      <p class="muted page-lead">ทุกรายการคือช่วงเวลาที่การซื้อขายต่างจากตลาดปกติทางสถิติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร</p>
+      <p id="alerts-error" class="inline-error" role="alert" hidden></p>
+      <div id="alerts-filters" class="filter-row" role="group" aria-label="กรองรายการ" hidden></div>
+      <div id="alerts-list" class="alert-list"></div>
+      <p id="alerts-none" class="empty small" hidden>ไม่มีรายการในกลุ่มนี้</p>
+      <button id="alerts-more" type="button" class="more-btn" hidden>แสดงเพิ่ม</button>
+      <div id="alerts-empty" class="card empty-state" hidden>
+        <span class="empty-radar" aria-hidden="true"></span>
+        <p class="empty-text">ยังไม่มีการแจ้งเตือน ระบบกำลังเฝ้าดูอยู่</p>
       </div>
-      <p id="alerts-empty" class="empty" hidden>ยังไม่มีการแจ้งเตือน</p>
     </section>
 
     <!-- Alert detail -->

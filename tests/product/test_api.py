@@ -244,6 +244,20 @@ def test_alert_detail_and_feedback(client, env):
     assert r.status_code == 404
 
 
+def test_feedback_list_for_the_alert_filters(client, env):
+    env.store.upsert_alert(make_alert("a1"))
+    env.store.upsert_alert(make_alert("a2", D_US + 7200 * S))
+    assert client.get("/api/feedback").json() == []
+    post(client, "/api/alerts/a1/feedback", {"verdict": "tp", "analyst": "ann"})
+    post(client, "/api/alerts/a1/feedback", {"verdict": "fp", "analyst": "bob"})
+    post(client, "/api/alerts/a2/feedback", {"verdict": "unsure", "analyst": "ann"})
+    rows = client.get("/api/feedback").json()
+    assert [(r["alert_id"], r["verdict"]) for r in rows] == [
+        ("a1", "tp"), ("a1", "fp"), ("a2", "unsure")
+    ]  # fmt: skip
+    assert set(rows[0]) == {"alert_id", "verdict", "analyst", "ts_us"}
+
+
 @pytest.mark.parametrize(
     "body",
     [

@@ -280,6 +280,7 @@ def test_login_refuses_cross_origin(auth_client):
 READS = [
     "/api/alerts",
     "/api/alerts/a1",
+    "/api/feedback",
     f"/api/series?symbol={SYM}",
     "/api/symbols",
     "/api/experiments",

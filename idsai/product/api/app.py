@@ -429,6 +429,11 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
             }
         )
 
+    @app.get("/api/feedback", dependencies=signed)
+    async def feedback_list():
+        """Every verdict, oldest first: the alert list's filters and verdict chips read it."""
+        return _json(state.store.list_feedback())
+
     @app.post(
         "/api/alerts/{alert_id}/feedback", status_code=201, dependencies=[Depends(same_origin)]
     )

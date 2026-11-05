@@ -45,8 +45,19 @@ const SPEED_CHIPS = [
   { label: "เร็วสุด", v: 0 },
 ];
 const VIEWER_REPLAY_TH = "เฉพาะผู้วิเคราะห์ขึ้นไปที่ควบคุมได้";
+const VIEWER_VERDICT_TH = "เฉพาะผู้วิเคราะห์ขึ้นไปที่ให้ผลตรวจได้";
 const HEADLINE_MAX = 120;
-const VERDICT_TH = { tp: "ผิดปกติจริง (TP)", fp: "แจ้งเตือนผิด (FP)", unsure: "ไม่แน่ใจ" };
+const VERDICT_TH = { tp: "ผิดปกติจริง", fp: "เตือนผิด", unsure: "ไม่แน่ใจ" };
+const VERDICTS = ["tp", "fp", "unsure"];
+const ALERT_FILTERS = [
+  { key: "all", label: "ทั้งหมด" },
+  { key: "open", label: "ยังไม่ตรวจ" },
+  { key: "tp", label: "ผิดปกติจริง" },
+  { key: "fp", label: "เตือนผิด" },
+];
+const ALERT_PAGE = 50; // cards drawn at a time; "แสดงเพิ่ม" adds the next page
+const TOAST_MS = 5000;
+const TOAST_MAX = 3;
 const REFUSED_TH =
   "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง (ใช้ได้เฉพาะโหมด replay / sim)";
 const UNKNOWN_MODE_TH =
@@ -80,6 +91,9 @@ const state = {
   symbols: [],
   symbol: null,
   alerts: new Map(), // alert_id -> item
+  feedback: new Map(), // alert_id -> verdict rows, oldest first (GET /api/feedback)
+  alertFilter: "all", // the chosen ALERT_FILTERS key
+  alertsShown: ALERT_PAGE,
   taxonomy: null,
   lastBarUs: null,
   ws: null,
@@ -499,8 +513,8 @@ function setLive(on) {
 function renderHealth(h) {
   state.health = h;
   setMode(h.mode);
-  if (isNum(h.event_us)) $("clock").textContent = fmtUs(h.event_us);
-  else if (isNum(state.lastBarUs)) $("clock").textContent = fmtUs(state.lastBarUs);
+  if (isNum(h.event_us)) $("clock").textContent = fmtThaiTime(h.event_us, true);
+  else if (isNum(state.lastBarUs)) $("clock").textContent = fmtThaiTime(state.lastBarUs, true);
   renderReplayClock(eventNowUs());
   renderHealthCard(h);
   renderBudget();
@@ -1043,7 +1057,7 @@ function onBar(bar) {
   if (!bar || !isNum(bar.t_us)) return;
   const closeUs = bar.t_us + S_US;
   if (!isNum(state.lastBarUs) || closeUs > state.lastBarUs) state.lastBarUs = closeUs;
-  if (state.mode === "live") $("clock").textContent = fmtUs(state.lastBarUs);
+  if (state.mode === "live") $("clock").textContent = fmtThaiTime(state.lastBarUs, true);
   if (bar.symbol !== state.symbol || !chart.api) return;
   const t = toSec(closeUs); // a bar closes at t_us + 1 s, where its score row ends
   if (plot("price", chart.price, t, bar.close)) {
@@ -1135,19 +1149,43 @@ function bindReplay() {
 // ------------------------------------------------------------------ alerts
 
 async function loadAlerts() {
+  const err = $("alerts-error");
+  let items;
+  let rows;
   try {
-    const items = await api("/api/alerts?limit=1000");
-    state.alerts = new Map(items.map((a) => [a.alert_id, a]));
-    state.alertsLoaded = true;
+    [items, rows] = await Promise.all([
+      api("/api/alerts?limit=1000"),
+      api("/api/feedback").catch((e) => {
+        console.warn("feedback:", e.message);
+        return null; // the cards still show; only the verdict chips and filters lack data
+      }),
+    ]);
   } catch (e) {
     console.warn("alerts:", e.message);
+    err.textContent = `อ่านรายการแจ้งเตือนไม่ได้ (${e.message}) จะลองใหม่เมื่อเชื่อมต่อได้`;
+    err.hidden = false;
     return;
   }
+  state.alerts = new Map(items.map((a) => [a.alert_id, a]));
+  if (rows) state.feedback = groupFeedback(rows);
+  state.alertsLoaded = true;
+  err.textContent = rows ? "" : "อ่านผลการตรวจไม่ได้ ตัวกรองตามผลตรวจอาจยังไม่ครบ";
+  err.hidden = !!rows;
   alertsChanged();
 }
 
+function groupFeedback(rows) {
+  const out = new Map();
+  for (const f of rows || []) {
+    if (!f || typeof f.alert_id !== "string") continue;
+    if (!out.has(f.alert_id)) out.set(f.alert_id, []);
+    out.get(f.alert_id).push(f);
+  }
+  return out;
+}
+
 function alertsChanged() {
-  renderAlertsTable();
+  renderAlertCards();
   renderRail();
   renderMarkers();
   renderBudget();
@@ -1158,7 +1196,7 @@ function alertsChanged() {
 function onAlert(data) {
   if (!data || typeof data !== "object") return;
   if (data.event === "resync") {
-    loadAlerts();
+    loadAlerts(); // a re-read, not news: no toast
     return;
   }
   if (data.event === "replay_restarted") {
@@ -1167,15 +1205,35 @@ function onAlert(data) {
     return;
   }
   if (data.event === "alerts_reset") {
-    for (const id of data.deleted || []) state.alerts.delete(id);
+    for (const id of data.deleted || []) {
+      state.alerts.delete(id);
+      state.feedback.delete(id);
+    }
     if (resetRuns(state.injections, data.deleted || [])) renderInjections();
     alertsChanged();
     loadSeries();
     return;
   }
   if (typeof data.alert_id !== "string") return;
+  const fresh = !state.alerts.has(data.alert_id); // an update of a known alert is not a new one
   state.alerts.set(data.alert_id, data);
   alertsChanged();
+  if (fresh) showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
+}
+
+// a toast in the top right for TOAST_MS; at most TOAST_MAX at once, the oldest makes room
+function showToast(text, href) {
+  const root = $("toast-root");
+  if (!root) return;
+  while (root.children.length >= TOAST_MAX) root.removeChild(root.firstChild);
+  const toast = el("div", { class: reducedMotion() ? "toast" : "toast slide" });
+  const close = () => toast.remove();
+  append(toast, [
+    href ? el("a", { class: "toast-text", href, onclick: close }, text) : el("span", { class: "toast-text" }, text),
+    el("button", { type: "button", class: "toast-close", "aria-label": "ปิด", onclick: close }, "×"),
+  ]);
+  root.appendChild(toast);
+  setTimeout(close, TOAST_MS);
 }
 
 function sortedAlerts() {
@@ -1190,32 +1248,96 @@ function sevKey(severity) {
   return severity >= 3 ? "high" : severity === 2 ? "mid" : "low";
 }
 
-function renderAlertsTable() {
-  const body = clear($("alerts-body"));
-  const items = sortedAlerts();
-  $("alerts-empty").hidden = items.length > 0;
-  $("alerts-table").hidden = items.length === 0;
-  for (const a of items) {
-    const row = el(
-      "tr",
-      { class: "clickable", tabindex: "0", "data-sev": sevKey(a.severity) },
-      el("td", {}, el("span", { class: `sev sev-${a.severity}` }, SEVERITY_TH[a.severity] || a.severity)),
-      el("td", { class: "mono" }, a.technique_id),
-      el("td", {}, a.symbol),
-      el("td", { class: "mono" }, fmtUs(a.ts_event_us)),
-      el("td", { class: "num mono" }, fmtP(a.fused_p)),
-      el("td", { class: "num" }, `${a.agreement}/3`),
-      el("td", {}, STATUS_TH[a.status] || a.status),
-    );
-    const go = () => {
-      location.hash = alertHref(a.alert_id);
-    };
-    row.addEventListener("click", go);
-    row.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") go();
-    });
-    body.appendChild(row);
+// the verdict of the newest row (by time; a tie goes to the later row), or null
+function latestVerdict(rows) {
+  let best = null;
+  for (const f of rows || []) {
+    if (f && (!best || !(f.ts_us < best.ts_us))) best = f;
   }
+  return best ? best.verdict : null;
+}
+
+// alerts carrying their `feedback` rows, kept by ALERT_FILTERS key, newest first; never mutates
+function filterAlerts(alerts, key) {
+  return [...(alerts || [])]
+    .filter((a) => {
+      if (key === "open") return !(a.feedback && a.feedback.length);
+      if (key === "tp" || key === "fp") return latestVerdict(a.feedback) === key;
+      return true;
+    })
+    .sort((x, y) => y.ts_event_us - x.ts_event_us);
+}
+
+function withFeedback(a) {
+  return { ...a, feedback: state.feedback.get(a.alert_id) || [] };
+}
+
+function verdictChip(verdict) {
+  return verdict ? el("span", { class: `verdict-chip v-${verdict}` }, VERDICT_TH[verdict] || verdict) : null;
+}
+
+function renderAlertFilters(all) {
+  const box = clear($("alerts-filters"));
+  for (const flt of ALERT_FILTERS) {
+    const n = filterAlerts(all, flt.key).length;
+    box.appendChild(
+      el(
+        "button",
+        {
+          type: "button",
+          class: "filter-chip",
+          "aria-pressed": state.alertFilter === flt.key ? "true" : "false",
+          onclick: () => {
+            state.alertFilter = flt.key;
+            state.alertsShown = ALERT_PAGE;
+            renderAlertCards();
+          },
+        },
+        flt.label,
+        el("span", { class: "filter-count" }, n),
+      ),
+    );
+  }
+}
+
+function alertCard(a) {
+  return el(
+    "a",
+    { class: "card alert-card", href: alertHref(a.alert_id), "data-sev": sevKey(a.severity) },
+    el(
+      "span",
+      { class: "alert-card-main" },
+      el("span", { class: "alert-card-text" }, patternText(a, state.taxonomy)),
+      el(
+        "span",
+        { class: "alert-card-meta small muted" },
+        el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
+        el("span", {}, a.symbol),
+      ),
+    ),
+    el(
+      "span",
+      { class: "alert-card-side" },
+      verdictChip(latestVerdict(a.feedback)),
+      el("span", { class: "alert-card-time" }, fmtThaiTime(a.ts_event_us)),
+    ),
+  );
+}
+
+// the alerts page: filter chips with counts, then one glass card per alert, newest first
+function renderAlertCards() {
+  const list = clear($("alerts-list"));
+  const all = [...state.alerts.values()].map(withFeedback);
+  $("alerts-empty").hidden = all.length > 0;
+  $("alerts-filters").hidden = all.length === 0;
+  renderAlertFilters(all);
+  const items = filterAlerts(all, state.alertFilter);
+  for (const a of items.slice(0, state.alertsShown)) list.appendChild(alertCard(a));
+  $("alerts-none").hidden = !(all.length && !items.length);
+  const more = $("alerts-more");
+  const left = items.length - state.alertsShown;
+  more.hidden = left <= 0;
+  more.textContent = `แสดงเพิ่ม (เหลืออีก ${left} รายการ)`;
 }
 
 // a technique's Thai name for plain view: the parent's name_th without its English "(...)" gloss;
@@ -1228,11 +1350,15 @@ function thaiTechniqueName(tax, techniqueId) {
   return name && !/[A-Za-z]/.test(name) ? name : null;
 }
 
+// what was seen, in Thai and built from fields: the pattern's name, or the plain fallback
+function patternText(a, tax) {
+  const name = thaiTechniqueName(tax, a && a.technique_id);
+  return name ? `รูปแบบคล้าย${name}` : "พบความผิดปกติทางสถิติ";
+}
+
 // the rail's headline, built from fields: the pattern in Thai, the coin and the Thai time
 function railHeadline(a, tax) {
-  const name = thaiTechniqueName(tax, a && a.technique_id);
-  const what = name ? `รูปแบบคล้าย${name}` : "พบความผิดปกติทางสถิติ";
-  return `${what} ที่ ${(a && a.symbol) || "–"} เวลา ${fmtThaiTime(a && a.ts_event_us)}`;
+  return `${patternText(a, tax)} ที่ ${(a && a.symbol) || "–"} เวลา ${fmtThaiTime(a && a.ts_event_us)}`;
 }
 
 // the newest five alerts beside the chart as mini-cards; a card that was not there before rises in
@@ -1278,6 +1404,29 @@ function destroyDetailChart() {
   }
 }
 
+// one explanation fact for plain view, or null when it would need English: "robust z = 7.1"
+// reads as how many usual swings above (or below) normal; anything else with Latin letters stays
+// for "ดูรายละเอียด"
+function plainFact(f) {
+  if (!f || typeof f.label !== "string" || typeof f.value !== "string") return null;
+  let value = f.value;
+  const z = /^robust z = (-?[\d.]+)$/.exec(value);
+  if (z) {
+    const x = Number(z[1]);
+    value = `${x >= 0 ? "สูง" : "ต่ำ"}กว่าปกติ ${Math.abs(x)} เท่าของช่วงแกว่งปกติ`;
+  }
+  const text = `${f.label}: ${value}`;
+  return /[A-Za-z]/.test(text) ? null : text;
+}
+
+function kv(pairs) {
+  return el(
+    "dl",
+    { class: "kv" },
+    pairs.flatMap(([k, v, cls]) => [el("dt", {}, k), el("dd", cls ? { class: cls } : {}, v)]),
+  );
+}
+
 async function showAlert(id) {
   const box = clear($("alert-detail"));
   destroyDetailChart();
@@ -1286,165 +1435,170 @@ async function showAlert(id) {
   try {
     a = await api(`/api/alerts/${encodeURIComponent(id)}`);
   } catch (e) {
-    clear(box).appendChild(el("p", { class: "empty" }, e.message));
+    clear(box).appendChild(
+      el("div", { class: "card" }, el("p", { class: "inline-error" }, `เปิดการแจ้งเตือนนี้ไม่ได้ (${e.message})`)),
+    );
     return;
   }
   const tax = await loadTaxonomy();
   if (state.route !== "alert") return;
   clear(box);
-  const F = nlog10(a.fused_p);
+  if (Array.isArray(a.feedback)) state.feedback.set(a.alert_id, a.feedback);
 
+  // the head: what was seen, the level, the coin, the Thai time and the verdict so far
+  const chipSlot = el("span", { class: "verdict-slot" }, verdictChip(latestVerdict(a.feedback)));
   box.appendChild(
     el(
       "div",
       { class: "detail-head" },
-      el("h1", {}, "พบความผิดปกติทางสถิติ"),
-      el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || a.severity}`),
-      el("span", { class: "badge" }, a.provenance),
-    ),
-  );
-  box.appendChild(
-    el(
-      "p",
-      { class: "muted" },
-      `${a.symbol} · ${a.technique_id} · ${fmtUs(a.ts_event_us)} · สถานะ ${STATUS_TH[a.status] || a.status}`,
-    ),
-  );
-
-  const detail = el("div", { class: "detail" });
-  const main = el("div", { class: "detail-main" });
-  const side = el("div", { class: "detail-side" });
-  detail.appendChild(main);
-  detail.appendChild(side);
-  box.appendChild(detail);
-
-  const explanation = (a.explanation && a.explanation.text_th) || a.explanation_th || "";
-  const facts = (a.explanation && a.explanation.facts) || [];
-  side.appendChild(
-    el(
-      "div",
-      { class: "card" },
-      el("p", { class: "explain" }, explanation),
-      facts.length
-        ? el(
-            "ul",
-            { class: "facts" },
-            facts.map((f) => el("li", {}, `${f.label}: ${f.value}`)),
-          )
-        : null,
-    ),
-  );
-
-  const chartCard = el(
-    "div",
-    { class: "card chart-card" },
-    el("h3", {}, "ช่วงเวลาของการแจ้งเตือน (แถบสี)"),
-  );
-  const mini = el("div", { class: "chart-mini" });
-  chartCard.appendChild(mini);
-  main.appendChild(chartCard);
-
-  side.appendChild(
-    el(
-      "div",
-      { class: "card" },
-      el("h3", {}, "สรุปตัวเลข"),
+      el("h1", {}, patternText(a, tax)),
       el(
-        "dl",
-        { class: "kv" },
-        el("dt", {}, "ค่า p รวม / ความหายากเทียบตลาดปกติ"),
-        el("dd", { class: "mono" }, `${fmtP(a.fused_p)} (F = −log10 p = ${fmtNum(F, 2)})`),
-        el("dt", {}, "ชั้นที่เห็นพ้อง"),
-        el("dd", {}, `${a.agreement}/3 ชั้น มี p < ${AGREEMENT_P}`),
-        el("dt", {}, "ช่วงเวลา"),
-        el("dd", { class: "mono" }, `${fmtUs(a.window[0])} – ${fmtUs(a.window[1])}`),
-        el("dt", {}, "เทคนิคของจุดสูงสุด"),
-        el("dd", { class: "mono" }, a.peak_technique_id || "–"),
-        el("dt", {}, "รหัส"),
-        el("dd", { class: "mono" }, a.alert_id),
+        "p",
+        { class: "detail-meta" },
+        el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
+        el("span", {}, a.symbol),
+        el("span", { class: "muted" }, fmtThaiTime(a.ts_event_us, true)),
+        chipSlot,
       ),
     ),
   );
 
-  side.appendChild(techniqueCard(tax, a.technique_id));
-
-  main.appendChild(
+  // the top: the plain explanation beside the price around the alert
+  const facts = ((a.explanation && a.explanation.facts) || []).map(plainFact).filter(Boolean);
+  const mini = el("div", { class: "chart-mini" });
+  box.appendChild(
     el(
       "div",
-      { class: "card" },
-      el("h3", {}, "หลักฐานรายคุณลักษณะ"),
-      (a.evidence || []).length
-        ? el(
-            "div",
-            { class: "table-wrap" },
-            el(
-              "table",
-              { class: "table" },
-              el("thead", {}, el("tr", {}, el("th", {}, "คุณลักษณะ"), el("th", { class: "num" }, "ค่า"), el("th", { class: "num" }, "น้ำหนัก"))),
-              el(
-                "tbody",
-                {},
-                a.evidence.map(([name, value, contrib]) =>
-                  el(
-                    "tr",
-                    {},
-                    el("td", { class: "mono" }, name),
-                    el("td", { class: "num mono" }, fmtNum(value, 4)),
-                    el("td", { class: "num mono" }, fmtNum(contrib, 2)),
-                  ),
-                ),
-              ),
-            ),
-          )
-        : el("p", { class: "muted" }, "ไม่มีหลักฐานรายคุณลักษณะแนบมา"),
+      { class: "card detail-top" },
+      el(
+        "div",
+        { class: "detail" },
+        el(
+          "div",
+          { class: "detail-side" },
+          el("p", { class: "explain" }, `ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ ${a.symbol} เมื่อ ${fmtThaiTime(a.ts_event_us, true)}`),
+          facts.length
+            ? [el("h3", {}, "สิ่งที่ต่างจากปกติ"), el("ul", { class: "facts" }, facts.map((t) => el("li", {}, t)))]
+            : null,
+          el("p", { class: "small muted" }, "เป็นความผิดปกติทางสถิติเมื่อเทียบกับตลาดปกติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร"),
+        ),
+        el("div", { class: "detail-main" }, el("h3", {}, "ราคาช่วงนั้น แถบสีคือช่วงที่ระบบเตือน"), mini),
+      ),
     ),
   );
 
-  side.appendChild(
+  box.appendChild(
+    feedbackCard(a, (rows) => {
+      state.feedback.set(a.alert_id, rows);
+      clear(chipSlot).appendChild(verdictChip(latestVerdict(rows)) || document.createTextNode(""));
+      renderAlertCards();
+    }),
+  );
+  box.appendChild(techDetails(a, tax));
+  drawDetailChart(mini, a);
+}
+
+// "ดูรายละเอียด": the full explanation, the numbers, the detectors with their layers and p-values,
+// the evidence, the technique card and the provenance; closed by default
+function techDetails(a, tax) {
+  const explanation = (a.explanation && a.explanation.text_th) || a.explanation_th || "";
+  const facts = (a.explanation && a.explanation.facts) || [];
+  const F = nlog10(a.fused_p);
+  const [w0, w1] = Array.isArray(a.window) ? a.window : [null, null];
+  return el(
+    "details",
+    { class: "card tech" },
+    el("summary", {}, "ดูรายละเอียด"),
     el(
       "div",
-      { class: "card" },
-      el("h3", {}, "ตัวตรวจจับและค่า p"),
+      { class: "tech-grid" },
       el(
-        "div",
-        { class: "table-wrap" },
+        "section",
+        { class: "tech-sec" },
+        el("h3", {}, "คำอธิบายเต็ม"),
+        el("p", { class: "small" }, explanation),
+        facts.length ? el("ul", { class: "facts small" }, facts.map((f) => el("li", {}, `${f.label}: ${f.value}`))) : null,
+        el("h3", {}, "สรุปตัวเลข"),
+        kv([
+          ["ค่า p รวม / ความหายากเทียบตลาดปกติ", `${fmtP(a.fused_p)} (F = −log10 p = ${fmtNum(F, 2)})`, "mono"],
+          ["ชั้นที่เห็นพ้อง", `${a.agreement}/3 ชั้น มี p < ${AGREEMENT_P}`],
+          ["เวลาเกิด", fmtUs(a.ts_event_us), "mono"],
+          ["ช่วงเวลา", `${fmtUs(w0)} – ${fmtUs(w1)}`, "mono"],
+          ["สถานะ", STATUS_TH[a.status] || a.status],
+          ["เทคนิค", a.technique_id, "mono"],
+          ["เทคนิคของจุดสูงสุด", a.peak_technique_id || "–", "mono"],
+          ["ที่มาของข้อมูล", el("span", { class: "badge" }, a.provenance)],
+          ["รหัส", a.alert_id, "mono"],
+        ]),
+      ),
+      el(
+        "section",
+        { class: "tech-sec" },
+        el("h3", {}, "ตัวตรวจจับและค่า p"),
         el(
-          "table",
-          { class: "table" },
+          "div",
+          { class: "table-wrap" },
           el(
-            "thead",
-            {},
-            el("tr", {}, el("th", {}, "ตัวตรวจจับ"), el("th", {}, "ชั้น"), el("th", { class: "num" }, "ค่า p"), el("th", {}, "เห็นพ้อง")),
-          ),
-          el(
-            "tbody",
-            {},
-            (a.detectors || []).map((d) =>
-              el(
-                "tr",
-                {},
-                el("td", { class: "mono" }, d.name),
-                el("td", {}, d.layer),
-                el("td", { class: "num mono" }, fmtP(d.p)),
-                el("td", {}, FUSION_LAYERS.includes(d.layer) && d.p < AGREEMENT_P ? "✓" : ""),
+            "table",
+            { class: "table" },
+            el(
+              "thead",
+              {},
+              el("tr", {}, el("th", {}, "ตัวตรวจจับ"), el("th", {}, "ชั้น"), el("th", { class: "num" }, "ค่า p"), el("th", {}, "เห็นพ้อง")),
+            ),
+            el(
+              "tbody",
+              {},
+              (a.detectors || []).map((d) =>
+                el(
+                  "tr",
+                  {},
+                  el("td", { class: "mono" }, d.name),
+                  el("td", {}, d.layer),
+                  el("td", { class: "num" }, fmtP(d.p)),
+                  el("td", {}, FUSION_LAYERS.includes(d.layer) && d.p < AGREEMENT_P ? "✓" : ""),
+                ),
               ),
             ),
           ),
         ),
+        el("h3", {}, "หลักฐานรายคุณลักษณะ"),
+        (a.evidence || []).length
+          ? el(
+              "div",
+              { class: "table-wrap" },
+              el(
+                "table",
+                { class: "table" },
+                el("thead", {}, el("tr", {}, el("th", {}, "คุณลักษณะ"), el("th", { class: "num" }, "ค่า"), el("th", { class: "num" }, "น้ำหนัก"))),
+                el(
+                  "tbody",
+                  {},
+                  a.evidence.map(([name, value, contrib]) =>
+                    el(
+                      "tr",
+                      {},
+                      el("td", { class: "mono" }, name),
+                      el("td", { class: "num" }, fmtNum(value, 4)),
+                      el("td", { class: "num" }, fmtNum(contrib, 2)),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : el("p", { class: "muted small" }, "ไม่มีหลักฐานรายคุณลักษณะแนบมา"),
+        techniqueCard(tax, a.technique_id),
       ),
     ),
   );
-
-  side.appendChild(feedbackCard(a));
-  drawDetailChart(mini, a);
 }
 
 function techniqueCard(tax, techniqueId) {
-  const card = el("div", { class: "card" }, el("h3", {}, "การ์ดเทคนิค"));
+  const card = el("div", { class: "tech-technique" }, el("h3", {}, "การ์ดเทคนิค"));
   const parent = parentTechnique(techniqueId);
   const t = tax && tax[parent];
   if (!t) {
-    card.appendChild(el("p", { class: "muted" }, `ไม่พบ ${techniqueId} ใน taxonomy`));
+    card.appendChild(el("p", { class: "muted small" }, `ไม่พบ ${techniqueId} ใน taxonomy`));
     return card;
   }
   const sub = (t.sub_techniques || []).find((s) => s.id === techniqueId);
@@ -1453,13 +1607,19 @@ function techniqueCard(tax, techniqueId) {
     el("p", { class: "small" }, t.definition_th || ""),
     sub ? el("p", { class: "small" }, el("strong", { class: "mono" }, sub.id), ` ${sub.name_th || ""}: ${sub.definition_th || ""}`) : null,
     el("p", { class: "small muted" }, t.observability_th || ""),
-    el("p", {}, el("a", { href: "#/taxonomy" }, "ดู taxonomy ทั้งหมด")),
+    el("p", { class: "small" }, el("a", { href: "#/taxonomy" }, "ดู taxonomy ทั้งหมด")),
   ]);
   return card;
 }
 
-function feedbackCard(a) {
-  const card = el("div", { class: "card" }, el("h3", {}, "ผลการตรวจของผู้วิเคราะห์"));
+// the verdict: three large buttons (analyst and up), the status in this card, and who said what
+function feedbackCard(a, onSaved) {
+  const card = el(
+    "div",
+    { class: "card verdict-card" },
+    el("h2", { class: "verdict-title" }, "ผลตรวจของคุณ"),
+    el("p", { class: "small muted" }, "ดูกราฟและคำอธิบายแล้ว รายการนี้ผิดปกติจริงหรือไม่"),
+  );
   const analyst = el("input", {
     type: "text",
     maxlength: "64",
@@ -1467,18 +1627,22 @@ function feedbackCard(a) {
     value: storageGet("idsai.analyst") || "",
     "aria-label": "ชื่อผู้วิเคราะห์",
   });
-  const status = el("span", { class: "small" });
-  const list = el("ul", { class: "small" });
+  const status = el("p", { class: "small verdict-status", role: "status" });
+  const list = el("ul", { class: "verdict-history small" });
+  const buttons = {};
   const renderList = (items) => {
     clear(list);
-    for (const f of items || []) {
-      list.appendChild(el("li", {}, `${fmtUs(f.ts_us)} · ${f.analyst}: ${VERDICT_TH[f.verdict] || f.verdict}`));
+    const rows = items || [];
+    for (const f of [...rows].reverse()) {
+      list.appendChild(el("li", {}, `${fmtThaiTime(f.ts_us)} · ${f.analyst}: ${VERDICT_TH[f.verdict] || f.verdict}`));
     }
+    if (!rows.length) list.appendChild(el("li", { class: "muted" }, "ยังไม่มีใครตรวจรายการนี้"));
+    const latest = latestVerdict(rows);
+    for (const v of VERDICTS) buttons[v].setAttribute("aria-pressed", latest === v ? "true" : "false");
   };
-  renderList(a.feedback);
   const send = async (verdict) => {
     if (!can("analyst")) {
-      status.textContent = NEED_ANALYST_TH;
+      status.textContent = VIEWER_VERDICT_TH;
       return;
     }
     // signed in: the server records the session user, so no name is typed or remembered here
@@ -1488,31 +1652,37 @@ function feedbackCard(a) {
       return;
     }
     if (!authOn()) storageSet("idsai.analyst", name);
+    status.classList.remove("inline-error");
     status.textContent = "กำลังบันทึก…";
     try {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
       status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]}`;
       const fresh = await api(`/api/alerts/${encodeURIComponent(a.alert_id)}`);
       renderList(fresh.feedback);
+      if (onSaved) onSaved(fresh.feedback || []);
     } catch (e) {
-      status.textContent = e.message;
+      status.classList.add("inline-error");
+      status.textContent = `บันทึกไม่สำเร็จ (${e.message})`;
     }
   };
-  const gate = can("analyst") ? {} : { disabled: true, title: NEED_ANALYST_TH };
-  if (!can("analyst")) {
+  const allowed = can("analyst");
+  const gate = allowed ? {} : { disabled: true, title: VIEWER_VERDICT_TH };
+  if (!allowed) {
     analyst.disabled = true;
-    analyst.title = NEED_ANALYST_TH;
+    analyst.title = VIEWER_VERDICT_TH;
+  }
+  for (const v of VERDICTS) {
+    buttons[v] = el("button", { type: "button", class: `verdict-btn v-${v}`, ...gate, onclick: () => send(v) }, VERDICT_TH[v]);
   }
   append(card, [
-    el(
-      "div",
-      { class: "feedback" },
-      authOn() ? null : el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
-      ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", ...gate, onclick: () => send(v) }, VERDICT_TH[v])),
-    ),
+    authOn() ? null : el("label", { class: "field verdict-name" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
+    el("div", { class: "verdict-buttons" }, VERDICTS.map((v) => buttons[v])),
+    allowed ? null : el("p", { class: "small muted" }, VIEWER_VERDICT_TH),
     status,
+    el("h3", { class: "verdict-history-title" }, "ประวัติการตรวจ"),
     list,
   ]);
+  renderList(a.feedback);
   return card;
 }
 
@@ -1531,7 +1701,13 @@ async function drawDetailChart(node, a) {
   const times = ((s && s.t_end_us) || []).map((t) => (isNum(t) ? toSec(t) : null));
   const price = seriesData(times, (s && s.close) || []);
   if (!price.length) {
-    node.replaceWith(el("p", { class: "muted small" }, "ไม่มีข้อมูลกราฟของช่วงนี้ในหน่วยความจำของระบบ (เก็บย้อนหลัง 24 ชั่วโมงของการเล่นครั้งนี้)"));
+    node.replaceWith(
+      el(
+        "p",
+        { class: "muted small chart-none" },
+        s ? "ไม่มีข้อมูลราคาของช่วงนี้ในหน่วยความจำ (ระบบเก็บย้อนหลัง 24 ชั่วโมงของการเล่นครั้งนี้)" : "อ่านข้อมูลราคาไม่ได้ ลองเปิดหน้านี้ใหม่อีกครั้ง",
+      ),
+    );
     return;
   }
   const c = LWC.createChart(node, baseChartOptions());
@@ -1554,9 +1730,8 @@ async function drawDetailChart(node, a) {
   line.setData(price);
   shade.setData(shadeData());
   const t = price.reduce((best, p) => (Math.abs(p.time - toSec(a.ts_event_us)) < Math.abs(best - toSec(a.ts_event_us)) ? p.time : best), price[0].time);
-  LWC.createSeriesMarkers(line, [
-    { time: t, position: "aboveBar", shape: "arrowDown", color: sevColor(a.severity), text: a.technique_id },
-  ]);
+  // colour and shape only: the technique id stays in "ดูรายละเอียด"
+  LWC.createSeriesMarkers(line, [{ time: t, position: "aboveBar", shape: "arrowDown", color: sevColor(a.severity) }]);
   c.timeScale().fitContent();
   state.detailChart = {
     remove: () => c.remove(),
@@ -2567,7 +2742,7 @@ function onWsClose(ws, code) {
 function scheduleReconnect() {
   const delay = Math.min(1000 * 2 ** state.wsRetry, 15000);
   state.wsRetry += 1;
-  wsBanner(`การเชื่อมต่อสดหลุด กำลังเชื่อมต่อใหม่ในอีก ${Math.round(delay / 1000)} วินาที (ข้อมูลบนจออาจไม่เป็นปัจจุบัน)`);
+  wsBanner("การเชื่อมต่อหลุด กำลังเชื่อมใหม่…");
   setTimeout(connect, delay);
 }
 
@@ -2644,6 +2819,10 @@ async function boot() {
   bindReplay();
   bindMonitor();
   bindRedTeam();
+  $("alerts-more").addEventListener("click", () => {
+    state.alertsShown += ALERT_PAGE;
+    renderAlertCards();
+  });
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
     $("rt-symbol").value = state.symbol;
@@ -2709,6 +2888,16 @@ if (typeof document !== "undefined") {
     SPEED_CHIPS,
     firstSentence,
     applyRoleGates,
+    ALERT_FILTERS,
+    VERDICT_TH,
+    filterAlerts,
+    onAlert,
+    showToast,
+    showAlert,
+    setRoute: (r) => {
+      state.route = r;
+    },
+    getAlertIds: () => [...state.alerts.keys()],
     fmtThaiTime,
     railHeadline,
     ROLE_TH,

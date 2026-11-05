@@ -668,7 +668,7 @@ def test_resting_styles_are_visible_when_animation_does_not_run():
 
 def test_low_severity_is_grey_and_forest_points_avoid_the_dot_rule():
     css = text("styles.css")
-    assert 'tr[data-sev="low"] td:first-child { border-left-color: var(--dim)' in css
+    assert '.alert-card[data-sev="low"] { border-left-color: var(--dim)' in css
     assert ".rail-row.sev-1 { border-left-color: var(--dim)" in css
     js = text("app.js")
     assert "class: `pt ${tone}`" in js and "class: `dot ${tone}`" not in js
@@ -689,10 +689,10 @@ def test_red_team_miss_is_grey_and_the_banner_class_changes_only_with_state():
 # ---- alerts list and detail ----
 
 
-def test_alert_rows_carry_severity_and_detail_has_two_columns():
+def test_alert_cards_carry_severity_and_detail_has_two_columns():
     js = text("app.js")
-    table = js.split("function renderAlertsTable()")[1].split("\n}\n")[0]
-    assert "data-sev" in table
+    cards = js.split("function alertCard(a)")[1].split("\n}\n")[0]
+    assert "data-sev" in cards
     assert "detail-main" in js and "detail-side" in js
     css = text("styles.css")
     assert "[data-sev=" in css and ".detail-side" in css
@@ -1488,3 +1488,322 @@ def test_home_markers_carry_no_text():
     body = js[js.index("function renderMarkers(") :]
     body = body[: body.index("\n}\n")]
     assert "text:" not in body and "technique_id" not in body
+
+
+# ---- alerts: cards, filters, plain detail, verdict buttons, toasts ----
+
+# a small fake DOM: enough for el(), clear() and the render functions; app.js is required before
+# `document` exists, so it exports its helpers instead of booting
+DOM_HEAD = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: %s });
+const m = require(process.argv[2]);
+class FakeNode {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.attrs = {};
+    this.style = {};
+    this.dataset = {};
+    this.parentNode = null;
+    this.className = "";
+    this.hidden = false;
+    this.disabled = false;
+    this.title = "";
+    this._text = "";
+  }
+  get firstChild() { return this.children[0] || null; }
+  get isConnected() { return true; }
+  appendChild(c) {
+    if (c.parentNode) c.parentNode.removeChild(c);
+    c.parentNode = this;
+    this.children.push(c);
+    return c;
+  }
+  removeChild(c) {
+    const i = this.children.indexOf(c);
+    if (i >= 0) this.children.splice(i, 1);
+    c.parentNode = null;
+    return c;
+  }
+  remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+  replaceWith(n) {
+    const p = this.parentNode;
+    if (!p) return;
+    p.children[p.children.indexOf(this)] = n;
+    n.parentNode = p;
+    this.parentNode = null;
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  hasAttribute(k) { return k in this.attrs; }
+  removeAttribute(k) { delete this.attrs[k]; }
+  addEventListener() {}
+  get classList() {
+    const n = this;
+    const list = () => n.className.split(/\s+/).filter(Boolean);
+    return {
+      contains: (c) => list().includes(c),
+      add: (c) => { if (!list().includes(c)) n.className = [...list(), c].join(" "); },
+      remove: (c) => { n.className = list().filter((x) => x !== c).join(" "); },
+      toggle: (c, on) => {
+        const want = on === undefined ? !list().includes(c) : !!on;
+        const rest = list().filter((x) => x !== c);
+        n.className = (want ? [...rest, c] : rest).join(" ");
+        return want;
+      },
+    };
+  }
+  get textContent() {
+    return this.tagName === "#TEXT" ? this._text : this.children.map((c) => c.textContent).join("");
+  }
+  set textContent(v) {
+    this.children = [];
+    if (this.tagName === "#TEXT") this._text = String(v);
+    else if (String(v) !== "") this.appendChild(textNode(v));
+  }
+  querySelectorAll() { return []; }
+  querySelector() { return null; }
+  focus() {}
+}
+function textNode(v) {
+  const t = new FakeNode("#text");
+  t._text = String(v);
+  return t;
+}
+const nodes = {};
+globalThis.Node = FakeNode;
+globalThis.getComputedStyle = () => ({ getPropertyValue: () => "" });
+globalThis.window = { localStorage: { getItem: () => null, setItem() {} } };
+globalThis.location = { hash: "#/alerts" };
+globalThis.document = {
+  createElement: (t) => new FakeNode(t),
+  createTextNode: textNode,
+  getElementById: (id) => (nodes[id] ||= Object.assign(new FakeNode("div"), { id })),
+  querySelectorAll: () => [],
+  documentElement: new FakeNode("html"),
+  body: new FakeNode("body"),
+};
+const timers = [];
+globalThis.setTimeout = (f, ms) => { timers.push({ f, ms }); return timers.length; };
+globalThis.clearTimeout = () => {};
+const walk = (n, pred, out = []) => {
+  if (pred(n)) out.push(n);
+  for (const c of n.children) walk(c, pred, out);
+  return out;
+};
+const tick = () => new Promise((r) => setImmediate(r));
+"""
+
+FILTER_BODY = r"""
+const S = 1e6;
+const v = (verdict, ts) => ({ alert_id: "x", verdict, analyst: "ann", ts_us: ts });
+const list = [
+  { alert_id: "a", ts_event_us: 1 * S, feedback: [] },
+  { alert_id: "b", ts_event_us: 4 * S, feedback: [v("tp", 1)] },
+  { alert_id: "c", ts_event_us: 3 * S, feedback: [v("tp", 1), v("fp", 2)] },
+  { alert_id: "d", ts_event_us: 2 * S, feedback: [v("fp", 1), v("unsure", 2)] },
+  { alert_id: "e", ts_event_us: 5 * S },
+];
+const ids = (k) => m.filterAlerts(list, k).map((a) => a.alert_id);
+assert.deepStrictEqual(ids("all"), ["e", "b", "c", "d", "a"]);
+assert.deepStrictEqual(ids("open"), ["e", "a"]);
+assert.deepStrictEqual(ids("tp"), ["b"]);
+assert.deepStrictEqual(ids("fp"), ["c"]);  // the latest verdict counts, not the first
+assert.deepStrictEqual(ids("nope"), ["e", "b", "c", "d", "a"]);
+assert.deepStrictEqual(list.map((a) => a.alert_id), ["a", "b", "c", "d", "e"]);  // not mutated
+// "latest" is by time, whatever order the rows came in
+const late = [{ alert_id: "f", ts_event_us: 1, feedback: [v("fp", 9), v("tp", 3)] }];
+assert.deepStrictEqual(m.filterAlerts(late, "fp").map((a) => a.alert_id), ["f"]);
+assert.deepStrictEqual(m.ALERT_FILTERS, [
+  { key: "all", label: "ทั้งหมด" }, { key: "open", label: "ยังไม่ตรวจ" },
+  { key: "tp", label: "ผิดปกติจริง" }, { key: "fp", label: "เตือนผิด" }]);
+assert.deepStrictEqual(m.VERDICT_TH, { tp: "ผิดปกติจริง", fp: "เตือนผิด", unsure: "ไม่แน่ใจ" });
+console.log("ok");
+"""
+
+
+def _run_dom(tmp_path, reduced, body, *args):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "dom.js"
+    script.write_text(DOM_HEAD % reduced + body, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js"), *map(str, args)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=tmp_path,
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr + r.stdout
+
+
+def test_filter_alerts(tmp_path):
+    _run_dom(tmp_path, "false", FILTER_BODY)
+
+
+TOAST_BODY = r"""
+(async () => {
+  const S = 1e6;
+  const at = Date.UTC(2021, 0, 18, 16, 30) * 1000;
+  const mk = (id) => ({ alert_id: id, symbol: "STEEMBTC", ts_event_us: at, technique_id: "MM-T001",
+    severity: 2, status: "open", window: [at - 60 * S, at] });
+  const root = document.getElementById("toast-root");
+  m.onAlert(mk("a1"));
+  assert.strictEqual(root.children.length, 1);
+  const t = root.children[0];
+  const said = t.textContent;
+  assert.ok(said.includes("STEEMBTC") && said.includes("23:30 น."), said);
+  assert.ok(!/MM-T|UTC/.test(t.textContent), t.textContent);
+  assert.strictEqual(walk(t, (n) => n.getAttribute("href") === "#/alerts/a1").length, 1);
+  assert.ok(!t.classList.contains("slide"), "no slide under reduced motion");
+  // an update of an alert already known is not new
+  m.onAlert({ ...mk("a1"), status: "updated" });
+  assert.strictEqual(root.children.length, 1);
+  // it goes after 5 s
+  const five = timers.filter((x) => x.ms === 5000);
+  assert.strictEqual(five.length, 1);
+  five[0].f();
+  assert.strictEqual(root.children.length, 0);
+  // at most three at once: the oldest makes room
+  for (const id of ["b1", "b2", "b3", "b4"]) m.onAlert(mk(id));
+  assert.strictEqual(root.children.length, 3);
+  const hrefs = root.children.map((c) => walk(c, (n) => n.tagName === "A")[0].getAttribute("href"));
+  assert.deepStrictEqual(hrefs, ["#/alerts/b2", "#/alerts/b3", "#/alerts/b4"]);
+  // a resync re-reads everything: alerts it brings are not news
+  globalThis.fetch = async (path) => ({ ok: true, status: 200, json: async () =>
+    (path.startsWith("/api/alerts") ? [mk("c1"), mk("c2"), mk("b1")]
+      : path.startsWith("/api/feedback") ? [] : {}) });
+  m.onAlert({ event: "resync" });
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.ok(m.getAlertIds().includes("c1"));
+  assert.strictEqual(root.children.length, 3);
+  m.onAlert({ event: "alerts_reset", deleted: ["c1"] });
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.ok(!m.getAlertIds().includes("c1"));
+  assert.strictEqual(root.children.length, 3);
+  // the cards carry the Thai time, never a technique id or UTC
+  const list = document.getElementById("alerts-list");
+  assert.strictEqual(document.getElementById("alerts-empty").hidden, true);
+  assert.ok(!/MM-T|UTC/.test(list.textContent), list.textContent);
+  assert.ok(list.textContent.includes("23:30 น."), list.textContent);
+  m.onAlert({ event: "alerts_reset", deleted: m.getAlertIds() });
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.strictEqual(document.getElementById("alerts-empty").hidden, false);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+SLIDE_BODY = r"""
+const root = document.getElementById("toast-root");
+m.showToast("ข้อความ", null);
+assert.strictEqual(root.children.length, 1);
+assert.ok(root.children[0].classList.contains("slide"));
+assert.strictEqual(walk(root, (n) => n.tagName === "A").length, 0);  // no link without an href
+console.log("ok");
+"""
+
+
+def test_new_alert_toasts_once_and_never_on_resync(tmp_path):
+    _run_dom(tmp_path, "true", TOAST_BODY)
+    _run_dom(tmp_path, "false", SLIDE_BODY)
+
+
+def test_toast_markup_and_motion():
+    html, css = text("index.html"), text("styles.css")
+    root = re.search(r'<div id="toast-root"[^>]*>', html)
+    assert root and 'aria-live="polite"' in root.group(0)
+    assert re.search(r"\.toast\.slide\s*\{[^}]*animation", css)
+    reduced = css.split("prefers-reduced-motion: reduce")[1]
+    assert "animation: none" in reduced
+    banner = re.search(r'<div id="ws-banner"[^>]*>', html).group(0)
+    assert "ws-toast" in banner and "hidden" in banner
+    js = text("app.js")
+    ws = js[js.index("function scheduleReconnect(") :]
+    assert 'wsBanner("การเชื่อมต่อหลุด กำลังเชื่อมใหม่…")' in ws[: ws.index("\n}\n")]
+
+
+def test_alerts_page_markup():
+    html = text("index.html")
+    page = re.search(r'<section id="page-alerts".*?</section>', html, re.S).group(0)
+    for i in ("alerts-filters", "alerts-list", "alerts-empty", "alerts-error"):
+        assert f'id="{i}"' in page, i
+    empty = re.search(r'<div id="alerts-empty"[^>]*>.*?</div>', page, re.S).group(0)
+    assert re.sub(r"<[^>]+>", "", empty).strip() == "ยังไม่มีการแจ้งเตือน ระบบกำลังเฝ้าดูอยู่"
+    assert "<table" not in page and "UTC" not in page
+    css = text("styles.css")
+    assert '.alert-card[data-sev="low"] { border-left-color: var(--dim)' in css
+    assert '.alert-card[data-sev="mid"] { border-left-color: var(--amber)' in css
+    assert '.alert-card[data-sev="high"] { border-left-color: var(--red)' in css
+    # filter chips are flat pills, not glass
+    chip = re.search(r"(?m)^\.filter-chip\s*\{([^}]*)\}", css).group(1)
+    assert "var(--r-pill)" in chip and "backdrop-filter" not in chip
+
+
+DETAIL_BODY = r"""
+(async () => {
+  const fs = require("fs");
+  const detail = JSON.parse(fs.readFileSync(process.argv[3], "utf-8"));
+  const tax = JSON.parse(fs.readFileSync(process.argv[4], "utf-8"));
+  globalThis.fetch = async (path) => ({ ok: true, status: 200, json: async () =>
+    (path.startsWith("/api/taxonomy") ? tax : detail) });
+  const box = document.getElementById("alert-detail");
+  for (const role of ["analyst", "viewer"]) {
+    m.setMe({ username: "u", role, auth_enabled: true, prefs: {} });
+    m.setRoute("alert");
+    await m.showAlert(detail.alert_id);
+    const techs = walk(box, (n) => n.tagName === "DETAILS" && n.classList.contains("tech"));
+    assert.strictEqual(techs.length, 1);
+    const tech = techs[0];
+    assert.ok(!tech.hasAttribute("open"), "details start closed");
+    assert.strictEqual(tech.children[0].tagName, "SUMMARY");
+    assert.strictEqual(tech.children[0].textContent, "ดูรายละเอียด");
+    const inside = tech.textContent;
+    for (const want of ["4.0e-4", "rule.x", "MM-T001", "replay", "UTC"]) {
+      assert.ok(inside.includes(want), want);
+    }
+    assert.ok(walk(tech, (n) => n.textContent === "rule").length >= 1, "the layer is shown");
+    // outside the details: plain Thai, no ids, p-values, layers, provenance or UTC
+    tech.parentNode.removeChild(tech);
+    const plain = box.textContent;
+    for (const bad of ["MM-T", "UTC", "4.0e-4", "rule.x", "replay", "p ≈", "robust", "z_"]) {
+      assert.ok(!plain.includes(bad), `${bad} in: ${plain}`);
+    }
+    assert.ok(!/[A-Za-z]/.test(plain.replaceAll("TESTBTC", "")), plain);
+    assert.ok(plain.includes("23:30:05 น."), plain);
+    const btns = walk(box, (n) => n.tagName === "BUTTON");
+    assert.deepStrictEqual(btns.map((b) => b.textContent), ["ผิดปกติจริง", "เตือนผิด", "ไม่แน่ใจ"]);
+    for (const b of btns) assert.strictEqual(b.hasAttribute("disabled"), role === "viewer", role);
+  }
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_alert_detail_markup(tmp_path, client):
+    ts = 1610987405 * 1_000_000  # 2021-01-18 16:30:05 UTC, 23:30:05 Thai time
+    alert = Alert(
+        alert_id="a1",
+        ts_event_us=ts,
+        symbol="TESTBTC",
+        technique_id="MM-T001",
+        severity=2,
+        status="open",
+        fused_p=0.0004,
+        detectors=[DetectorRef(name="rule.x", layer="rule", p=0.01, score=1.0)],
+        agreement=2,
+        evidence=[("z_quote_vol_60", 7.1, 7.1), ("ret_60", 0.042, 0.5)],
+        window=(ts - 60_000_000, ts),
+        dedup_key="k",
+        suppress_for_s=60,
+        config_hash="h",
+        model_versions={},
+        provenance="replay",
+    )
+    client.app.state.idsai.store.upsert_alert(alert)
+    detail = tmp_path / "detail.json"
+    detail.write_text(json.dumps(client.get("/api/alerts/a1").json()), encoding="utf-8")
+    tax = tmp_path / "tax.json"
+    tax.write_text(json.dumps(client.get("/api/taxonomy").json()), encoding="utf-8")
+    _run_dom(tmp_path, "true", DETAIL_BODY, detail, tax)
