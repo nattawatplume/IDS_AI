@@ -901,21 +901,106 @@ def prepare_live(
     return state, lambda: pipeline.run(warmup_then_live(archive, sensor))
 
 
+def auth_enabled(args: argparse.Namespace, cfg: Settings) -> bool:
+    """`--auth` / `--no-auth` override `auth.enabled` in the config."""
+    flag = getattr(args, "auth", None)
+    return cfg.auth.enabled if flag is None else bool(flag)
+
+
+def check_serve_auth(host: str, enabled: bool, store: "Store") -> None:
+    if not enabled and host.lower() not in LOOPBACK_BINDS:
+        raise CliError(
+            f"ไม่เปิดให้เครื่องอื่นเข้าถึงที่ {host} เพราะยังไม่เปิดระบบล็อกอิน "
+            "ใช้ --auth (หรือ auth.enabled: true ในไฟล์ค่าตั้ง) หรือเปิดเฉพาะเครื่องนี้ด้วย --host 127.0.0.1"
+        )
+    if enabled and not store.has_enabled_admin():
+        raise CliError(
+            "เปิดระบบล็อกอินแล้วแต่ยังไม่มีผู้ดูแลที่ใช้งานได้ สร้างด้วย: "
+            "uv run idsai user add <ชื่อ> --role admin"
+        )
+
+
+def read_new_password(args: argparse.Namespace) -> str:
+    """The password from one stdin line (`--password-stdin`) or two getpass prompts; never argv."""
+    from idsai.product.auth import check_password
+
+    if getattr(args, "password_stdin", False):
+        pw = sys.stdin.readline().rstrip("\r\n")
+    else:
+        import getpass
+
+        pw = getpass.getpass("รหัสผ่าน: ")
+        if getpass.getpass("พิมพ์รหัสผ่านอีกครั้ง: ") != pw:
+            raise CliError("รหัสผ่านสองครั้งไม่ตรงกัน")
+    try:
+        check_password(pw)
+    except ValueError as e:
+        raise CliError(str(e)) from None
+    return pw
+
+
+def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
+    from idsai.product.auth import check_username, hash_password
+
+    act = args.user_cmd
+    with _app_store(cfg) as store:
+
+        def audit(action: str, target: str, detail: dict | None = None) -> None:
+            store.add_audit(_now_us(), None, "cli", action, target, detail)
+
+        if act == "list":
+            users = store.list_users()
+            if not users:
+                _say("ยังไม่มีผู้ใช้ (สร้างด้วย uv run idsai user add <ชื่อ> --role admin)")
+            for u in users:
+                flag = "  disabled" if u["disabled"] else ""
+                shown = f"  ({u['display_name']})" if u["display_name"] else ""
+                _say(f"{u['username']}{shown}  {u['role']}{flag}")
+            return 0
+        name = args.username
+        if act == "add":
+            try:
+                check_username(name)
+            except ValueError as e:
+                raise CliError(str(e)) from None
+            if len(args.display_name) > 64:
+                raise CliError("ชื่อที่แสดงต้องไม่เกิน 64 ตัวอักษร")
+            if store.get_user_by_name(name) is not None:
+                raise CliError(f"มีผู้ใช้ชื่อ {name} แล้ว")
+            pw = read_new_password(args)
+            store.add_user(name, args.display_name, args.role, hash_password(pw), _now_us())
+            audit("user_add", name, {"role": args.role})
+            _say(f"สร้างผู้ใช้ {name} ({args.role}) แล้ว")
+            return 0
+        if store.get_user_by_name(name) is None:  # the store no-ops silently on an unknown name
+            raise CliError(f"ไม่พบผู้ใช้ {name}")
+        if act == "role":
+            store.set_role(name, args.role)
+            audit("user_role", name, {"role": args.role})
+            _say(f"ตั้งสิทธิ์ของ {name} เป็น {args.role} แล้ว")
+        elif act in ("disable", "enable"):
+            store.set_disabled(name, act == "disable")
+            audit(f"user_{act}", name)
+            _say(f"{'ปิด' if act == 'disable' else 'เปิด'}ใช้งาน {name} แล้ว")
+        else:  # passwd
+            store.set_password(name, hash_password(read_new_password(args)))
+            audit("user_passwd", name)
+            _say(f"เปลี่ยนรหัสผ่านของ {name} แล้ว (ออกจากระบบทุกอุปกรณ์)")
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     from idsai.product.api import create_app
 
     host, port = resolve_bind(args, cfg)
-    if host.lower() not in LOOPBACK_BINDS:
-        _warn(
-            f"คำเตือน: เปิดให้เครื่องอื่นเข้าถึงที่ {host} ได้ แต่ระบบนี้ไม่มีการล็อกอิน "
-            "ใครที่เข้าถึงเครือข่ายนี้ได้จะเห็นและกดปุ่มต่างๆ ได้ทั้งหมด"
-        )
+    use_auth = auth_enabled(args, cfg)
+    with _app_store(cfg) as store:
+        check_serve_auth(host, use_auth, store)
         if host in WILDCARD_BINDS:
             _warn(
                 f"หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ {', '.join(allowed_hosts(host))} "
                 "ถ้าให้เครื่องอื่นเรียก ให้เปิดด้วย --host <IP ของเครื่องนี้> แล้วเรียกผ่าน IP นั้น"
             )
-    with _app_store(cfg) as store:
         if args.mode == "live":
             state, background = prepare_live(args, cfg, store)
         else:
@@ -1045,6 +1130,35 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default=DEFAULT_HOST, help="ค่าเริ่มต้น 127.0.0.1 (เฉพาะเครื่องนี้)")
     s.add_argument("--port", type=int, default=None, help="ค่าเริ่มต้น 8800")
     s.add_argument("--speed", type=_speed, default=DEFAULT_SPEED, help="replay: เท่าของเวลาจริง (60)")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument(
+        "--auth", dest="auth", action="store_const", const=True, default=None,
+        help="บังคับล็อกอิน (แทน auth.enabled)",
+    )
+    g.add_argument(
+        "--no-auth", dest="auth", action="store_const", const=False,
+        help="ไม่ล็อกอิน (แทน auth.enabled)",
+    )
+
+    from idsai.product.auth import ROLES
+
+    s = sub.add_parser("user", help="จัดการบัญชีผู้ใช้ (รหัสผ่านถามแบบซ่อน ไม่รับทาง argv)")
+    us = s.add_subparsers(dest="user_cmd", required=True, metavar="<action>", parser_class=_Parser)
+    u = us.add_parser("add", help="สร้างผู้ใช้")
+    u.add_argument("username")
+    u.add_argument("--role", choices=ROLES, default="viewer")
+    u.add_argument("--display-name", default="", help="ชื่อที่แสดง (ไม่เกิน 64 ตัว)")
+    u.add_argument("--password-stdin", action="store_true", help="อ่านรหัสผ่านหนึ่งบรรทัดจาก stdin")
+    us.add_parser("list", help="แสดงผู้ใช้ทั้งหมด")
+    u = us.add_parser("passwd", help="เปลี่ยนรหัสผ่าน (ออกจากระบบทุกอุปกรณ์)")
+    u.add_argument("username")
+    u.add_argument("--password-stdin", action="store_true", help="อ่านรหัสผ่านหนึ่งบรรทัดจาก stdin")
+    u = us.add_parser("role", help="เปลี่ยนสิทธิ์")
+    u.add_argument("username")
+    u.add_argument("role", choices=ROLES)
+    for act, hlp in (("disable", "ปิดใช้งานบัญชี"), ("enable", "เปิดใช้งานบัญชี")):
+        u = us.add_parser(act, help=hlp)
+        u.add_argument("username")
     return p
 
 
@@ -1056,6 +1170,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, Settings], int]] = {
     "report": cmd_report,
     "demo-pack": cmd_demo_pack,
     "serve": cmd_serve,
+    "user": cmd_user,
 }
 
 

@@ -51,6 +51,12 @@ live:
   train_days: 7
   bar_grace_s: 2
 
+auth:
+  enabled: false        # true = sign-in required (a public bind needs it)
+  cookie_secure: false  # true when served over https
+  remember_days: 30
+  session_hours: 12
+
 detectors: [rules, stat.robust_z, stat.cusum, ai.autoencoder_trade]
 mode: replay
 port: 8800

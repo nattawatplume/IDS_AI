@@ -135,6 +135,13 @@ class LiveCfg(_Cfg):
     bar_grace_s: int = 2
 
 
+class AuthCfg(_Cfg):
+    enabled: bool = False
+    cookie_secure: bool = False
+    remember_days: int = Field(default=30, gt=0)
+    session_hours: int = Field(default=12, gt=0)
+
+
 class Settings(_Cfg):
     paths: PathsCfg = PathsCfg()
     features: FeatureCfg = FeatureCfg()
@@ -143,6 +150,7 @@ class Settings(_Cfg):
     splits: SplitsCfg
     ae: AECfg = AECfg()
     live: LiveCfg = LiveCfg()
+    auth: AuthCfg = AuthCfg()
     detectors: list[str] = ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"]
     mode: Literal["replay", "live"] = "replay"
     port: int = 8800

@@ -546,11 +546,11 @@ def test_serve_replay_wires_the_demo_pack(demo, monkeypatch, capsys):
     assert "11:30 UTC" in out  # 30 min before the 12:00 label
 
 
-def test_serve_on_another_host_warns_about_no_login(demo, monkeypatch, capsys):
+def test_serve_on_another_host_is_refused_without_login(demo, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_server", lambda app, host, port, bg: bg().close())
     argv = ["--config", str(demo.cfg_path), "serve", "--host", "0.0.0.0", "--port", "9001"]
-    assert cli.main(argv) == 0
-    assert "ไม่มีการล็อกอิน" in capsys.readouterr().err
+    assert cli.main(argv) == 1
+    assert "ล็อกอิน" in capsys.readouterr().err
 
 
 def test_run_server_cancels_the_pipeline_and_bounds_the_shutdown(monkeypatch):
@@ -620,7 +620,11 @@ def test_loopback_hosts_do_not_warn(host, demo, monkeypatch, capsys):
 
 def test_wildcard_bind_explains_which_hosts_are_accepted(demo, monkeypatch, capsys):
     monkeypatch.setattr(cli, "run_server", lambda app, h, port, bg: bg().close())
-    assert cli.main(["--config", str(demo.cfg_path), "serve", "--host", "0.0.0.0"]) == 0
+    s = load_settings(demo.cfg_path)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        if not store.has_enabled_admin():
+            store.add_user("root", "", "admin", "x", 1)
+    assert cli.main(["--config", str(demo.cfg_path), "serve", "--host", "0.0.0.0", "--auth"]) == 0
     assert "--host <IP" in capsys.readouterr().err
 
 
