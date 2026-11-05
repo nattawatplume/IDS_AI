@@ -107,6 +107,15 @@ function safeNext(raw) {
   return raw;
 }
 
+// the session is gone (expired, signed out elsewhere): forget the user, or route() would send
+// the sign-in page straight back to `next`, and every page that fetches would 401 in a loop
+function sessionLost() {
+  setMe(null);
+  const chip = typeof document !== "undefined" ? $("user-chip") : null;
+  if (chip) chip.hidden = true;
+  goLogin();
+}
+
 function goLogin() {
   const here = location.hash || "";
   if (here.startsWith("#/login")) return;
@@ -191,7 +200,7 @@ async function api(path, options) {
   } catch (e) {
     body = null;
   }
-  if (res.status === 401 && path !== "/api/auth/login") goLogin(); // a failed sign-in must not bounce to itself
+  if (res.status === 401 && path !== "/api/auth/login") sessionLost(); // a failed sign-in must not bounce to itself
   if (!res.ok) {
     const detail = body && body.detail;
     const msg =
@@ -2243,13 +2252,23 @@ function connect() {
     }
   });
   ws.addEventListener("message", safely((ev) => dispatch(JSON.parse(ev.data))));
-  ws.addEventListener("close", () => {
-    setLive(false);
-    if (state.ws === ws) scheduleReconnect();
-  });
+  ws.addEventListener("close", (ev) => onWsClose(ws, ev && ev.code));
   ws.addEventListener("error", () => {
     /* close follows */
   });
+}
+
+function onWsClose(ws, code) {
+  setLive(false);
+  if (state.ws !== ws) return;
+  if (code === 4401) {
+    // no valid session: retrying cannot help. Sign in, then enterApp connects again
+    state.ws = null;
+    state.wsRetry = 0;
+    sessionLost();
+    return;
+  }
+  scheduleReconnect();
 }
 
 function scheduleReconnect() {
@@ -2288,6 +2307,7 @@ async function enterApp() {
     route();
     loadAlerts();
     loadSeries();
+    if (!state.ws) connect(); // the 4401 close left no socket
     return;
   }
   state.started = true;
@@ -2369,5 +2389,12 @@ if (typeof document !== "undefined") {
     can,
     setMe,
     savePrefs,
+    api,
+    onWsClose,
+    getMe: () => state.me,
+    setWs: (w) => {
+      state.ws = w;
+    },
+    getWs: () => state.ws,
   };
 }

@@ -711,7 +711,7 @@ def test_mutating_buttons_check_can():
 def test_401_goes_to_login_with_next():
     js = text("app.js")
     body = js[js.index("async function api(") : js.index("function postJson(")]
-    assert "401" in body and "goLogin(" in body
+    assert "401" in body and "sessionLost(" in body
     assert "/api/auth/login" in body  # a failed sign-in must not bounce back to itself
 
 
@@ -804,3 +804,58 @@ def test_auth_off_keeps_todays_flow():
     login = re.search(r'<section id="page-login"[^>]*>', html)
     assert login and "hidden" in login.group(0)
 
+
+
+SESSION_LOST_HEAD = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: false });
+const m = require(process.argv[2]);
+globalThis.document = { getElementById: () => null, body: { classList: { toggle() {} } } };
+globalThis.location = { hash: "#/eval" };
+const reply = (status) => async () => ({ ok: status < 400, status, json: async () => ({ detail: "กรุณาเข้าสู่ระบบ" }) });
+"""
+
+SESSION_LOST_BODY = r"""
+(async () => {
+  // a 401 mid-session forgets the user and lands on the sign-in route with next kept
+  m.setMe({ username: "ann", role: "viewer", auth_enabled: true, prefs: {} });
+  globalThis.fetch = reply(401);
+  await assert.rejects(() => m.api("/api/experiments"), (e) => e.status === 401);
+  assert.strictEqual(m.getMe(), null, "stale user must be cleared or route() bounces back");
+  assert.strictEqual(location.hash, "#/login?next=%23%2Feval");
+  // already on the sign-in route: a further 401 does not rewrite it (no next chain)
+  await assert.rejects(() => m.api("/api/alerts"));
+  assert.strictEqual(location.hash, "#/login?next=%23%2Feval");
+  // a failed sign-in is not a lost session
+  m.setMe({ role: "viewer", auth_enabled: true });
+  location.hash = "#/login";
+  await assert.rejects(() => m.api("/api/auth/login", { method: "POST" }));
+  assert.notStrictEqual(m.getMe(), null);
+  // WS close 4401: no reconnect, user cleared, sign-in route; other codes keep the socket for the retry loop
+  location.hash = "#/alerts";
+  const ws = {};
+  m.setWs(ws);
+  m.onWsClose(ws, 4401);
+  assert.strictEqual(m.getWs(), null);
+  assert.strictEqual(m.getMe(), null);
+  assert.strictEqual(location.hash, "#/login?next=%23%2Falerts");
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_lost_session_routes_to_login_and_ws_4401_stops_reconnecting(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "lost.js"
+    script.write_text(SESSION_LOST_HEAD + SESSION_LOST_BODY, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+    js = text("app.js")
+    close = js[js.index("function onWsClose(") : js.index("function scheduleReconnect(")]
+    assert "4401" in close and close.index("4401") < close.index("scheduleReconnect()")
+    enter = js[js.index("async function enterApp(") : js.index("async function boot(")]
+    assert "if (!state.ws) connect();" in enter  # signing in again reopens the socket
