@@ -123,3 +123,18 @@ def test_limiter_first_locked_hit_once_per_lock():
         lim.fail("bob")
     assert lim.locked("bob")
     assert lim.first_locked_hit("bob")  # a new lock: reported again
+
+
+def test_prune_expiring_a_lock_also_clears_its_failures():
+    now = [0.0]
+    lim = LoginLimiter(clock=lambda: now[0])
+    for _ in range(5):
+        lim.fail("bob")
+    assert lim.locked("bob")
+    now[0] += lim.lock_s + 2  # past the lock, still inside the window, > 1 s since last prune
+    lim.locked("x")  # the prune expires bob's lock
+    for _ in range(4):
+        lim.fail("bob")
+    assert not lim.locked("bob")
+    lim.fail("bob")
+    assert lim.locked("bob")

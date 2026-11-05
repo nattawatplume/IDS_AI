@@ -111,6 +111,7 @@ class LoginLimiter:
         for name, until in list(self._locked_until.items()):
             if now >= until:
                 del self._locked_until[name]
+                self._fails.pop(name, None)  # as in `locked`: an expired lock starts afresh
                 self._hit.discard(name)
         for name, ts in list(self._fails.items()):
             if name not in self._locked_until and all(now - t >= self.window_s for t in ts):
