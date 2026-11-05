@@ -88,7 +88,8 @@ def test_password_never_accepted_as_argument():
 
 
 def test_user_commands_write_audit_as_cli(cfg_path, monkeypatch):
-    run(cfg_path, "user", "add", "dave", "--password-stdin", stdin=PW + "\n", monkeypatch=monkeypatch)
+    run(cfg_path, "user", "add", "dave", "--password-stdin",
+        stdin=PW + "\n", monkeypatch=monkeypatch)
     run(cfg_path, "user", "role", "dave", "admin")
     run(cfg_path, "user", "disable", "dave")
     run(cfg_path, "user", "enable", "dave")
