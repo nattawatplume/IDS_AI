@@ -380,6 +380,14 @@ button.selected { outline: 2px solid var(--amber); outline-offset: 1px; }
 .whiskers .bar { fill: var(--amber); opacity: 0.85; }
 .whiskers .ci { stroke: var(--ink); stroke-width: 1.5; }
 
+/* ---- taxonomy rows ---- */
+#taxonomy-body.cards { display: block; }
+.tax-row { border-top: 1px solid var(--line); padding: 12px 0; min-width: 0; }
+.tax-row h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.tax-row p { margin: 2px 0; }
+.tax-subs { margin: 6px 0 2px; padding-left: 18px; }
+.prose h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 24px 0 8px; }
+
 /* ---- prose / footer ---- */
 .prose { max-width: 760px; }
 .prose li { margin: 4px 0; }

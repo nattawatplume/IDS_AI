@@ -531,3 +531,17 @@ def test_ablation_notes_cell_wraps():
     js = text("app.js")
     assert 'class: "small muted notes"' in js and "หมายเหตุวิธีวัด" in js
     assert 'el("details"' in js and "uv run idsai report" in js
+
+
+def test_long_explanations_live_on_about():
+    html = text("index.html")
+    mon = re.search(r'<section id="page-monitor".*?</section>', html, re.S).group(0)
+    for m in re.finditer(r'<p\b([^>]*)>(.*?)</p>', mon, re.S):
+        if 'id="chart-info-body"' in m.group(1):
+            continue
+        assert len(" ".join(m.group(2).split())) <= 120, m.group(2)[:60]
+    about = re.search(r'<section id="page-about".*?</section>', html, re.S).group(0)
+    assert "τ saturated" in about or "τ-saturated" in about
+    assert "งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้" in about
+    assert "autocorrelation" in about
+    assert "อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้" in about

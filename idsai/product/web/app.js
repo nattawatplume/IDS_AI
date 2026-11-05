@@ -1765,14 +1765,14 @@ async function showTaxonomy() {
     box.appendChild(
       el(
         "div",
-        { class: "card" },
+        { class: "tax-row" },
         el("h3", {}, el("span", { class: "mono" }, id), ` ${t.name_th || ""}`),
         el("p", { class: "small" }, t.definition_th || ""),
         el("p", { class: "small muted" }, t.observability_th || ""),
         (t.sub_techniques || []).length
           ? el(
               "ul",
-              { class: "small" },
+              { class: "small tax-subs" },
               t.sub_techniques.map((s) => el("li", {}, el("span", { class: "mono" }, s.id), ` ${s.name_th || ""}: ${s.definition_th || ""}`)),
             )
           : null,
