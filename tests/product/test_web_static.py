@@ -233,7 +233,8 @@ def test_live_mode_gates_replay_and_red_team():
 
 def test_red_team_form_starts_disabled_until_health_confirms_the_mode():
     html = text("index.html")
-    form = html[html.index('<form id="redteam-form"') : html.index("</form>")]
+    start = html.index('<form id="redteam-form"')
+    form = html[start : html.index("</form>", start)]
     controls = re.findall(r"<(?:select|input|button)\b[^>]*>", form)
     assert len(controls) == 5
     for tag in controls:
@@ -658,3 +659,148 @@ def test_long_explanations_live_on_about():
     assert "งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้" in about
     assert "autocorrelation" in about
     assert "อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้" in about
+
+
+# ---- sign-in, roles, prefs, activity ----
+
+
+def test_login_and_activity_routes_present():
+    html, js = text("index.html"), text("app.js")
+    for route in ("#/login", "#/activity"):
+        assert route in html + js, route
+    ids = set(re.findall(r'\bid="([\w-]+)"', html))
+    for i in (
+        "page-login", "login-form", "login-user", "login-pass", "login-remember", "login-error",
+        "user-chip", "user-name", "user-role", "btn-logout",
+        "page-activity", "audit-body", "audit-user", "audit-action", "audit-more", "audit-empty",
+    ):
+        assert i in ids, i
+    assert 'data-route="activity"' in html
+    for page in ("page-login", "page-activity"):
+        assert f'"{page}"' in js, page
+    assert 'type="password"' in html and 'autocomplete="current-password"' in html
+    assert "จดจำฉัน" in html and "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" not in html  # the server words the error
+
+
+def test_login_page_has_no_signup():
+    low = (text("index.html") + text("app.js")).lower()
+    for word in ("สมัคร", "sign up", "signup", "sign-up", "register", "ลืมรหัส"):
+        assert word not in low, word
+
+
+def test_activity_renders_audit_fields_as_text_only():
+    js = text("app.js")
+    body = js[js.index("function renderAudit(") : js.index("async function loadAudit(")]
+    assert '"href"' not in body and "href:" not in body and "innerHTML" not in body
+    assert 'el("td"' in body
+    assert 'data-route="activity"' in text("index.html")
+
+
+def test_mutating_buttons_check_can():
+    js = text("app.js")
+    control = js[js.index("async function control(") : js.index("function bindReplay(")]
+    assert 'can("analyst")' in control and control.index('can("analyst")') < control.index("postJson(")
+    fb = js[js.index("function feedbackCard(") : js.index("async function drawDetailChart(")]
+    assert 'can("analyst")' in fb and fb.index('can("analyst")') < fb.index("postJson(")
+    rt = js[js.index('$("redteam-form").addEventListener') : js.index("function addInjection(")]
+    assert 'can("analyst")' in rt and rt.index('can("analyst")') < rt.index("postJson(")
+    gates = js[js.index("function applyRoleGates(") :]
+    assert "ต้องเป็น analyst" in js and "title" in gates[:1500]
+
+
+def test_401_goes_to_login_with_next():
+    js = text("app.js")
+    body = js[js.index("async function api(") : js.index("function postJson(")]
+    assert "401" in body and "goLogin(" in body
+    assert "/api/auth/login" in body  # a failed sign-in must not bounce back to itself
+
+
+AUTH_BODY = r"""
+const s = m.safeNext;
+assert.strictEqual(s("#/eval"), "#/eval");
+assert.strictEqual(s("#/alerts/abc%20d"), "#/alerts/abc%20d");
+for (const bad of ["https://x", "//x", "", null, undefined, "eval", "javascript:alert(1)", "#/login?next=%23%2Fx", "#/\nx", 42]) {
+  assert.strictEqual(s(bad), "#/monitor", String(bad));
+}
+"""
+
+CAN_BODY = r"""
+m.setMe(null);
+assert.strictEqual(m.can("viewer"), false);
+for (const [role, want] of [
+  ["viewer", [true, false, false]],
+  ["analyst", [true, true, false]],
+  ["admin", [true, true, true]],
+]) {
+  m.setMe({ role });
+  const got = ["viewer", "analyst", "admin"].map((n) => m.can(n));
+  assert.deepStrictEqual(got, want, role);
+}
+m.setMe({ role: "admin" });
+assert.strictEqual(m.can("root"), false);
+m.setMe({ role: "root" });
+assert.strictEqual(m.can("viewer"), false);
+"""
+
+PREFS_HEAD = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: false });
+const m = require(process.argv[2]);
+"""
+PREFS_BODY = r"""
+const store = {};
+globalThis.window = { localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } } };
+const calls = [];
+globalThis.fetch = async (path, opts) => { calls.push([path, opts]); return { ok: true, status: 200, json: async () => ({}) }; };
+(async () => {
+  m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
+  m.savePrefs({ symbol: "ETHUSDT" });
+  assert.strictEqual(store["idsai.symbol"], "ETHUSDT");
+  await new Promise((r) => setTimeout(r, 700));
+  assert.strictEqual(calls.length, 0, "auth off never calls the server");
+  m.setMe({ username: "ann", role: "viewer", auth_enabled: true, prefs: {} });
+  m.savePrefs({ theme: "light" });
+  m.savePrefs({ eval_budget: 2 });
+  assert.strictEqual(calls.length, 0, "debounced");
+  await new Promise((r) => setTimeout(r, 700));
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0][0], "/api/me/prefs");
+  assert.strictEqual(calls[0][1].method, "PUT");
+  assert.deepStrictEqual(JSON.parse(calls[0][1].body), { theme: "light", eval_budget: 2 });
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_next_param_only_accepts_hash_routes(tmp_path):
+    _run_motion(tmp_path, "false", AUTH_BODY)
+
+
+def test_can_matches_role_order(tmp_path):
+    _run_motion(tmp_path, "false", CAN_BODY)
+
+
+def test_prefs_save_is_debounced_and_local_when_auth_is_off(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "prefs.js"
+    script.write_text(
+        PREFS_HEAD + PREFS_BODY,
+        encoding="utf-8",
+    )
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+def test_auth_off_keeps_todays_flow():
+    js = text("app.js")
+    assert "auth_enabled" in js
+    html = text("index.html")
+    chip = re.search(r'<details id="user-chip"[^>]*>', html)
+    assert chip and "hidden" in chip.group(0)  # only shown once /api/me says auth is on
+    login = re.search(r'<section id="page-login"[^>]*>', html)
+    assert login and "hidden" in login.group(0)
+

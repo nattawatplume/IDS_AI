@@ -20,6 +20,7 @@
       <a href="#/eval" data-route="eval">Eval</a>
       <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
       <a href="#/about" data-route="about">About</a>
+      <a href="#/activity" data-route="activity" id="tab-activity" hidden>Activity</a>
     </nav>
     <div class="topbar-stats">
       <div class="stat" title="เวลาเหตุการณ์">
@@ -40,6 +41,21 @@
           <span id="budget-text" class="mono small">–</span>
         </span>
       </div>
+      <details id="user-chip" class="stat user-chip" hidden>
+        <summary>
+          <span id="user-name" class="small">–</span>
+          <span id="user-role" class="badge">–</span>
+        </summary>
+        <div class="user-menu">
+          <div class="menu-label">ธีม</div>
+          <div class="menu-row">
+            <button type="button" class="mini" data-theme-choice="auto">AUTO</button>
+            <button type="button" class="mini" data-theme-choice="dark">DARK</button>
+            <button type="button" class="mini" data-theme-choice="light">LIGHT</button>
+          </div>
+          <button id="btn-logout" type="button">ออกจากระบบ</button>
+        </div>
+      </details>
       <button id="theme-toggle" class="theme-toggle" type="button" aria-label="ธีม">AUTO</button>
     </div>
   </header>
@@ -47,6 +63,28 @@
   <div id="ws-banner" class="banner banner-warn" role="status" hidden></div>
 
   <main>
+    <!-- Sign-in -->
+    <section id="page-login" class="page" hidden>
+      <form id="login-form" class="card login-card" autocomplete="on">
+        <h1 class="login-mark">MARKET·IDS</h1>
+        <p class="muted small">เข้าสู่ระบบเพื่อดูแดชบอร์ด</p>
+        <label class="field">
+          <span>ชื่อผู้ใช้</span>
+          <input id="login-user" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required>
+        </label>
+        <label class="field">
+          <span>รหัสผ่าน</span>
+          <input id="login-pass" type="password" name="password" autocomplete="current-password" maxlength="256" required>
+        </label>
+        <label class="check">
+          <input id="login-remember" type="checkbox">
+          <span>จดจำฉัน</span>
+        </label>
+        <p id="login-error" class="small login-error" role="alert" hidden></p>
+        <button id="login-submit" type="submit" class="primary">เข้าสู่ระบบ</button>
+      </form>
+    </section>
+
     <!-- Monitor -->
     <section id="page-monitor" class="page" hidden>
       <div class="toolbar">
@@ -177,6 +215,33 @@
       <h1>ATT&amp;CK for Markets</h1>
       <p class="muted small">กรอบเทคนิคที่ทีมสร้างขึ้นเพื่อการศึกษา (ไม่ใช่มาตรฐานทางการ)</p>
       <div id="taxonomy-body" class="cards"></div>
+    </section>
+
+    <!-- Activity (admin) -->
+    <section id="page-activity" class="page" hidden>
+      <h1>Activity</h1>
+      <p class="muted small">บันทึกการใช้งานของผู้ใช้ทุกคน เรียงใหม่สุดก่อน (เฉพาะ admin)</p>
+      <div class="toolbar">
+        <label class="field">
+          <span>ผู้ใช้</span>
+          <input id="audit-user" type="text" maxlength="64" placeholder="ทั้งหมด" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>การกระทำ</span>
+          <select id="audit-action"></select>
+        </label>
+        <span id="audit-status" class="muted small"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="audit-table">
+          <thead>
+            <tr><th>เวลา (UTC)</th><th>ผู้ใช้</th><th>การกระทำ</th><th>เป้าหมาย</th><th>รายละเอียด</th></tr>
+          </thead>
+          <tbody id="audit-body"></tbody>
+        </table>
+      </div>
+      <p id="audit-empty" class="empty" hidden>ยังไม่มีบันทึก</p>
+      <p><button id="audit-more" type="button">โหลดเก่ากว่านี้</button></p>
     </section>
 
     <!-- About -->

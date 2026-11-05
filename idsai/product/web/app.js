@@ -69,7 +69,50 @@ const state = {
   railIds: null, // alert ids already on the rail; null until the first render
   alertCount: 0,
   layersOpen: false,
+  me: null, // GET /api/me: { username, display_name, role, auth_enabled, prefs }
+  started: false, // the data boot (symbols, series, alerts, websocket) has run
+  evalBudget: null, // saved Eval budget (string, as the option value)
+  audit: [], // Activity rows already loaded, newest first
+  auditDone: false,
 };
+
+// ------------------------------------------------------------------ roles + sign-in state
+
+const ROLE_ORDER = ["viewer", "analyst", "admin"];
+const AUDIT_ACTIONS = [
+  "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
+  "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
+];
+const NEED_ANALYST_TH = "ต้องเป็น analyst";
+const DEFAULT_ROUTE = "#/monitor";
+
+function setMe(me) {
+  state.me = me && typeof me === "object" ? me : null;
+}
+
+// mirrors auth.role_at_least: an unknown role or an unknown need is never allowed
+function can(need) {
+  const role = state.me && state.me.role;
+  const have = ROLE_ORDER.indexOf(role);
+  const want = ROLE_ORDER.indexOf(need);
+  return have >= 0 && want >= 0 && have >= want;
+}
+
+// only an in-page route may be the sign-in return target: never a URL, never the sign-in page itself
+function safeNext(raw) {
+  if (typeof raw !== "string" || !raw.startsWith("#/") || raw.startsWith("#/login")) return DEFAULT_ROUTE;
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw.charCodeAt(i) < 32) return DEFAULT_ROUTE;
+  }
+  return raw;
+}
+
+function goLogin() {
+  const here = location.hash || "";
+  if (here.startsWith("#/login")) return;
+  const next = safeNext(here);
+  location.hash = next === DEFAULT_ROUTE && !here.startsWith(DEFAULT_ROUTE) ? "#/login" : `#/login?next=${encodeURIComponent(next)}`;
+}
 
 // ------------------------------------------------------------------ helpers
 
@@ -148,6 +191,7 @@ async function api(path, options) {
   } catch (e) {
     body = null;
   }
+  if (res.status === 401 && path !== "/api/auth/login") goLogin(); // a failed sign-in must not bounce to itself
   if (!res.ok) {
     const detail = body && body.detail;
     const msg =
@@ -198,6 +242,58 @@ function storageSet(key, value) {
   }
 }
 
+// ------------------------------------------------------------------ prefs
+
+const PREF_KEYS = { theme: "theme", symbol: "idsai.symbol", eval_budget: "idsai.eval_budget" };
+let prefsPending = {};
+let prefsTimer = null;
+
+function authOn() {
+  return !!(state.me && state.me.auth_enabled);
+}
+
+// the saved choices: the account's when auth is on, this browser's otherwise
+function loadedPrefs() {
+  if (authOn()) return state.me.prefs || {};
+  const out = {};
+  const theme = storageGet(PREF_KEYS.theme);
+  if (theme) out.theme = theme;
+  const symbol = storageGet(PREF_KEYS.symbol);
+  if (symbol) out.symbol = symbol;
+  const raw = storageGet(PREF_KEYS.eval_budget);
+  if (raw && Number.isFinite(Number(raw))) out.eval_budget = Number(raw);
+  return out;
+}
+
+function flushPrefs() {
+  const body = prefsPending;
+  prefsPending = {};
+  prefsTimer = null;
+  if (!Object.keys(body).length) return;
+  api("/api/me/prefs", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then(() => {
+      if (state.me) state.me.prefs = { ...state.me.prefs, ...body };
+    })
+    .catch((e) => console.warn("dashboard: prefs not saved:", e.message));
+}
+
+// auth off: this browser's localStorage, at once. auth on: the account, one PUT 500 ms after the last change
+function savePrefs(patch) {
+  if (!authOn()) {
+    for (const [k, v] of Object.entries(patch || {})) {
+      if (PREF_KEYS[k]) storageSet(PREF_KEYS[k], String(v));
+    }
+    return;
+  }
+  prefsPending = { ...prefsPending, ...patch };
+  if (prefsTimer !== null) clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(flushPrefs, 500);
+}
+
 function provenanceBadges(text) {
   const parts = String(text || "")
     .split("/")
@@ -227,16 +323,28 @@ function applyTheme(choice) {
     btn.textContent = c.toUpperCase();
     btn.title = `ธีม: ${c}`;
   }
+  for (const b of document.querySelectorAll("[data-theme-choice]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === c));
+  }
   storageSet("theme", c);
   restyleCharts();
+}
+
+// a theme change the user made: apply it and remember it with the account
+function chooseTheme(choice) {
+  applyTheme(choice);
+  savePrefs({ theme: currentTheme() });
 }
 
 function bindTheme() {
   const saved = storageGet("theme");
   applyTheme(THEMES.includes(saved) ? saved : "auto");
   $("theme-toggle").addEventListener("click", () => {
-    applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
   });
+  for (const b of document.querySelectorAll("[data-theme-choice]")) {
+    b.addEventListener("click", () => chooseTheme(b.dataset.themeChoice));
+  }
 }
 
 // ------------------------------------------------------------------ motion + presenter keys
@@ -322,7 +430,7 @@ function onPresenterKey(ev) {
     const next = playToggleAction(state.mode, state.replaying);
     if (next) control(next);
   } else if (act === "theme") {
-    applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
   } else {
     location.hash = PAGE_ORDER[Number(act.slice(5)) - 1];
   }
@@ -405,6 +513,31 @@ function setMode(mode) {
   for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
     node.disabled = !allowed;
   }
+  applyRoleGates();
+}
+
+// UI convenience only: the server enforces the role on every route
+function applyRoleGates() {
+  const ok = can("analyst");
+  const gate = (node) => {
+    if (ok) node.removeAttribute("title");
+    else node.title = NEED_ANALYST_TH;
+  };
+  for (const id of ["btn-play", "btn-pause", "speed-select", "seek-input", "btn-seek"]) {
+    const node = $(id);
+    node.disabled = !ok;
+    gate(node);
+  }
+  const allowed = redTeamAllowed(state.mode) && ok;
+  for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
+    node.disabled = !allowed;
+    gate(node);
+  }
+  for (const node of document.querySelectorAll(".feedback button, .feedback input")) {
+    node.disabled = !ok;
+    gate(node);
+  }
+  $("tab-activity").hidden = !can("admin");
 }
 
 function eventNowUs() {
@@ -779,6 +912,10 @@ function onScore(p) {
 
 async function control(action, value) {
   const status = $("replay-status");
+  if (!can("analyst")) {
+    status.textContent = NEED_ANALYST_TH;
+    return;
+  }
   status.textContent = "…";
   try {
     const body = value === undefined ? { action } : { action, value };
@@ -1112,7 +1249,7 @@ function feedbackCard(a) {
     type: "text",
     maxlength: "64",
     placeholder: "ชื่อผู้วิเคราะห์",
-    value: storageGet("idsai.analyst") || "",
+    value: storageGet("idsai.analyst") || (authOn() ? state.me.display_name || "" : ""),
     "aria-label": "ชื่อผู้วิเคราะห์",
   });
   const status = el("span", { class: "small" });
@@ -1125,6 +1262,10 @@ function feedbackCard(a) {
   };
   renderList(a.feedback);
   const send = async (verdict) => {
+    if (!can("analyst")) {
+      status.textContent = NEED_ANALYST_TH;
+      return;
+    }
     const name = analyst.value.trim();
     if (!name) {
       status.textContent = "ใส่ชื่อผู้วิเคราะห์ก่อน";
@@ -1141,12 +1282,17 @@ function feedbackCard(a) {
       status.textContent = e.message;
     }
   };
+  const gate = can("analyst") ? {} : { disabled: true, title: NEED_ANALYST_TH };
+  if (!can("analyst")) {
+    analyst.disabled = true;
+    analyst.title = NEED_ANALYST_TH;
+  }
   append(card, [
     el(
       "div",
       { class: "feedback" },
       el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
-      ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", onclick: () => send(v) }, VERDICT_TH[v])),
+      ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", ...gate, onclick: () => send(v) }, VERDICT_TH[v])),
     ),
     status,
     list,
@@ -1213,6 +1359,10 @@ function bindRedTeam() {
     ev.preventDefault();
     if (!redTeamAllowed(state.mode)) return;
     const status = $("rt-status");
+    if (!can("analyst")) {
+      status.textContent = NEED_ANALYST_TH;
+      return;
+    }
     const offset = Number($("rt-offset").value);
     if (!Number.isFinite(offset) || offset <= 0 || offset > 3600) {
       status.textContent = "offset ต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
@@ -1234,7 +1384,7 @@ function bindRedTeam() {
     } catch (e) {
       status.textContent = e.message;
     } finally {
-      $("rt-submit").disabled = !redTeamAllowed(state.mode);
+      $("rt-submit").disabled = !(redTeamAllowed(state.mode) && can("analyst"));
     }
   });
 }
@@ -1570,7 +1720,8 @@ async function showEval() {
     { "aria-label": "งบการแจ้งเตือน" },
     sorted.map((b) => el("option", { value: b }, `${b} ครั้ง/สัญลักษณ์-วัน`)),
   );
-  select.value = sorted.includes("2") ? "2" : sorted[0] || "";
+  const saved = state.evalBudget;
+  select.value = sorted.includes(saved) ? saved : sorted.includes("2") ? "2" : sorted[0] || "";
   const tables = el("div");
   box.appendChild(el("div", { class: "toolbar" }, el("label", { class: "field" }, el("span", {}, "งบการแจ้งเตือน"), select)));
   box.appendChild(tables);
@@ -1580,7 +1731,14 @@ async function showEval() {
       tables.appendChild(experimentTable(exp, variants, select.value));
     }
   };
-  select.addEventListener("change", draw);
+  select.addEventListener("change", () => {
+    draw();
+    const b = Number(select.value);
+    if (Number.isFinite(b)) {
+      state.evalBudget = String(b);
+      savePrefs({ eval_budget: b });
+    }
+  });
   draw();
 
   const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
@@ -1828,6 +1986,8 @@ async function showTaxonomy() {
 // ------------------------------------------------------------------ router
 
 const PAGES = {
+  login: "page-login",
+  activity: "page-activity",
   monitor: "page-monitor",
   alerts: "page-alerts",
   alert: "page-alert",
@@ -1849,13 +2009,24 @@ function parseRoute() {
     }
     return { name: "alert", id };
   }
-  const name = hash.replace(/^#\//, "");
-  return { name: PAGES[name] ? name : "monitor" };
+  const [path, query] = hash.replace(/^#\//, "").split("?");
+  if (path === "login") return { name: "login", next: safeNext(new URLSearchParams(query || "").get("next")) };
+  return { name: PAGES[path] ? path : "monitor" };
 }
 
 function route() {
   const r = parseRoute();
+  if (r.name === "activity" && !can("admin")) {
+    // a convenience redirect: GET /api/audit answers 403 for anyone else anyway
+    location.hash = DEFAULT_ROUTE;
+    return;
+  }
+  if (r.name === "login" && state.me) {
+    location.hash = r.next; // already signed in (or auth is off): nothing to do here
+    return;
+  }
   state.route = r.name;
+  document.body.classList.toggle("login-mode", r.name === "login");
   if (r.name !== "alert") destroyDetailChart();
   for (const [name, id] of Object.entries(PAGES)) $(id).hidden = name !== r.name;
   const tab = r.name === "alert" ? "alerts" : r.name;
@@ -1871,7 +2042,175 @@ function route() {
     showEval();
   } else if (r.name === "taxonomy") {
     showTaxonomy();
+  } else if (r.name === "activity") {
+    showActivity();
+  } else if (r.name === "login") {
+    $("login-user").focus();
   }
+}
+
+// ------------------------------------------------------------------ sign-in, user chip
+
+let loginFails = 0;
+
+function showLoginError(text) {
+  const box = $("login-error");
+  box.hidden = !text;
+  box.textContent = text || "";
+}
+
+function renderUserChip() {
+  const chip = $("user-chip");
+  const on = authOn();
+  chip.hidden = !on;
+  $("theme-toggle").hidden = on; // with an account the theme lives in the user menu
+  if (!on) return;
+  $("user-name").textContent = state.me.display_name || state.me.username;
+  $("user-role").textContent = String(state.me.role || "").toUpperCase();
+}
+
+// the sign-in answer or /api/me: apply the account, its saved choices, and the role gates
+function adoptMe(me) {
+  setMe(me);
+  const prefs = loadedPrefs();
+  if (prefs.theme && THEMES.includes(prefs.theme)) applyTheme(prefs.theme);
+  if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
+  renderUserChip();
+  applyRoleGates();
+}
+
+async function loadMe() {
+  try {
+    adoptMe(await api("/api/me"));
+    return true;
+  } catch (e) {
+    setMe(null);
+    return false;
+  }
+}
+
+function bindLogin() {
+  $("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("login-submit");
+    const username = $("login-user").value.trim();
+    const password = $("login-pass").value;
+    if (!username || !password) return;
+    btn.disabled = true;
+    showLoginError("");
+    try {
+      const me = await postJson("/api/auth/login", {
+        username,
+        password,
+        remember: $("login-remember").checked,
+      });
+      loginFails = 0;
+      $("login-pass").value = "";
+      const next = parseRoute().next || DEFAULT_ROUTE;
+      adoptMe({ ...me, auth_enabled: true });
+      location.hash = next;
+      await enterApp();
+    } catch (e) {
+      loginFails += 1;
+      $("login-pass").value = "";
+      showLoginError(
+        loginFails >= 5 ? `${e.message} · ลองผิดหลายครั้ง ระบบอาจล็อกชั่วคราว รอ 1 นาทีแล้วลองใหม่` : e.message,
+      );
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("btn-logout").addEventListener("click", async () => {
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } catch (e) {
+      /* the session is gone either way */
+    }
+    location.hash = "#/login";
+    location.reload(); // drop every bit of the last user's data from memory
+  });
+  document.addEventListener("click", (ev) => {
+    const chip = $("user-chip");
+    if (chip.open && !chip.contains(ev.target)) chip.open = false;
+  });
+}
+
+// ------------------------------------------------------------------ activity (admin)
+
+const AUDIT_PAGE = 100;
+
+function auditFilters() {
+  return { user: $("audit-user").value.trim().toLowerCase(), action: $("audit-action").value };
+}
+
+// the server may send the detail as JSON text or already parsed: either way it is shown as plain text
+function auditDetail(d) {
+  if (d === null || d === undefined || d === "") return "–";
+  if (typeof d === "string") return d;
+  try {
+    return JSON.stringify(d);
+  } catch (e) {
+    return "–";
+  }
+}
+
+// every field is untrusted (a failed sign-in's username is whatever was typed): text nodes only, no links
+function renderAudit() {
+  const want = auditFilters();
+  const rows = state.audit.filter(
+    (r) => (!want.user || String(r.username || "").toLowerCase().includes(want.user)) && (!want.action || r.action === want.action),
+  );
+  const body = clear($("audit-body"));
+  for (const r of rows) {
+    body.appendChild(
+      el(
+        "tr",
+        {},
+        el("td", { class: "mono when" }, fmtUs(r.ts_us)),
+        el("td", {}, r.username === null || r.username === undefined || r.username === "" ? "–" : r.username),
+        el("td", { class: "mono" }, r.action),
+        el("td", {}, r.target || "–"),
+        el("td", { class: "mono detail" }, auditDetail(r.detail)),
+      ),
+    );
+  }
+  $("audit-empty").hidden = rows.length > 0;
+  $("audit-more").hidden = state.auditDone;
+  $("audit-status").textContent = `${rows.length} จาก ${state.audit.length} รายการที่โหลดแล้ว`;
+}
+
+async function loadAudit(older) {
+  const q = new URLSearchParams({ limit: String(AUDIT_PAGE) });
+  const last = state.audit[state.audit.length - 1];
+  if (older && last) q.set("before_us", String(last.ts_us));
+  const btn = $("audit-more");
+  btn.disabled = true;
+  try {
+    const rows = await api(`/api/audit?${q}`);
+    const list = Array.isArray(rows) ? rows : [];
+    state.audit = older ? state.audit.concat(list) : list;
+    state.auditDone = list.length < AUDIT_PAGE;
+  } catch (e) {
+    $("audit-status").textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+  renderAudit();
+}
+
+function showActivity() {
+  const sel = $("audit-action");
+  if (!sel.options.length) {
+    sel.appendChild(el("option", { value: "" }, "ทั้งหมด"));
+    for (const a of AUDIT_ACTIONS) sel.appendChild(el("option", { value: a }, a));
+  }
+  loadAudit(false);
+}
+
+function bindActivity() {
+  $("audit-user").addEventListener("input", renderAudit);
+  $("audit-action").addEventListener("change", renderAudit);
+  $("audit-more").addEventListener("click", () => loadAudit(true));
 }
 
 // ------------------------------------------------------------------ websocket
@@ -1941,32 +2280,25 @@ function fillSymbols() {
   $("kpi-symbol").textContent = state.symbol || "–";
 }
 
-async function boot() {
-  window.addEventListener("hashchange", safely(route));
-  bindTheme();
-  document.addEventListener("keydown", safely(onPresenterKey));
-  bindReplay();
-  bindMonitor();
-  bindRedTeam();
-  $("symbol-select").addEventListener("change", (ev) => {
-    state.symbol = ev.target.value;
-    $("rt-symbol").value = state.symbol;
-    $("kpi-symbol").textContent = state.symbol || "–";
-    state.alertCount = 0;
-    renderAlertsKpi();
+// the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
+async function enterApp() {
+  if (state.started) {
+    // signed in again mid-session: the same page, fresh data
+    applyRoleGates();
+    route();
+    loadAlerts();
     loadSeries();
-  });
-  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  if (media && media.addEventListener) media.addEventListener("change", safely(restyleCharts));
-  if (!LWC) console.warn("dashboard: the chart library did not load");
-
+    return;
+  }
+  state.started = true;
   route();
   try {
     state.symbols = await api("/api/symbols");
   } catch (e) {
     state.symbols = [];
   }
-  state.symbol = state.symbols[0] || null;
+  const savedSymbol = loadedPrefs().symbol;
+  state.symbol = state.symbols.includes(savedSymbol) ? savedSymbol : state.symbols[0] || null;
   fillSymbols();
   try {
     renderHealth(await api("/api/health"));
@@ -1977,6 +2309,35 @@ async function boot() {
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
+}
+
+async function boot() {
+  window.addEventListener("hashchange", safely(route));
+  bindTheme();
+  bindLogin();
+  bindActivity();
+  document.addEventListener("keydown", safely(onPresenterKey));
+  bindReplay();
+  bindMonitor();
+  bindRedTeam();
+  $("symbol-select").addEventListener("change", (ev) => {
+    state.symbol = ev.target.value;
+    $("rt-symbol").value = state.symbol;
+    $("kpi-symbol").textContent = state.symbol || "–";
+    savePrefs({ symbol: state.symbol });
+    state.alertCount = 0;
+    renderAlertsKpi();
+    loadSeries();
+  });
+  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  if (media && media.addEventListener) media.addEventListener("change", safely(restyleCharts));
+  if (!LWC) console.warn("dashboard: the chart library did not load");
+
+  if (!(await loadMe())) {
+    route(); // the 401 already sent the page to the sign-in route
+    return;
+  }
+  await enterApp();
 }
 
 if (typeof document !== "undefined") {
@@ -2004,5 +2365,9 @@ if (typeof document !== "undefined") {
     noteReplayAction,
     getReplaying: () => state.replaying,
     PAGE_ORDER,
+    safeNext,
+    can,
+    setMe,
+    savePrefs,
   };
 }

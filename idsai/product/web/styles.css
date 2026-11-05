@@ -484,3 +484,52 @@ details.notes-box summary { cursor: pointer; font-size: 11px; text-transform: up
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* ------------------------------------------------------------------ sign-in, user chip, activity */
+.user-chip { position: relative; }
+.user-chip summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+.user-chip summary::-webkit-details-marker { display: none; }
+.user-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(220px, calc(100vw - 32px));
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  z-index: 20;
+}
+.menu-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); }
+.menu-row { display: flex; gap: 6px; }
+.menu-row button[aria-pressed="true"] { color: var(--ink); border-color: var(--amber); }
+@media (max-width: 760px) {
+  .user-chip { position: static; }
+  .user-menu { left: 16px; right: 16px; width: auto; }
+}
+
+/* signed out: only the brand stays in the top bar */
+body.login-mode .tabs,
+body.login-mode .topbar-stats,
+body.login-mode #mode-badge,
+body.login-mode #ws-banner { display: none; }
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 360px;
+  margin: 12vh auto 0;
+  padding: 24px;
+}
+.login-card .field > input { width: 100%; }
+.login-mark { margin: 0; font-size: 15px; letter-spacing: 0.14em; }
+.login-error { margin: 0; padding: 6px 10px; border: 1px solid var(--red); border-radius: var(--radius); color: var(--red); }
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.check input { min-height: 0; width: 16px; height: 16px; padding: 0; accent-color: var(--amber); }
+td.detail { max-width: 360px; font-size: 11px; color: var(--dim); overflow-wrap: anywhere; white-space: normal; }
+.tabs a[hidden] { display: none; }
+td.when { white-space: nowrap; }
