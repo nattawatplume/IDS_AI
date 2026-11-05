@@ -348,9 +348,21 @@ button.selected { outline: 2px solid var(--amber); outline-offset: 1px; }
 .table tbody tr.clickable { cursor: pointer; }
 .table tbody tr.clickable:hover { background: var(--bg); }
 .table tbody tr.gone { opacity: 0.45; }
+/* alerts list: dense rows, severity stripe on the left, hover state */
+#alerts-table th, #alerts-table td { padding: 5px 10px; }
+#alerts-table tbody tr td:first-child { border-left: 3px solid var(--line); }
+#alerts-table tbody tr[data-sev="low"] td:first-child { border-left-color: var(--amber); }
+#alerts-table tbody tr[data-sev="mid"] td:first-child { border-left-color: var(--amber); }
+#alerts-table tbody tr[data-sev="high"] td:first-child { border-left-color: var(--red); }
+#alerts-table tbody tr:hover, #alerts-table tbody tr:focus-visible { background: color-mix(in srgb, var(--ink) 6%, transparent); }
 
 /* ---- alert detail ---- */
 .detail-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.detail { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 0 24px; align-items: start; }
+.detail-main, .detail-side { min-width: 0; }
+.detail .card { background: none; border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 12px 0; margin: 0; }
+.detail .card h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 0 0 8px; }
+@media (max-width: 760px) { .detail { grid-template-columns: minmax(0, 1fr); } }
 .explain { font-size: 15px; line-height: 1.6; }
 .facts { margin: 8px 0 0; padding-left: 18px; }
 .feedback { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }

@@ -815,6 +815,10 @@ function alertHref(id) {
   return `#/alerts/${encodeURIComponent(id)}`;
 }
 
+function sevKey(severity) {
+  return severity >= 3 ? "high" : severity === 2 ? "mid" : "low";
+}
+
 function renderAlertsTable() {
   const body = clear($("alerts-body"));
   const items = sortedAlerts();
@@ -823,7 +827,7 @@ function renderAlertsTable() {
   for (const a of items) {
     const row = el(
       "tr",
-      { class: "clickable", tabindex: "0" },
+      { class: "clickable", tabindex: "0", "data-sev": sevKey(a.severity) },
       el("td", {}, el("span", { class: `sev sev-${a.severity}` }, SEVERITY_TH[a.severity] || a.severity)),
       el("td", { class: "mono" }, a.technique_id),
       el("td", {}, a.symbol),
@@ -914,9 +918,16 @@ async function showAlert(id) {
     ),
   );
 
+  const detail = el("div", { class: "detail" });
+  const main = el("div", { class: "detail-main" });
+  const side = el("div", { class: "detail-side" });
+  detail.appendChild(main);
+  detail.appendChild(side);
+  box.appendChild(detail);
+
   const explanation = (a.explanation && a.explanation.text_th) || a.explanation_th || "";
   const facts = (a.explanation && a.explanation.facts) || [];
-  box.appendChild(
+  side.appendChild(
     el(
       "div",
       { class: "card" },
@@ -938,12 +949,9 @@ async function showAlert(id) {
   );
   const mini = el("div", { class: "chart-mini" });
   chartCard.appendChild(mini);
-  box.appendChild(chartCard);
+  main.appendChild(chartCard);
 
-  const grid = el("div", { class: "grid-2" });
-  box.appendChild(grid);
-
-  grid.appendChild(
+  side.appendChild(
     el(
       "div",
       { class: "card" },
@@ -965,9 +973,9 @@ async function showAlert(id) {
     ),
   );
 
-  grid.appendChild(techniqueCard(tax, a.technique_id));
+  side.appendChild(techniqueCard(tax, a.technique_id));
 
-  grid.appendChild(
+  main.appendChild(
     el(
       "div",
       { class: "card" },
@@ -999,7 +1007,7 @@ async function showAlert(id) {
     ),
   );
 
-  grid.appendChild(
+  side.appendChild(
     el(
       "div",
       { class: "card" },
@@ -1034,7 +1042,7 @@ async function showAlert(id) {
     ),
   );
 
-  box.appendChild(feedbackCard(a));
+  side.appendChild(feedbackCard(a));
   drawDetailChart(mini, a);
 }
 

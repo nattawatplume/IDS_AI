@@ -448,3 +448,15 @@ def test_ws_close_turns_live_dot_off():
     assert "function setLive(" in js
     close = js.split('addEventListener("close"')[1][:400]
     assert "setLive(false)" in close
+
+
+# ---- alerts list and detail ----
+
+
+def test_alert_rows_carry_severity_and_detail_has_two_columns():
+    js = text("app.js")
+    table = js.split("function renderAlertsTable()")[1].split("\n}\n")[0]
+    assert "data-sev" in table
+    assert "detail-main" in js and "detail-side" in js
+    css = text("styles.css")
+    assert "[data-sev=" in css and ".detail-side" in css
