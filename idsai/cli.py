@@ -33,6 +33,7 @@ import polars as pl
 from idsai.config import Settings, config_hash, load_settings
 
 if TYPE_CHECKING:  # the store pulls in DuckDB: imported only where a command needs it
+    from idsai.data.replay import Replayer
     from idsai.data.store import Store
 
 S_US = 1_000_000
@@ -798,6 +799,32 @@ def _load(models: Path, cfg: Settings) -> tuple[list[Any], Any, dict[str, Any]]:
         raise CliError(str(e)) from e
 
 
+def looping(
+    state: Any, pipeline: Any, make_replayer: "Callable[[float], Replayer]", start_us: int
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """`serve --loop`: play `state.replayer` to its end, then again from `start_us`, forever.
+
+    An ended replay cannot seek, so each round gets a new replayer from the original trades (no
+    Red-Team injection survives a round) at the old one's speed. Its first event is
+    `("seek", start_us)`: the pipeline drops its state and the replay alerts from `start_us` on.
+    The routes read `state.replayer` per call, so swapping it is enough.
+    """
+    import asyncio
+
+    async def run() -> None:
+        while True:
+            rp = state.replayer
+            await pipeline.run(rp)
+            rp = make_replayer(rp.speed)
+            rp.seek(start_us)
+            state.replayer = rp
+            state.injected.clear()
+            pipeline.bus.publish("alerts", {"event": "replay_restarted", "t_us": start_us})
+            await asyncio.sleep(0)  # a round that ends at once never starves the server
+
+    return run
+
+
 def prepare_replay(
     args: argparse.Namespace, cfg: Settings, store: "Store"
 ) -> tuple[Any, Callable[[], Coroutine[Any, Any, None]]]:
@@ -811,7 +838,12 @@ def prepare_replay(
     dets, chief, doc = _load(models, cfg)
     d0 = _day_start_us(day)
     trades = store.read_trades(symbol, d0 - DAY_US, d0 + DAY_US)
-    replayer = Replayer(trades, speed=args.speed, start_us=start, preroll_from_us=d0 - DAY_US)
+
+    def make_replayer(speed: float) -> Replayer:
+        # `trades` is never modified: injections change only a replayer's own copy
+        return Replayer(trades, speed=speed, start_us=start, preroll_from_us=d0 - DAY_US)
+
+    replayer = make_replayer(args.speed)
     pipeline = StreamPipeline(cfg, store, dets, chief, Bus(), "replay")
     state = AppState(
         cfg,
@@ -836,6 +868,9 @@ def prepare_replay(
         f"เล่นย้อนหลัง {symbol} วันที่ {day} เริ่มที่ {when} ความเร็ว {args.speed:g} เท่า "
         f"(อุ่นเครื่องจากข้อมูล 24 ชม.ก่อนหน้าก่อน) โมเดลจาก {models}"
     )
+    if getattr(args, "loop", False):
+        _say("เล่นวนซ้ำ: เมื่อจบวันจะเริ่มเล่นใหม่จากจุดเริ่มเอง (ข้อมูลจำลองที่ฉีดไว้จะหายไป)")
+        return state, looping(state, pipeline, make_replayer, start)
     return state, lambda: pipeline.run(replayer)
 
 

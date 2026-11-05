@@ -906,3 +906,36 @@ def test_feedback_form_uses_the_session_user_when_auth_is_on():
     body = body[: body.index("\n}\n")]
     assert "state.me.username" in body  # the analyst is the signed-in user, not a typed name
     assert "authOn()" in body
+
+
+RESTART_BODY = r"""
+const S = 1e6;
+const pending = { symbol: "X", t_start_us: 1030 * S, t_end_us: 1150 * S, known: new Map(),
+  detected: null };
+const hit = { symbol: "X", t_start_us: 1030 * S, t_end_us: 1150 * S, known: new Map(),
+  detected: { alert_id: "a1", eventS: 5, wallS: 1 } };
+assert.strictEqual(m.injectionStatus(pending, 1010 * S), "pending");
+m.restartRuns([pending, hit]);
+assert.strictEqual(pending.restarted, true);
+assert.ok(!hit.restarted);
+assert.strictEqual(m.injectionStatus(pending, 1010 * S), "missed");
+assert.strictEqual(m.injectionStatus(pending, null), "missed");
+assert.strictEqual(m.bannerText("missed", 300, pending), "พลาด (replay เริ่มใหม่)");
+assert.ok(m.bannerText("missed", 300, pending).includes("เริ่มใหม่"));
+assert.strictEqual(m.injectionStatus(hit, 1010 * S), "detected");
+// the restart's seek deletes the round's alerts: a closed run keeps its verdict
+assert.strictEqual(m.resetRuns([pending, hit], ["a1"]), false);
+assert.strictEqual(m.injectionStatus(hit, 1010 * S), "detected");
+"""
+
+
+def test_replay_restarted_marks_runs_missed(tmp_path):
+    _run_motion(tmp_path, "false", RESTART_BODY)
+
+
+def test_on_alert_handles_replay_restarted():
+    js = text("app.js")
+    body = js.split("function onAlert(data)")[1].split("\n}\n")[0]
+    assert '"replay_restarted"' in body and "restartRuns(" in body
+    check = js.split("function checkInjections()")[1].split("\n}\n")[0]
+    assert "closed" in check

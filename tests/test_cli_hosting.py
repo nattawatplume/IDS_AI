@@ -1,9 +1,13 @@
 """Hosting flags of `serve`: --public-host, --secure-cookies, --loop."""
 
+import argparse
+import asyncio
 import json
 import secrets
 from datetime import date
+from pathlib import Path
 
+import polars as pl
 import pytest
 from starlette.testclient import TestClient
 
@@ -11,11 +15,13 @@ from idsai import cli
 from idsai.ai.auditor import Auditor
 from idsai.bus import Bus
 from idsai.config import load_settings
+from idsai.data.replay import Replayer
 from idsai.data.store import Store
+from idsai.detection.simulator import Scenario
 from idsai.product.api import AppState, create_app
 from idsai.product.auth import hash_password
 from tests.product.test_api import SYM, FakePipe, make_replayer
-from tests.synth import make_trades
+from tests.synth import day_us, make_trades
 from tests.test_cli import write_cfg
 
 PW = secrets.token_urlsafe(16)
@@ -146,3 +152,128 @@ def test_secure_cookies_flag(cfg_path, monkeypatch):
 def test_loop_live_is_usage_error(cfg_path, capsys):
     assert cli.main(["--config", str(cfg_path), "serve", "--mode", "live", "--loop"]) == 1
     assert "--loop" in capsys.readouterr().err
+
+
+# ---- --loop: the replay day starts again by itself ----
+
+S = 1_000_000
+DAY = date(2025, 3, 1)
+D0 = day_us(DAY)
+START = D0 + 60 * S
+
+
+class RoundPipe:
+    """Stands in for StreamPipeline: each `run` plays the source to its end, cancels at `stop`."""
+
+    def __init__(self, stop: int = 3, before=None):
+        self.bus = Bus(maxsize=50)
+        self.mode = "replay"
+        self.stop = stop
+        self.before = before  # called with (round number, replayer) before a round plays
+        self.rounds: list[tuple[Replayer, tuple, int]] = []  # (source, first event, trades)
+
+    async def run(self, rp):
+        if self.before is not None:
+            self.before(len(self.rounds) + 1, rp)
+        first, trades = None, 0
+        async for ev in rp:
+            first = ev if first is None else first
+            trades += ev[0] == "trade"
+        self.rounds.append((rp, first, trades))
+        if len(self.rounds) >= self.stop:
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+
+@pytest.fixture
+def replay_env(tmp_path, monkeypatch):
+    cfg = load_settings(
+        overrides={"paths": {"data_dir": str(tmp_path / "d"), "app_db": str(tmp_path / "a.duckdb")}}
+    )
+    store = Store(cfg.paths.data_dir, cfg.paths.app_db)
+    trades = make_trades(DAY, 1, symbol=SYM, seed=3, rate=1.0)
+    trades = trades.filter(pl.col("ts_us") < D0 + 180 * S)  # about 3 min
+    store.write_trades(trades)
+    pipes: list[RoundPipe] = []
+
+    def fake_pipeline(*a, **k):
+        pipes.append(RoundPipe())
+        return pipes[-1]
+
+    target = (SYM, DAY, START, Path("."))
+    monkeypatch.setattr(cli, "_replay_target", lambda args, cfg, store: target)
+    monkeypatch.setattr(cli, "_load", lambda models, cfg: ([], None, {}))
+    monkeypatch.setattr("idsai.pipeline.stream.StreamPipeline", fake_pipeline)
+    yield cfg, store, trades, pipes
+    store.close()
+
+
+def serve_args(loop: bool) -> argparse.Namespace:
+    return argparse.Namespace(speed=0.0, loop=loop, auth=False)
+
+
+def run_background(background) -> None:
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.create_task(background())
+
+    asyncio.run(go())
+
+
+def test_loop_restarts(replay_env):
+    cfg, store, trades, pipes = replay_env
+    state, background = cli.prepare_replay(serve_args(True), cfg, store)
+    pipe = pipes[0]
+    q = pipe.bus.subscribe("alerts")
+    seen = []
+    pipe.before = lambda n, rp: seen.append(rp is state.replayer)
+    run_background(background)
+    sources = [rp for rp, _, _ in pipe.rounds]
+    assert len(sources) == 3 and len({id(rp) for rp in sources}) == 3
+    assert seen == [True, True, True]  # each round plays the replayer the routes see
+    assert state.replayer is sources[-1] and state.replayer.speed == 0.0
+    for _, first, n in pipe.rounds[1:]:
+        assert first == ("seek", START)
+        assert n == trades.height
+    msgs = []
+    while not q.empty():
+        msgs.append(q.get_nowait())
+    restarted = [m for m in msgs if isinstance(m, dict) and m.get("event") == "replay_restarted"]
+    assert restarted and restarted[0] == {"event": "replay_restarted", "t_us": START}
+
+
+def test_loop_restarts_after_inject(replay_env):
+    cfg, store, trades, pipes = replay_env
+    state, background = cli.prepare_replay(serve_args(True), cfg, store)
+    pipe = pipes[0]
+    pipe.stop = 2
+
+    def inject_first(n, rp):
+        if n == 1:
+            sc = Scenario(
+                family="pump_burst", technique_id="MM-T001", sub_technique="MM-T001.001",
+                t_start_us=START + 10 * S, duration_s=30.0, impact=0.1, vol_mult=10.0,
+                rush_size=3, dump_tau_s=60.0, seed=3, region="test",
+            )
+            rp.inject(sc, 1.0, "replay")
+            state.injected.append({"scenario": "x"})
+        else:
+            assert state.injected == []
+
+    pipe.before = inject_first
+    run_background(background)
+    (_, _, n1), (_, _, n2) = pipe.rounds
+    assert n1 > trades.height  # round 1 played the injected trades
+    assert n2 == trades.height  # round 2 plays the original frame
+    assert state.injected == []
+
+
+def test_no_loop_unchanged(replay_env):
+    cfg, store, _, pipes = replay_env
+    state, background = cli.prepare_replay(serve_args(False), cfg, store)
+    pipe = pipes[0]
+    pipe.stop = 99
+    rp = state.replayer
+    asyncio.run(background())  # returns after one run, nothing restarts
+    assert len(pipe.rounds) == 1 and pipe.rounds[0][0] is rp
+    assert state.replayer is rp and rp.ended

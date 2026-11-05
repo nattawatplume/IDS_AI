@@ -982,6 +982,11 @@ function onAlert(data) {
     loadAlerts();
     return;
   }
+  if (data.event === "replay_restarted") {
+    restartRuns(state.injections);
+    renderInjections();
+    return;
+  }
   if (data.event === "alerts_reset") {
     for (const id of data.deleted || []) state.alerts.delete(id);
     if (resetRuns(state.injections, data.deleted || [])) renderInjections();
@@ -1458,6 +1463,7 @@ function resetRuns(runs, deleted) {
   const gone = new Set(deleted);
   let changed = false;
   for (const run of runs) {
+    if (run.closed) continue; // a run of an earlier replay round keeps its verdict
     for (const id of gone) if (run.known) run.known.delete(id);
     if (run.detected && gone.has(run.detected.alert_id)) {
       run.detected = null;
@@ -1467,11 +1473,21 @@ function resetRuns(runs, deleted) {
   return changed;
 }
 
+function restartRuns(runs) {
+  // the replay day started again from the original trades: every run so far is over; one not
+  // detected yet never will be (its injected trades are gone) and counts as missed
+  for (const run of runs) {
+    run.closed = true;
+    if (!run.detected) run.restarted = true;
+  }
+}
+
 function injectionStatus(run, nowUs) {
   // "detected" wins whenever it comes; "missed" once the eval matching window (scenario end +
   // 300 s) plus a grace has passed without a qualifying alert; it follows the clock, so a seek
   // back makes the run "waiting" again
   if (run.detected) return "detected";
+  if (run.restarted) return "missed";
   if (!isNum(nowUs) || !isNum(run.t_start_us)) return "waiting";
   if (isNum(run.t_end_us) && nowUs > run.t_end_us + MATCH_AFTER_US + MISSED_GRACE_US) return "missed";
   return nowUs < run.t_start_us ? "pending" : "waiting";
@@ -1480,7 +1496,7 @@ function injectionStatus(run, nowUs) {
 function checkInjections() {
   let changed = false;
   for (const run of state.injections) {
-    if (run.detected) continue;
+    if (run.detected || run.closed) continue; // a closed run's trades are gone
     const a = firstDetection(run, state.alerts.values());
     if (a) {
       run.detected = {
@@ -1558,8 +1574,9 @@ function renderInjections() {
 const RING_R = 22;
 const RING_C = 2 * Math.PI * RING_R;
 
-function bannerText(status, seconds) {
+function bannerText(status, seconds, run) {
   // the verdict line on a Red-Team card; empty while the run is still undecided
+  if (status === "missed" && run && run.restarted) return "พลาด (replay เริ่มใหม่)";
   const n = Math.max(0, Math.round(Number(seconds) || 0));
   if (status === "detected") return `ตรวจพบใน ${n} วินาที`;
   if (status === "missed") return `ไม่พบภายใน ${n} วินาทีหลังจบเหตุการณ์`;
@@ -1584,7 +1601,7 @@ function tickInjections() {
     const verdict = status === "detected" || status === "missed";
     run.banner.hidden = !verdict;
     if (verdict) {
-      run.banner.textContent = bannerText(status, seconds);
+      run.banner.textContent = bannerText(status, seconds, run);
       if (run.bannerState !== status) { // class only on a state change: a tick never restarts the sweep
         run.bannerState = status;
         const hit = status === "detected";
@@ -1597,7 +1614,10 @@ function tickInjections() {
     }
 
     clear(run.detail);
-    if (status === "missed") {
+    if (status === "missed" && run.restarted) {
+      run.detail.textContent =
+        "replay เริ่มเล่นใหม่ก่อนตรวจพบ ข้อมูลจำลองที่ฉีดไว้หายไปแล้ว · นับเป็นการตรวจไม่พบ";
+    } else if (status === "missed") {
       run.detail.textContent =
         "ไม่พบความผิดปกติทางสถิติภายในช่วงที่นับตามเกณฑ์ประเมิน (ถึงสิ้นสุดเหตุการณ์ + 300 s) · นับเป็นการตรวจไม่พบ";
     } else if (status === "detected") {
@@ -2371,6 +2391,7 @@ if (typeof document !== "undefined") {
     eligibleForRun,
     firstDetection,
     resetRuns,
+    restartRuns,
     injectionStatus,
     bannerText,
     redTeamAllowed,
