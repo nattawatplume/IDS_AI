@@ -227,6 +227,21 @@ function fmtSec(t) {
   return fmtUs(t * S_US);
 }
 
+// Thai clock time (Asia/Bangkok, UTC+7, no daylight saving) for plain view: "23:30 น."; "UTC" stays in details
+const TH_OFFSET_US = 7 * 3600 * S_US;
+
+function thaiClock(us, withSeconds) {
+  if (!isNum(us)) return null;
+  const d = new Date(Math.floor((us + TH_OFFSET_US) / 1000));
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(11, withSeconds ? 19 : 16);
+}
+
+function fmtThaiTime(us, withSeconds = false) {
+  const t = thaiClock(us, withSeconds);
+  return t === null ? "–" : `${t} น.`;
+}
+
 function fmtP(p) {
   if (!isNum(p)) return "–";
   return p < 0.001 ? p.toExponential(1) : p.toFixed(3);
@@ -583,6 +598,7 @@ function applyRoleGates() {
     gate(node);
   }
   $("menu-activity").hidden = !can("admin");
+  renderPlayButton(); // the gate above cleared every title; the play button gets its "(กด Space)" back
 }
 
 function eventNowUs() {
@@ -634,18 +650,12 @@ function renderAlertsKpi(now = eventNowUs()) {
 
 // ------------------------------------------------------------------ home: hero status
 
-// HH:MM of a µs UTC time, or "–"
-function hhmm(us) {
-  const full = fmtUs(us);
-  return full === "–" ? full : full.slice(11, 16);
-}
-
 // the one sentence at the top of Home; pure, so the rules are tested in node
 function heroStatus({ nowUs, alerts, f, tau, auditor, symbol } = {}) {
   let recent = null;
   if (isNum(nowUs)) {
     for (const a of alerts || []) {
-      if (!a || !isNum(a.ts_event_us) || a.ts_event_us < nowUs - HERO_RECENT_US) continue;
+      if (!a || !isNum(a.ts_event_us) || a.ts_event_us < nowUs - HERO_RECENT_US || a.ts_event_us > nowUs) continue;
       if (!recent || a.ts_event_us > recent.ts_event_us) recent = a;
     }
   }
@@ -654,16 +664,17 @@ function heroStatus({ nowUs, alerts, f, tau, auditor, symbol } = {}) {
     return {
       level: "alert",
       title: "พบความผิดปกติทางสถิติ",
-      line: `ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ ${where} เมื่อ ${hhmm(recent.ts_event_us)} น.`,
+      line: `ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ ${where} เมื่อ ${fmtThaiTime(recent.ts_event_us)}`,
       alertId: typeof recent.alert_id === "string" ? recent.alert_id : null,
     };
   }
   const near = isNum(f) && isNum(tau) && f >= HERO_WATCH_RATIO * tau;
   if (near || auditor === "warn") {
+    const over = near && f >= tau;
     return {
       level: "watch",
       title: "กำลังเฝ้าระวัง",
-      line: near ? "ระดับความผิดปกติใกล้เส้นเตือน" : "ระบบตรวจตัวเองพบจุดที่ควรดู",
+      line: over ? "ระดับความผิดปกติข้ามเส้นเตือน" : near ? "ระดับความผิดปกติใกล้เส้นเตือน" : "ระบบตรวจตัวเองพบจุดที่ควรดู",
       alertId: null,
     };
   }
@@ -706,8 +717,10 @@ function renderReplayClock(now) {
     fill.style.width = "0";
     return;
   }
-  clock.textContent = fmtUs(now);
-  const day = (((now % DAY_US) + DAY_US) % DAY_US) / DAY_US;
+  clock.textContent = `เวลาในข้อมูล ${fmtThaiTime(now, true)}`;
+  clock.title = fmtUs(now);
+  const th = now + TH_OFFSET_US;
+  const day = (((th % DAY_US) + DAY_US) % DAY_US) / DAY_US;
   fill.style.width = `${(day * 100).toFixed(2)}%`;
 }
 
@@ -764,8 +777,18 @@ function baseChartOptions() {
     },
     grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
     rightPriceScale: { borderColor: c.grid },
-    timeScale: { borderColor: c.grid, timeVisible: true, secondsVisible: true },
-    localization: { timeFormatter: (t) => (isNum(t) ? fmtSec(t) : "") },
+    timeScale: {
+      borderColor: c.grid,
+      timeVisible: true,
+      secondsVisible: true,
+      // ticks in Thai time too: a day mark shows the date (dd/mm), the rest the clock
+      tickMarkFormatter: (t, kind) => {
+        if (!isNum(t)) return "";
+        if (kind <= 2) return new Date((t * S_US + TH_OFFSET_US) / 1000).toISOString().slice(5, 10).split("-").reverse().join("/");
+        return thaiClock(t * S_US, kind === 4);
+      },
+    },
+    localization: { timeFormatter: (t) => (isNum(t) ? fmtThaiTime(t * S_US, true) : "") },
   };
 }
 
@@ -855,7 +878,7 @@ function bindMonitor() {
 
 // the crosshair in plain words: when, the price, and how the level stands against the warning line
 function readoutText(time, price, f, tau) {
-  const when = isNum(time) ? `เวลา ${fmtSec(time).slice(11)}` : "ล่าสุด";
+  const when = isNum(time) ? `เวลา ${fmtThaiTime(time * S_US, true)}` : "ล่าสุด";
   const parts = [when, `ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`];
   let level = `ระดับความผิดปกติ ${isNum(f) ? fmtNum(f, 2) : "–"}`;
   if (isNum(f) && isNum(tau)) level += f >= tau ? ` (ถึงเส้นเตือน ${fmtNum(tau, 2)})` : ` (เส้นเตือน ${fmtNum(tau, 2)})`;
@@ -999,8 +1022,7 @@ function renderMarkers() {
       time: t,
       position: "aboveBar",
       shape: "arrowDown",
-      color: sevColor(a.severity),
-      text: a.technique_id,
+      color: sevColor(a.severity), // colour and shape only: no technique id on the Home chart
     });
   }
   markers.sort((a, b) => a.time - b.time);
@@ -1058,7 +1080,7 @@ async function control(action, value) {
     if (action === "play" || action === "pause") setLive(state.replaying);
     renderPlayButton();
     // the button and the chips already show play and speed; only a jump says where it landed
-    status.textContent = action === "seek" ? `ไปที่ ${fmtUs(r.cursor_us)} แล้ว` : "";
+    status.textContent = action === "seek" ? `ไปที่ ${fmtThaiTime(r.cursor_us, true)} แล้ว` : "";
     return true;
   } catch (e) {
     status.textContent = e.message;
@@ -1196,6 +1218,23 @@ function renderAlertsTable() {
   }
 }
 
+// a technique's Thai name for plain view: the parent's name_th without its English "(...)" gloss;
+// null when what is left still has Latin letters, or for MM-T000 (not yet classified)
+function thaiTechniqueName(tax, techniqueId) {
+  const parent = parentTechnique(techniqueId);
+  const t = tax && tax[parent];
+  if (!t || typeof t.name_th !== "string" || /-T000$/.test(parent)) return null;
+  const name = t.name_th.replace(/\s*\([^)]*\)/g, "").trim();
+  return name && !/[A-Za-z]/.test(name) ? name : null;
+}
+
+// the rail's headline, built from fields: the pattern in Thai, the coin and the Thai time
+function railHeadline(a, tax) {
+  const name = thaiTechniqueName(tax, a && a.technique_id);
+  const what = name ? `รูปแบบคล้าย${name}` : "พบความผิดปกติทางสถิติ";
+  return `${what} ที่ ${(a && a.symbol) || "–"} เวลา ${fmtThaiTime(a && a.ts_event_us)}`;
+}
+
 // the newest five alerts beside the chart as mini-cards; a card that was not there before rises in
 function renderRail() {
   const box = clear($("alert-rail"));
@@ -1204,20 +1243,17 @@ function renderRail() {
   const seen = state.railIds;
   for (const a of items) {
     const fresh = seen !== null && !seen.has(a.alert_id);
-    const full = a.explanation_th || "พบความผิดปกติทางสถิติ";
     box.appendChild(
       el(
         "a",
-        { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id), title: full },
+        { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id) },
         el(
           "span",
           { class: "rail-meta small" },
           el("span", { class: `rail-dot sev-${a.severity}`, "aria-hidden": "true" }),
-          el("span", { class: "rail-time" }, `${hhmm(a.ts_event_us)} น.`),
-          el("span", { class: "muted" }, a.symbol),
           el("span", { class: "rail-sev muted" }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
         ),
-        el("span", { class: "rail-headline" }, firstSentence(full)),
+        el("span", { class: "rail-headline" }, railHeadline(a, state.taxonomy)),
       ),
     );
   }
@@ -2589,6 +2625,7 @@ async function enterApp() {
     $("health-text").textContent = "อ่านสถานะไม่ได้";
   }
   initChart();
+  loadTaxonomy().then(() => renderRail()); // the rail names patterns in Thai once the taxonomy is in
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
@@ -2672,6 +2709,8 @@ if (typeof document !== "undefined") {
     SPEED_CHIPS,
     firstSentence,
     applyRoleGates,
+    fmtThaiTime,
+    railHeadline,
     ROLE_TH,
     routeFor,
     safeNext,

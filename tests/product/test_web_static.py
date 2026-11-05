@@ -2,6 +2,7 @@
 
 import dataclasses
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -628,7 +629,7 @@ def test_hero_and_rail_render_only_what_changed():
         assert "renderHero()" in body[: body.index("\n}\n")], caller
     rail = js[js.index("function renderRail(") :]
     rail = rail[: rail.index("\n}\n")]
-    assert ".slice(0, 5)" in rail and "firstSentence(" in rail and "el(" in rail
+    assert ".slice(0, 5)" in rail and "el(" in rail
 
 
 def test_ws_close_turns_live_dot_off():
@@ -1323,7 +1324,13 @@ const edge = { alert_id: "a-edge", symbol: "STEEMBTC", ts_event_us: at };
 r = m.heroStatus({ nowUs: at + 30 * 60 * S, alerts: [edge], f: null, tau: null, auditor: "ok",
   symbol: "STEEMBTC" });
 assert.deepStrictEqual(r, { level: "alert", title: "พบความผิดปกติทางสถิติ",
-  line: "ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ STEEMBTC เมื่อ 16:42 น.", alertId: "a-edge" });
+  line: "ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ STEEMBTC เมื่อ 23:42 น.", alertId: "a-edge" });
+// an alert after the clock (e.g. just before a seek's reset lands) is not "recent"
+r = m.heroStatus({ nowUs: at - 1, alerts: [edge], f: null, tau: null, auditor: "ok", symbol: "X" });
+assert.strictEqual(r.level, "normal");
+// F at or past the warning line says so
+assert.strictEqual(h({ f: 1, tau: 1 }).line, "ระดับความผิดปกติข้ามเส้นเตือน");
+assert.strictEqual(h({ f: 0.9, tau: 1 }).line, "ระดับความผิดปกติใกล้เส้นเตือน");
 r = m.heroStatus({ nowUs: at + 30 * 60 * S + 1, alerts: [edge], f: 0.1, tau: 1, auditor: "ok",
   symbol: "STEEMBTC" });
 assert.strictEqual(r.level, "normal");
@@ -1352,11 +1359,9 @@ assert.strictEqual(f(null), "");
 assert.strictEqual(f(undefined), "");
 assert.strictEqual(f("ราคาขึ้นเร็ว. ปริมาณสูง."), "ราคาขึ้นเร็ว");
 assert.strictEqual(f("ราคาขึ้นเร็ว"), "ราคาขึ้นเร็ว");
-// the explainer joins its sentences with "; ", and a decimal point is never a sentence end
-const ex = "พบความผิดปกติทางสถิติ (MM-T001 ปั่นแล้วเท) ที่ STEEMBTC เวลา 16:42:10 UTC: " +
-  "ปริมาณ 3.5 เท่า; 2 จาก 3 ชั้นตรวจจับเห็นพ้อง; ความหายากเทียบตลาดปกติ p ≈ 1.2e-5";
-assert.strictEqual(f(ex),
-  "พบความผิดปกติทางสถิติ (MM-T001 ปั่นแล้วเท) ที่ STEEMBTC เวลา 16:42:10 UTC: ปริมาณ 3.5 เท่า");
+// sentences joined with "; ", and a decimal point is never a sentence end
+const ex = "ราคาขึ้นเร็วกว่าปกติ 3.5 เท่า; ปริมาณซื้อขายสูง; ค่า 1.2 ต่ำ";
+assert.strictEqual(f(ex), "ราคาขึ้นเร็วกว่าปกติ 3.5 เท่า");
 assert.strictEqual(f("  a   b.  c"), "a b");
 const long = "ก".repeat(200);
 assert.strictEqual(f(long).length, 120);
@@ -1372,7 +1377,7 @@ const nodes = {};
 const chips = [0, 1, 2, 3].map(() => ({ disabled: false, title: "",
   removeAttribute(k) { this[k] = ""; } }));
 const node = (id) => (nodes[id] ||= { id, disabled: false, hidden: false, textContent: "",
-  title: "", removeAttribute(k) { this[k] = ""; },
+  title: "", removeAttribute(k) { this[k] = ""; }, setAttribute(k, v) { this[k] = v; },
   querySelectorAll: () => (id === "replay-bar" ? chips : []) });
 globalThis.document = { getElementById: node, querySelectorAll: () => [],
   body: { classList: { toggle() {} } } };
@@ -1394,6 +1399,7 @@ for (const id of ["btn-play", "seek-input", "btn-seek"]) {
 }
 for (const c of chips) assert.strictEqual(c.disabled, false);
 assert.strictEqual(nodes["replay-reason"].hidden, true);
+assert.ok(nodes["btn-play"].title.includes("(กด Space)"), nodes["btn-play"].title);
 console.log("ok");
 """
 
@@ -1416,3 +1422,69 @@ def test_hero_and_replay_gates_viewer(tmp_path):
         [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+THAI_TIME_BODY = r"""
+const S = 1e6;
+const t = Date.UTC(2021, 0, 18, 16, 30, 5) * 1000;
+assert.strictEqual(m.fmtThaiTime(t), "23:30 น.");
+assert.strictEqual(m.fmtThaiTime(t, true), "23:30:05 น.");
+// 20:00 UTC is already the next Thai day
+assert.strictEqual(m.fmtThaiTime(Date.UTC(2021, 0, 18, 20, 0) * 1000), "03:00 น.");
+assert.strictEqual(m.fmtThaiTime(null), "–");
+assert.strictEqual(m.fmtThaiTime(undefined, true), "–");
+"""
+
+
+def test_thai_time(tmp_path):
+    _run_motion(tmp_path, "false", THAI_TIME_BODY)
+
+
+RAIL_BODY = r"""
+const tax = JSON.parse(require("fs").readFileSync(process.argv[3], "utf-8"));
+const ids = [];
+for (const [id, t] of Object.entries(tax)) {
+  ids.push(id);
+  for (const sub of t.sub_techniques || []) ids.push(sub.id);
+}
+ids.push("MM-T999", "", null);
+for (const tax2 of [tax, null]) {
+  for (const id of ids) {
+    const text = m.railHeadline({ technique_id: id, symbol: "STEEMBTC",
+      ts_event_us: Date.UTC(2021, 0, 18, 16, 30) * 1000 }, tax2);
+    for (const bad of ["MM-T", "MT-T", "UTC"]) assert.ok(!text.includes(bad), text);
+    assert.ok(!/[A-Za-z]/.test(text.replace("STEEMBTC", "")), text);
+    assert.ok(text.includes("STEEMBTC") && text.endsWith("23:30 น."), text);
+  }
+}
+const pump = m.railHeadline({ technique_id: "MM-T001", symbol: "X", ts_event_us: 0 }, tax);
+assert.ok(pump.includes("รูปแบบคล้าย"), pump);
+"""
+
+
+def test_rail_headline_is_plain_thai(tmp_path, client):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    tax = tmp_path / "tax.json"
+    tax.write_text(json.dumps(client.get("/api/taxonomy").json()), encoding="utf-8")
+    script = tmp_path / "rail.js"
+    script.write_text(MOTION_JS % ("false", RAIL_BODY), encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js"), str(tax)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+    js = text("app.js")
+    rail = js[js.index("function renderRail(") :]
+    rail = rail[: rail.index("\n}\n")]
+    assert "railHeadline(" in rail and "explanation_th" not in rail and "technique_id" not in rail
+
+
+def test_home_markers_carry_no_text():
+    js = text("app.js")
+    body = js[js.index("function renderMarkers(") :]
+    body = body[: body.index("\n}\n")]
+    assert "text:" not in body and "technique_id" not in body

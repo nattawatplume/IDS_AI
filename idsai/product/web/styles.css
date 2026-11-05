@@ -518,8 +518,7 @@ button.primary.play-btn { padding: 0; }
 .rail-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .rail-dot.sev-2 { background: var(--amber); }
 .rail-dot.sev-3 { background: var(--red); }
-.rail-time { font-variant-numeric: tabular-nums; }
-.rail-sev { margin-left: auto; white-space: nowrap; }
+.rail-sev { white-space: nowrap; }
 .rail-headline { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; line-height: 1.5; }
 
 @media (max-width: 960px) {
