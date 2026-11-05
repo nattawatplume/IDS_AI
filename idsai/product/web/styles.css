@@ -376,6 +376,17 @@ button.selected { outline: 2px solid var(--amber); outline-offset: 1px; }
 .back { font-size: 13px; }
 .timer { font-family: var(--mono); font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
+/* ------------------------------------------------------------------ motion */
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@keyframes glow { 0% { background-color: color-mix(in srgb, var(--amber) 35%, transparent); } 100% { background-color: transparent; } }
+@keyframes pop { 0% { transform: scale(0.92); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+@keyframes rise { 0% { transform: translateY(6px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+@keyframes sweep { 0% { background-position: -120% 0; } 100% { background-position: 220% 0; } }
+@keyframes grow { 0% { transform: scaleX(0); } 100% { transform: scaleX(1); } }
+.flash { animation: glow 0.9s ease-out; }
+.rise { animation: rise 0.25s ease-out both; }
+.pop { animation: pop 0.2s ease-out both; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }

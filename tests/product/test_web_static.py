@@ -345,3 +345,63 @@ def test_auditor_popup_is_anchored_inside_the_viewport_when_narrow():
     block = m.group(1)
     assert re.search(r"\.auditor\s*\{\s*position:\s*static", block)
     assert re.search(r"\.auditor-checks\s*\{[^}]*left:\s*16px[^}]*right:\s*16px[^}]*width:\s*auto", block)
+
+
+MOTION_JS = r"""
+const assert = require("assert");
+globalThis.matchMedia = () => ({ matches: %s });
+const m = require(process.argv[2]);
+%s
+console.log("ok");
+"""
+
+PRESENTER_BODY = r"""
+const k = m.presenterKey;
+assert.strictEqual(k({ key: " ", target: { tagName: "INPUT" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "SELECT" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "TEXTAREA" } }), null);
+assert.strictEqual(k({ key: " ", target: { tagName: "DIV" } }), "toggle-play");
+assert.strictEqual(k({ key: "4", target: { tagName: "BODY" } }), "page:4");
+assert.strictEqual(k({ key: "7", target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "t", target: { tagName: "BODY" } }), "theme");
+assert.strictEqual(k({ key: "t", ctrlKey: true, target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "1", metaKey: true, target: { tagName: "BODY" } }), null);
+assert.strictEqual(k({ key: "1", altKey: true, target: { tagName: "BODY" } }), null);
+assert.strictEqual(m.PAGE_ORDER.length, 6);
+assert.strictEqual(m.PAGE_ORDER[0], "#/monitor");
+"""
+
+TWEEN_BODY = r"""
+const node = { textContent: "0" };
+m.tweenNumber(node, 3.87, 2);
+assert.strictEqual(node.textContent, "3.87");
+assert.strictEqual(m.reducedMotion(), true);
+"""
+
+
+def _run_motion(tmp_path, reduced, body):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "motion.js"
+    script.write_text(MOTION_JS % (reduced, body), encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+    )
+    assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
+
+
+def test_presenter_keys_skip_fields(tmp_path):
+    _run_motion(tmp_path, "false", PRESENTER_BODY)
+
+
+def test_tween_snaps_under_reduced_motion(tmp_path):
+    _run_motion(tmp_path, "true", TWEEN_BODY)
+
+
+def test_reduced_motion_disables_animation():
+    css = text("styles.css")
+    block = css.split("prefers-reduced-motion: reduce")[1]
+    assert "animation" in block and "transition" in block
+    for name in ("pulse", "glow", "pop", "rise", "sweep", "grow"):
+        assert f"@keyframes {name}" in css, name

@@ -216,6 +216,81 @@ function bindTheme() {
   });
 }
 
+// ------------------------------------------------------------------ motion + presenter keys
+
+const PAGE_ORDER = ["#/monitor", "#/alerts", "#/redteam", "#/eval", "#/taxonomy", "#/about"];
+
+function reducedMotion() {
+  const mm = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null;
+  return !!(mm && mm.call(globalThis, "(prefers-reduced-motion: reduce)").matches);
+}
+
+// count a number up or down to `to`; snaps when motion is reduced
+function tweenNumber(node, to, digits, ms = 300) {
+  if (!node) return;
+  if (!isNum(to)) {
+    node.textContent = fmtNum(to, digits);
+    return;
+  }
+  const raf = typeof globalThis.requestAnimationFrame === "function" ? globalThis.requestAnimationFrame : null;
+  if (reducedMotion() || !raf) {
+    node.textContent = fmtNum(to, digits);
+    return;
+  }
+  const from = Number.parseFloat(node.textContent);
+  if (!Number.isFinite(from) || from === to) {
+    node.textContent = fmtNum(to, digits);
+    return;
+  }
+  if (node._tween) node._tween.cancelled = true;
+  const job = { cancelled: false };
+  node._tween = job;
+  const t0 = performance.now();
+  const step = (now) => {
+    if (job.cancelled) return;
+    const k = Math.min(1, (now - t0) / ms);
+    const eased = 1 - (1 - k) * (1 - k) * (1 - k);
+    node.textContent = fmtNum(k >= 1 ? to : from + (to - from) * eased, digits);
+    if (k < 1) raf(step);
+    else node._tween = null;
+  };
+  raf(step);
+}
+
+// re-trigger a one-shot CSS animation class
+function flash(node, cls = "flash") {
+  if (!node || reducedMotion()) return;
+  node.classList.remove(cls);
+  void node.offsetWidth; // restart the animation
+  node.classList.add(cls);
+}
+
+function presenterKey(ev) {
+  if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
+  const tag = ev.target && ev.target.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return null;
+  if (ev.key === " ") return "toggle-play";
+  if (ev.key === "t" || ev.key === "T") return "theme";
+  if (/^[1-6]$/.test(ev.key || "")) return `page:${ev.key}`;
+  return null;
+}
+
+let presenterPlaying = false;
+
+function onPresenterKey(ev) {
+  const act = presenterKey(ev);
+  if (!act) return;
+  ev.preventDefault();
+  if (act === "toggle-play") {
+    presenterPlaying = !presenterPlaying;
+    control(presenterPlaying ? "play" : "pause");
+  } else if (act === "theme") {
+    applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  } else {
+    location.hash = PAGE_ORDER[Number(act.slice(5)) - 1];
+  }
+}
+
 function renderHealth(h) {
   state.health = h;
   setMode(h.mode);
@@ -1530,6 +1605,7 @@ function fillSymbols() {
 async function boot() {
   window.addEventListener("hashchange", safely(route));
   bindTheme();
+  document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
   bindRedTeam();
   $("symbol-select").addEventListener("change", (ev) => {
@@ -1572,5 +1648,10 @@ if (typeof document !== "undefined") {
     resetRuns,
     injectionStatus,
     redTeamAllowed,
+    reducedMotion,
+    tweenNumber,
+    flash,
+    presenterKey,
+    PAGE_ORDER,
   };
 }
