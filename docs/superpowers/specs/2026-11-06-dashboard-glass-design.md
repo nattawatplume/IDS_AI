@@ -1,6 +1,6 @@
 # Dashboard v3: Glass look, 4 pages, made easy for non-experts
 
-Date: 2026-11-06 · Status: approved in chat, spec awaiting review
+Date: 2026-11-06 · Status: spec approved by owner (with 4.12 added)
 Supersedes the look and page layout of `2026-11-05-dashboard-redesign-design.md`. Behaviour from that spec and from `2026-11-05-auth-design.md` and `2026-11-05-hosting-design.md` stays unless this spec changes it.
 
 ## 1. Why
@@ -176,9 +176,9 @@ Old hashes redirect: `#/monitor` → `#/home`, `#/redteam` → `#/simulate`, `#/
 
 | Card | family | Title | One line |
 |---|---|---|---|
-| 🚀 | `pump_burst` | ปั่นเร็ว | ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที |
-| 🐢 | `pump_stealth` | ปั่นแบบเนียน | ค่อยๆ ดันราคาขึ้นช้าๆ |
-| 🔁 | `wash_pingpong` | ซื้อขายวนหลอก | ซื้อขายกันเองไปมาให้ดูคึกคัก |
+| steep-line SVG | `pump_burst` | ปั่นเร็ว | ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที |
+| gentle-ramp SVG | `pump_stealth` | ปั่นแบบเนียน | ค่อยๆ ดันราคาขึ้นช้าๆ |
+| loop-arrows SVG | `wash_pingpong` | ซื้อขายวนหลอก | ซื้อขายกันเองไปมาให้ดูคึกคัก |
 
 **Runs:** each run shows as a timeline card, "เริ่มแล้ว → กำลังรอระบบ → จับได้ใน X วินาที ✓ / ไม่ทันจับ / พลาด (replay เริ่มใหม่)". It uses the existing `injectionStatus` logic and shows the event-time and wall-clock seconds in plain words.
 
@@ -230,6 +230,38 @@ A right-side glass drawer with three sections:
 - Every control has a Thai label. Focus rings are visible (the accent gradient outline), and contrast is at least 4.5:1 for body text on glass.
 - The status is never shown by colour alone: the orb always has the sentence beside it.
 - Copy rule: no English or code identifiers outside "ดูรายละเอียด" sections. The brand "Market IDS" and coin symbols are allowed. Numbers have Thai units.
+
+### 4.12 Not "AI-made" (owner's request, 2026-11-06)
+
+The owner wants it to look easy and good, but not generated. These rules override anything above that conflicts with them.
+
+**Icons:**
+- No emoji anywhere. The simulate cards use small single-colour inline SVG line icons (16–24 px, 1.5 px stroke) drawn for this project: a steep line, a gentle ramp, and two looping arrows.
+
+**Restraint:**
+- The accent gradient appears only on the primary button and the active nav pill.
+- No gradient text, no sparkle or star decorations, no rainbow glow.
+- Background blobs stay subtle: total opacity ≤ 35 %, and they never sit behind body text at full strength.
+- Glass is for cards only, not for every small chip. Chips are flat, semi-transparent fills.
+
+**Copy:**
+- Short, specific and factual, written like a person on the team.
+- No "ยินดีต้อนรับสู่…!", no exclamation marks, no "ขับเคลื่อนด้วย AI", no marketing adjectives (ล้ำสมัย, อัจฉริยะ, ทรงพลัง).
+- Headline sentences state facts from the data, e.g. "ตลาดปกติ · ไม่มีแจ้งเตือนใน 30 นาทีล่าสุด".
+
+**Layout honesty:**
+- Real data first, with no placeholder or decorative cards.
+- Card sizes follow content, not a uniform 3-up grid everywhere.
+- One clear primary action per screen.
+
+**Consistency:**
+- One spacing scale (4/8/12/16/24/32 px) and one radius family (16 px cards, 10 px buttons, 999 px pills).
+- Two text weights (400/600).
+- Numbers right-aligned in tables.
+
+**Motion with purpose:** animate only things that change, such as status, new alerts, numbers and page entry. Nothing loops except the background drift and the status orb.
+
+**Login page:** the left side shows the logo, the one-line tagline and the animated line, with no feature bullet list and no stock-style illustration.
 
 ## 5. Error handling
 
