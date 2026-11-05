@@ -187,6 +187,87 @@ def test_login_lock_after_five(aenv, auth_client):
     assert login(auth_client(), "admin").status_code == 200
 
 
+def run_async(app, *requests):
+    """Send `(method, url, body)` requests to `app` concurrently on one event loop."""
+    import asyncio
+
+    import httpx
+
+    async def main():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            return await asyncio.gather(*(c.request(m, u, json=b) for m, u, b in requests))
+
+    return asyncio.run(main())
+
+
+def wrong(username="analyst"):
+    return ("POST", "/api/auth/login", {"username": username, "password": "wrong-password"})
+
+
+def test_password_check_runs_off_the_event_loop(aenv, monkeypatch):
+    import asyncio
+    import time
+
+    seen = []
+    real = app_mod.verify_or_dummy
+
+    def slow(pw, stored):
+        try:
+            asyncio.get_running_loop()
+            seen.append("on the loop")
+        except RuntimeError:
+            seen.append("thread")
+        time.sleep(0.5)
+        return real(pw, stored)
+
+    monkeypatch.setattr(app_mod, "verify_or_dummy", slow)
+    app = create_app(aenv.state)
+    done = []
+
+    async def main():
+        import httpx
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+
+            async def go(m, u, b=None):
+                r = await c.request(m, u, json=b)
+                done.append(u)
+                return r
+
+            body = {"username": "analyst", "password": PW}
+            return await asyncio.gather(
+                go("POST", "/api/auth/login", body), go("GET", "/api/health")
+            )
+
+    login_r, health_r = asyncio.run(main())
+    assert login_r.status_code == 200 and health_r.status_code == 200
+    assert seen == ["thread"]
+    assert done == ["/api/health", "/api/auth/login"]  # health was not stuck behind scrypt
+
+
+def test_concurrent_wrong_attempts_still_lock(aenv):
+    app = create_app(aenv.state)
+    rs = run_async(app, *[wrong() for _ in range(7)])
+    assert all(r.status_code == 401 and r.json() == {"detail": FAIL_TH} for r in rs)
+    reasons = [r["detail"]["reason"] for r in aenv.store.list_audit(500)]
+    assert reasons.count("password") == 5 and reasons.count("locked") == 2
+    (ok,) = run_async(app, ("POST", "/api/auth/login", {"username": "analyst", "password": PW}))
+    assert ok.status_code == 401  # still locked
+    (other,) = run_async(app, ("POST", "/api/auth/login", {"username": "admin", "password": PW}))
+    assert other.status_code == 200
+
+
+def test_success_after_four_failures_clears_the_count(aenv, auth_client):
+    c = auth_client()
+    for _ in range(2):
+        for _ in range(4):
+            assert login(c, "analyst", "wrong-password").status_code == 401
+        assert login(c, "analyst").status_code == 200
+    assert not aenv.state.limiter.locked("analyst")
+
+
 def test_login_refuses_cross_origin(auth_client):
     c = auth_client()
     body = {"username": "admin", "password": PW}

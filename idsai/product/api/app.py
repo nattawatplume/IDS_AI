@@ -84,6 +84,7 @@ TOUCH_US = 60 * S_US  # last_seen_us is written at most once a minute
 LOGIN_FAILED_TH = "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"
 LOGIN_NEEDED_TH = "กรุณาเข้าสู่ระบบ"
 WS_UNAUTHORIZED = 4401
+VERIFY_SLOTS = 2  # password checks run in worker threads, at most this many at once
 LOCAL_USER = {"user_id": "local", "username": "local", "display_name": "local", "role": "admin"}
 _USER_KEYS = ("user_id", "username", "display_name", "role")
 
@@ -256,6 +257,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
     app = FastAPI(title="Market IDS", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.idsai = state  # read by `current_user`
     signed = [Depends(current_user)]
+    verify_slots = asyncio.Semaphore(VERIFY_SLOTS)  # concurrent logins queue here
     if allowed_hosts is not None:
         app.add_middleware(HostAllowlist, allowed=list(allowed_hosts))
 
@@ -303,12 +305,19 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
             user = None  # such a name cannot exist: no lookup
         else:
             user = store.get_user_by_name(name)
+        # the attempt is counted before the await, so concurrent guesses cannot pass the lock
+        # check together; a success clears it again
+        limiter.fail(name)
+        stored = None if user is None else user["pw_hash"]
         try:
-            ok = verify_or_dummy(body.password, None if user is None else user["pw_hash"])
+            async with verify_slots:  # scrypt off the loop, a bounded number at a time
+                ok = await asyncio.to_thread(verify_or_dummy, body.password, stored)
         except Exception:  # e.g. a password with lone surrogates cannot be encoded
             ok = False
+        if ok:  # the user may have changed during the await
+            user = store.get_user_by_name(name)
+            ok = user is not None and user["pw_hash"] == stored
         if user is None or not ok or user["disabled"]:
-            limiter.fail(name)
             raise failed(user, "unknown" if user is None else "disabled" if ok else "password")
         limiter.ok(name)
         auth = state.cfg.auth
