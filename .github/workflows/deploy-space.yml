@@ -1,0 +1,55 @@
+---
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [main, feat/mvp]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-space
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if private data is tracked
+        run: |
+          bad="$(git ls-files -- 'data/*' 'models/*' '*.duckdb*' '*hu_pd_logs.tsv')"
+          if [ -n "$bad" ]; then
+            echo "ห้ามส่งไฟล์เหล่านี้ขึ้น Space:"
+            echo "$bad"
+            exit 1
+          fi
+      - name: Build the Space commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan space-deploy
+          {
+            printf '%s\n' '---'
+            printf '%s\n' 'title: Market IDS'
+            printf '%s\n' 'emoji: 🛡️'
+            printf '%s\n' 'sdk: docker'
+            printf '%s\n' 'app_port: 7860'
+            printf '%s\n' 'pinned: false'
+            printf '%s\n' '---'
+            printf '\n'
+            cat README.md
+          } > README.space.md
+          mv README.space.md README.md
+          git add -A
+          git commit -q -m "Deploy ${GITHUB_SHA}"
+      - name: Push to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+        run: |
+          [ -n "$HF_SPACE" ] || { echo "ยังไม่ได้ตั้ง HF_SPACE" >&2; exit 1; }
+          [ -n "$HF_TOKEN" ] || { echo "ยังไม่ได้ตั้ง HF_TOKEN" >&2; exit 1; }
+          git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" HEAD:main

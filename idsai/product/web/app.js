@@ -23,32 +23,89 @@ const LANES = [
 ];
 const SEVERITY_TH = { 1: "ต่ำ", 2: "กลาง", 3: "สูง" };
 const STATUS_TH = { open: "เปิด", updated: "อัปเดต", closed: "ปิดแล้ว" };
-const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail: "ผิดปกติ" };
-const VERDICT_TH = { tp: "ผิดปกติจริง (TP)", fp: "แจ้งเตือนผิด (FP)", unsure: "ไม่แน่ใจ" };
-const REFUSED_TH =
-  "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง (ใช้ได้เฉพาะโหมด replay / sim)";
-const UNKNOWN_MODE_TH =
-  "Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)";
+const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail: "มีปัญหา" };
+// the auditor's check names, as a teacher would read them
+const CHECK_NAME_TH = {
+  alert_rate: "จำนวนการแจ้งเตือนเทียบงบ",
+  calibration: "การเทียบมาตรฐานของคะแนน",
+  calibration_resolution: "ความละเอียดของการเทียบมาตรฐาน",
+  latency: "ความเร็วในการคำนวณ",
+  trade_gaps: "ช่วงที่ข้อมูลการซื้อขายขาดหาย",
+  exclusion: "ช่วงที่ตัดออกจากการตรวจ",
+  staleness: "ความสดของข้อมูล",
+  warmup: "การเก็บข้อมูลตั้งต้น",
+};
+// the home hero: an alert in the last 30 min of event time, else F near τ or an auditor warning
+const HERO_WATCH_RATIO = 0.8;
+const HERO_RECENT_US = 30 * 60 * S_US;
+const SPEED_CHIPS = [
+  { label: "1×", v: 1 },
+  { label: "10×", v: 10 },
+  { label: "60×", v: 60 },
+  { label: "เร็วสุด", v: 0 },
+];
+const VIEWER_REPLAY_TH = "เฉพาะผู้วิเคราะห์ขึ้นไปที่ควบคุมได้";
+const VIEWER_VERDICT_TH = "เฉพาะผู้วิเคราะห์ขึ้นไปที่ให้ผลตรวจได้";
+const HEADLINE_MAX = 120;
+const VERDICT_TH = { tp: "ผิดปกติจริง", fp: "เตือนผิด", unsure: "ไม่แน่ใจ" };
+const VERDICTS = ["tp", "fp", "unsure"];
+const ALERT_FILTERS = [
+  { key: "all", label: "ทั้งหมด" },
+  { key: "open", label: "ยังไม่ตรวจ" },
+  { key: "tp", label: "ผิดปกติจริง" },
+  { key: "fp", label: "เตือนผิด" },
+];
+const ALERT_PAGE = 50; // cards drawn at a time; "แสดงเพิ่ม" adds the next page
+const TOAST_MS = 5000;
+const TOAST_MAX = 3;
 const RED_TEAM_MODES = ["replay", "sim"];
+// the simulate page: one card per scenario family; a click runs it with SIM_DEFAULTS
+const SIM_CARDS = [
+  { family: "pump_burst", title: "ปั่นเร็ว", line: "ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที", icon: "steep" },
+  { family: "pump_stealth", title: "ปั่นแบบเนียน", line: "ค่อยๆ ดันราคาขึ้นช้าๆ", icon: "ramp" },
+  { family: "wash_pingpong", title: "ซื้อขายวนหลอก", line: "ซื้อขายกันเองไปมาให้ดูคึกคัก", icon: "loop" },
+];
+const SIM_DEFAULTS = { region: "test", offset_s: 60 };
+const SIM_REASON = {
+  live: "ทดลองได้เฉพาะโหมดย้อนดู",
+  viewer: "ต้องเป็นผู้วิเคราะห์ขึ้นไป",
+  ended: "การย้อนดูจบแล้ว รอรอบใหม่",
+};
+const SIM_WAIT_TH = "รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู";
+const SIM_OFFSET_TH = "เวลาเริ่มต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
+const SIM_PAST_END_TH = "เหตุการณ์จะเลยข้อมูลสุดท้าย ลองลดเวลาเริ่มในตั้งค่าขั้นสูง";
+const SIM_SYMBOL_TH = "ไม่รู้จักเหรียญนี้";
+const SIM_FAILED_TH = "เริ่มการทดลองไม่สำเร็จ ลองใหม่อีกครั้ง";
+const REPLAY_ENDED_TH = "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่"; // the server's 409 text (api/app.py)
 const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
 // Eval targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6 (spec section 6).
 // "pair" cards need the AE-minus-baseline CI lower bound above 0; "reference" pairs show the
 // diff and CI only (the MVP spec asks the AE to beat iforest / robust_z / kk, not random / pca).
+// `label` (metric ids) is for the committee table; `title` is the plain Thai card title.
+// The false-alarm target is "≤ the budget": its cap follows the chosen budget (`capIsBudget`).
+const SEMISYN_TH = { pump_burst: "ปั่นเร็ว", pump_stealth: "ปั่นแบบเนียน", wash_pingpong: "ซื้อขายวนหลอก" };
+const BASELINE_TH = {
+  "baseline.iforest": "วิธีแยกจุดผิดปกติด้วยต้นไม้สุ่ม",
+  "stat.robust_z": "วิธีวัดระยะห่างจากค่าปกติ",
+  "baseline.kk": "กฎตรวจการปั่นจากงานวิจัยเดิม",
+  "baseline.random": "การเตือนแบบสุ่ม",
+  "baseline.pca": "วิธีลดมิติข้อมูล",
+};
 const EVAL_TARGETS = [
-  { id: "real_recall", label: "recall_any ≥ 0.8 · REAL (real_t001)", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true },
+  { id: "real_recall", label: "recall_any ≥ 0.8 · REAL (real_t001)", title: "จับเหตุการณ์ในข้อมูลจริง", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true },
+  { id: "real_fa", label: "เตือนผิด ≤ งบ · REAL", title: "การเตือนผิดโดยเฉลี่ย", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2, capIsBudget: true },
+  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · REAL", title: "การเตือนผิดในวันปกติ", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
+  { id: "latency_p99", label: "compute latency p99 < 2 s", title: "ความเร็วในการเตือน", cmp: "none", threshold: 2 },
   ...["pump_burst", "pump_stealth", "wash_pingpong"].map((v) => ({
-    id: `semisyn_${v}`, label: `recall_any ≥ 0.8 · SEMI-SYN ${v}`, experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true,
+    id: `semisyn_${v}`, label: `recall_any ≥ 0.8 · SEMI-SYN ${v}`, title: SEMISYN_TH[v], experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true,
   })),
-  { id: "real_fa", label: "เตือนผิด ≤ งบ · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2 },
-  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
   ...["baseline.iforest", "stat.robust_z", "baseline.kk"].map((b) => ({
-    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
+    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, title: BASELINE_TH[b], experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
   })),
   ...["baseline.random", "baseline.pca"].map((b) => ({
-    id: `ae_vs_${b}`, label: `AE เทียบ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0, reference: true,
+    id: `ae_vs_${b}`, label: `AE เทียบ ${b}`, title: BASELINE_TH[b], experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0, reference: true,
   })),
-  { id: "latency_p99", label: "compute latency p99 < 2 s", cmp: "none", threshold: 2 },
 ];
 
 const state = {
@@ -58,6 +115,9 @@ const state = {
   symbols: [],
   symbol: null,
   alerts: new Map(), // alert_id -> item
+  feedback: new Map(), // alert_id -> verdict rows, oldest first (GET /api/feedback)
+  alertFilter: "all", // the chosen ALERT_FILTERS key
+  alertsShown: ALERT_PAGE,
   taxonomy: null,
   lastBarUs: null,
   ws: null,
@@ -66,11 +126,20 @@ const state = {
   route: null,
   detailChart: null,
   injections: [],
+  simBusy: false, // an inject POST is on its way: the cards wait for it
+  simEnded: false, // the server said this replay round has ended; a replay_restarted reopens
   railIds: null, // alert ids already on the rail; null until the first render
   alertCount: 0,
+  alertCountKnown: false, // the count has been shown once: only a later rise flashes the card
+  alertsLoaded: false, // the first /api/alerts answered: before it, a count is not yet the real one
+  hero: null, // the last heroStatus shown: the DOM is touched only when it changes
+  speed: null, // the speed chip the server last accepted
   layersOpen: false,
   me: null, // GET /api/me: { username, display_name, role, auth_enabled, prefs }
   started: false, // the data boot (symbols, series, alerts, websocket) has run
+  view: "loading", // bootView(): only the loader shows until /api/me answers
+  bootError: null, // why the last /api/me gave no usable answer: { status } or { answered } or {}
+  pendingHelp: false, // a help route asked before the app was entered: opened by enterApp()
   evalBudget: null, // saved Eval budget (string, as the option value)
   audit: [], // Activity rows already loaded, newest first
   auditDone: false,
@@ -84,7 +153,9 @@ const AUDIT_ACTIONS = [
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
 ];
 const NEED_ANALYST_TH = "ต้องเป็น analyst";
-const DEFAULT_ROUTE = "#/monitor";
+const DEFAULT_ROUTE = "#/home";
+const ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" };
+const MODE_TH = { replay: "ย้อนดู", live: "สด", sim: "จำลอง" };
 
 function setMe(me) {
   state.me = me && typeof me === "object" ? me : null;
@@ -121,6 +192,29 @@ function goLogin() {
   if (here.startsWith("#/login")) return;
   const next = safeNext(here);
   location.hash = next === DEFAULT_ROUTE && !here.startsWith(DEFAULT_ROUTE) ? "#/login" : `#/login?next=${encodeURIComponent(next)}`;
+}
+
+// what the first paint may show: nothing but the loader until we know whether sign-in is on,
+// then the sign-in page (auth on, no session) or the app; so the dashboard never flashes
+function bootView(me, authEnabled) {
+  if (authEnabled !== true && authEnabled !== false) return "loading";
+  if (me || !authEnabled) return "app";
+  return "login";
+}
+
+// the loader's text while /api/me gives no usable answer: no answer at all (network) differs from
+// a server that answered with an error, so a broken deploy does not read as a dropped connection
+function bootRetryText(err) {
+  const status = err && err.status;
+  if (isNum(status)) return `เซิร์ฟเวอร์ตอบกลับผิดพลาด (รหัส ${status}) กำลังลองใหม่`;
+  if (err && err.answered) return "เซิร์ฟเวอร์ตอบกลับผิดพลาด กำลังลองใหม่";
+  return "ยังติดต่อเซิร์ฟเวอร์ไม่ได้ กำลังลองใหม่";
+}
+
+// ms before retry number `attempt` (0-based): 3 s, 6 s, 12 s, 24 s, then 30 s
+function bootRetryDelay(attempt) {
+  const n = Number.isInteger(attempt) && attempt > 0 ? attempt : 0;
+  return Math.min(3000 * 2 ** Math.min(n, 4), 30000);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -171,6 +265,21 @@ function fmtUs(us) {
 
 function fmtSec(t) {
   return fmtUs(t * S_US);
+}
+
+// Thai clock time (Asia/Bangkok, UTC+7, no daylight saving) for plain view: "23:30 น."; "UTC" stays in details
+const TH_OFFSET_US = 7 * 3600 * S_US;
+
+function thaiClock(us, withSeconds) {
+  if (!isNum(us)) return null;
+  const d = new Date(Math.floor((us + TH_OFFSET_US) / 1000));
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(11, withSeconds ? 19 : 16);
+}
+
+function fmtThaiTime(us, withSeconds = false) {
+  const t = thaiClock(us, withSeconds);
+  return t === null ? "–" : `${t} น.`;
 }
 
 function fmtP(p) {
@@ -253,7 +362,8 @@ function storageSet(key, value) {
 
 // ------------------------------------------------------------------ prefs
 
-const PREF_KEYS = { theme: "theme", symbol: "idsai.symbol", eval_budget: "idsai.eval_budget" };
+// the server still accepts a saved `theme`; the page has one look and ignores it
+const PREF_KEYS = { symbol: "idsai.symbol", eval_budget: "idsai.eval_budget" };
 let prefsPending = {};
 let prefsTimer = null;
 
@@ -265,8 +375,6 @@ function authOn() {
 function loadedPrefs() {
   if (authOn()) return state.me.prefs || {};
   const out = {};
-  const theme = storageGet(PREF_KEYS.theme);
-  if (theme) out.theme = theme;
   const symbol = storageGet(PREF_KEYS.symbol);
   if (symbol) out.symbol = symbol;
   const raw = storageGet(PREF_KEYS.eval_budget);
@@ -316,49 +424,15 @@ function parentTechnique(id) {
 
 // ------------------------------------------------------------------ top bar
 
-const THEMES = ["auto", "dark", "light"];
+// the help drawer: a later task fills it; until then "?" and the old #/about, #/taxonomy links do nothing
+function openHelp() {}
 
-function currentTheme() {
-  const t = document.documentElement.dataset.theme;
-  return THEMES.includes(t) ? t : "auto";
-}
-
-function applyTheme(choice) {
-  const c = THEMES.includes(choice) ? choice : "auto";
-  if (c === "auto") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = c;
-  const btn = $("theme-toggle");
-  if (btn) {
-    btn.textContent = c.toUpperCase();
-    btn.title = `ธีม: ${c}`;
-  }
-  for (const b of document.querySelectorAll("[data-theme-choice]")) {
-    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === c));
-  }
-  storageSet("theme", c);
-  restyleCharts();
-}
-
-// a theme change the user made: apply it and remember it with the account
-function chooseTheme(choice) {
-  applyTheme(choice);
-  savePrefs({ theme: currentTheme() });
-}
-
-function bindTheme() {
-  const saved = storageGet("theme");
-  applyTheme(THEMES.includes(saved) ? saved : "auto");
-  $("theme-toggle").addEventListener("click", () => {
-    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
-  });
-  for (const b of document.querySelectorAll("[data-theme-choice]")) {
-    b.addEventListener("click", () => chooseTheme(b.dataset.themeChoice));
-  }
-}
+// the first-time tour: a later task fills it
+function startTour() {}
 
 // ------------------------------------------------------------------ motion + presenter keys
 
-const PAGE_ORDER = ["#/monitor", "#/alerts", "#/redteam", "#/eval", "#/taxonomy", "#/about"];
+const PAGE_ORDER = ["#/home", "#/alerts", "#/simulate", "#/results"];
 
 function reducedMotion() {
   const mm = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null;
@@ -405,18 +479,23 @@ function flash(node, cls = "flash") {
   node.classList.add(cls);
 }
 
+// a field owns every key typed into it
+const KEY_OWNERS = ["INPUT", "SELECT", "TEXTAREA"];
+// a button, menu or link owns only Space (it presses, opens or follows); 1-4 and ? still work
+const SPACE_OWNERS = ["BUTTON", "SUMMARY", "A"];
+
+// "play", "help", one of PAGE_ORDER, or null; never while a field has focus
 function presenterKey(ev) {
   if (!ev || ev.ctrlKey || ev.metaKey || ev.altKey) return null;
-  const tag = ev.target && ev.target.tagName;
-  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return null;
+  const target = ev.target;
+  if (target && (KEY_OWNERS.includes(target.tagName) || target.isContentEditable)) return null;
   // ev.code is the physical key: it still works when a Thai layout changes ev.key
+  const key = ev.key || "";
   const code = ev.code || "";
-  if (ev.key === " " || code === "Space") return "toggle-play";
-  if (ev.key === "t" || ev.key === "T" || code === "KeyT") return "theme";
-  if (/^[1-6]$/.test(ev.key || "")) return `page:${ev.key}`;
-  const digit = /^(?:Digit|Numpad)([1-6])$/.exec(code);
-  if (digit) return `page:${digit[1]}`;
-  return null;
+  if (key === " " || code === "Space") return target && SPACE_OWNERS.includes(target.tagName) ? null : "play";
+  if (key === "?" || (code === "Slash" && ev.shiftKey)) return "help";
+  const digit = /^[1-4]$/.test(key) ? key : (/^(?:Digit|Numpad)([1-4])$/.exec(code) || [])[1];
+  return digit ? PAGE_ORDER[Number(digit) - 1] : null;
 }
 
 // what Space should do now: the opposite of the replay state, nothing in LIVE or unknown mode
@@ -432,16 +511,17 @@ function noteReplayAction(action) {
 }
 
 function onPresenterKey(ev) {
+  if (state.view !== "app" || state.route === "login") return; // nothing to present before sign-in
   const act = presenterKey(ev);
   if (!act) return;
   ev.preventDefault();
-  if (act === "toggle-play") {
+  if (act === "play") {
     const next = playToggleAction(state.mode, state.replaying);
     if (next) control(next);
-  } else if (act === "theme") {
-    chooseTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
+  } else if (act === "help") {
+    openHelp();
   } else {
-    location.hash = PAGE_ORDER[Number(act.slice(5)) - 1];
+    location.hash = act;
   }
 }
 
@@ -459,43 +539,49 @@ function setLive(on) {
 function renderHealth(h) {
   state.health = h;
   setMode(h.mode);
-  if (isNum(h.event_us)) $("clock").textContent = fmtUs(h.event_us);
-  else if (isNum(state.lastBarUs)) $("clock").textContent = fmtUs(state.lastBarUs);
+  if (isNum(h.event_us)) $("clock").textContent = fmtThaiTime(h.event_us, true);
+  else if (isNum(state.lastBarUs)) $("clock").textContent = fmtThaiTime(state.lastBarUs, true);
+  renderReplayClock(eventNowUs());
+  renderHealthCard(h);
+  renderBudget();
+  renderHero();
+  tickInjections(); // the Red-Team card moves with the clock above it
+}
 
+// "สุขภาพระบบ": the auditor's overall word, and its checks in Thai behind the card's summary
+function renderHealthCard(h) {
   const checks = Array.isArray(h.checks) ? h.checks : [];
-  const dot = $("auditor-dot");
-  dot.className = `dot ${h.overall || ""}`;
+  $("health-dot").className = `dot ${h.overall || ""}`;
+  $("health-text").textContent = CHECK_TH[h.overall] || "–";
   const warm = checks.find((c) => c.name === "warmup");
-  let text = `${CHECK_TH[h.overall] || h.overall || "–"}`;
+  let sub = "กดเพื่อดูรายการตรวจ";
   if (warm && warm.status !== "ok") {
     const hours = warm.value && warm.value.hours_remaining;
-    text = isNum(hours)
-      ? `กำลังอุ่นเครื่อง (เหลือประมาณ ${hours.toFixed(1)} ชม.)`
-      : "กำลังอุ่นเครื่อง";
+    sub = isNum(hours)
+      ? `กำลังเก็บข้อมูลตั้งต้น (เหลือประมาณ ${hours.toFixed(1)} ชม.)`
+      : "กำลังเก็บข้อมูลตั้งต้น";
   }
-  $("auditor-text").textContent = text;
-  const kpiAud = $("kpi-auditor");
-  kpiAud.textContent = text;
-  kpiAud.className = `kpi-value ${h.overall || ""}`;
-  $("auditor").title = text; // the warm-up wording lives in the tooltip, the bar stays short
-  const list = clear($("auditor-checks"));
+  $("health-sub").textContent = sub;
+  const list = clear($("health-checks"));
   for (const c of checks) {
     list.appendChild(
       el(
         "li",
         {},
-        el("span", { class: `dot ${c.status}`, style: "display:inline-block;margin-right:6px" }),
-        el("strong", {}, c.name),
-        ` · ${CHECK_TH[c.status] || c.status}`,
-        el("div", { class: "muted" }, c.detail_th || ""),
+        el(
+          "div",
+          { class: "check-head" },
+          el("span", { class: `dot ${c.status}` }),
+          el("span", {}, CHECK_NAME_TH[c.name] || "การตรวจอื่น"),
+          el("span", { class: `check-state ${c.status}` }, CHECK_TH[c.status] || "–"),
+        ),
+        c.detail_th ? el("div", { class: "muted small" }, c.detail_th) : null,
       ),
     );
   }
   if (isNum(h.late_trades) && h.late_trades > 0) {
-    list.appendChild(el("li", { class: "muted" }, `การซื้อขายที่มาช้า: ${h.late_trades}`));
+    list.appendChild(el("li", { class: "muted small" }, `การซื้อขายที่มาช้า ${h.late_trades} รายการ`));
   }
-  renderBudget();
-  tickInjections(); // the Red-Team card moves with the clock above it
 }
 
 function redTeamAllowed(mode) {
@@ -507,22 +593,34 @@ function setMode(mode) {
   if (!mode || mode === state.mode) return;
   state.mode = mode;
   state.replaying = true; // a new mode starts with a running replay
+  state.simEnded = false; // a new mode is a new replay round
   const lamp = $("live-dot");
   lamp.classList.remove("ok", "fail");
   lamp.classList.add(mode === "live" ? "fail" : "ok");
   const badge = $("mode-badge");
-  badge.textContent = String(mode).toUpperCase();
+  badge.textContent = MODE_TH[mode] || String(mode);
   badge.className = `badge badge-mode ${mode}`;
   const live = mode === "live";
-  $("replay-controls").hidden = live;
-  const allowed = redTeamAllowed(mode);
-  const refused = $("redteam-refused");
-  refused.hidden = allowed;
-  refused.textContent = allowed ? "" : live ? REFUSED_TH : UNKNOWN_MODE_TH;
-  for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
-    node.disabled = !allowed;
-  }
-  applyRoleGates();
+  $("replay-bar").hidden = live;
+  renderPlayButton();
+  applyRoleGates(); // the simulate cards open only in a confirmed replay / sim mode
+}
+
+// why the simulate cards are closed, in Thai; "" when they are open
+function simReason(mode, analyst, ended) {
+  if (!redTeamAllowed(mode)) return mode === "live" ? SIM_REASON.live : SIM_WAIT_TH;
+  if (!analyst) return SIM_REASON.viewer;
+  if (ended) return SIM_REASON.ended;
+  return "";
+}
+
+function applySimGates() {
+  const why = simReason(state.mode, can("analyst"), state.simEnded);
+  for (const c of SIM_CARDS) $(`sim-${c.family}`).disabled = why !== "" || state.simBusy;
+  for (const node of [$("rt-region"), $("rt-offset"), $("rt-symbol")]) node.disabled = why !== "";
+  const box = $("sim-reason");
+  box.hidden = why === "";
+  box.textContent = why;
 }
 
 // UI convenience only: the server enforces the role on every route
@@ -532,21 +630,22 @@ function applyRoleGates() {
     if (ok) node.removeAttribute("title");
     else node.title = NEED_ANALYST_TH;
   };
-  for (const id of ["btn-play", "btn-pause", "speed-select", "seek-input", "btn-seek"]) {
-    const node = $(id);
+  const replay = [...["btn-play", "seek-input", "btn-seek"].map($), ...$("replay-bar").querySelectorAll(".chip")];
+  for (const node of replay) {
     node.disabled = !ok;
     gate(node);
   }
-  const allowed = redTeamAllowed(state.mode) && ok;
-  for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
-    node.disabled = !allowed;
-    gate(node);
-  }
+  // a viewer still sees the bar, read-only, and is told why in Thai
+  const reason = $("replay-reason");
+  reason.hidden = ok;
+  reason.textContent = ok ? "" : VIEWER_REPLAY_TH;
+  applySimGates();
   for (const node of document.querySelectorAll(".feedback button, .feedback input")) {
     node.disabled = !ok;
     gate(node);
   }
-  $("tab-activity").hidden = !can("admin");
+  $("menu-activity").hidden = !can("admin");
+  renderPlayButton(); // the gate above cleared every title; the play button gets its "(กด Space)" back
 }
 
 function eventNowUs() {
@@ -555,49 +654,132 @@ function eventNowUs() {
   return state.lastBarUs;
 }
 
+// "ใช้งบแจ้งเตือนไป x/y": the selected coin's alerts of the last 24 h against the per-coin daily budget
 function renderBudget() {
   const h = state.health;
   const budget = h && h.budget_per_symbol_day;
-  const now = eventNowUs();
+  const n = renderAlertsKpi();
   const fill = $("budget-fill");
-  if (!isNum(budget) || !isNum(now)) {
-    $("budget-text").textContent = "–";
-    $("kpi-budget").textContent = "งบ –";
+  const line = $("budget-line");
+  if (!isNum(budget) || !isNum(n)) {
+    line.textContent = "ใช้งบแจ้งเตือนไป –";
+    line.removeAttribute("title");
     fill.style.width = "0";
-    renderAlertsKpi(now);
     return;
   }
-  const nSym = Math.max(state.symbols.length, 1);
-  let n = 0;
-  for (const a of state.alerts.values()) {
-    if (a.ts_event_us > now - DAY_US && a.ts_event_us <= now) n += 1;
-  }
-  const rate = n / nSym;
-  const frac = budget > 0 ? rate / budget : 0;
+  const frac = budget > 0 ? n / budget : 0;
   fill.style.width = `${Math.min(frac, 1) * 100}%`;
   fill.className = `meter-fill${frac > 1 ? " over" : frac >= 0.8 ? " warn" : ""}`;
-  $("budget-text").textContent = `${rate.toFixed(1)} / ${budget} ครั้งต่อสัญลักษณ์-วัน`;
-  $("kpi-budget").textContent = `งบ ${budget}`;
-  renderAlertsKpi(now);
+  line.textContent = `ใช้งบแจ้งเตือนไป ${n}/${budget}`;
+  line.title = `งบคือจำนวนแจ้งเตือนที่ตั้งไว้ต่อเหรียญต่อวัน (${budget} ครั้ง)`;
 }
 
-// the KPI counts the selected symbol's alerts of the last 24 h (the unit of the budget above)
+// the card counts the selected symbol's alerts of the last 24 h (the unit of the budget); null without a clock
 function renderAlertsKpi(now = eventNowUs()) {
-  const box = $("kpi-alerts");
+  const box = $("alerts-count");
   if (!state.symbol || !isNum(now)) {
     box.textContent = "–";
     state.alertCount = 0;
-    return;
+    state.alertCountKnown = false;
+    return null;
   }
   let n = 0;
   for (const a of state.alerts.values()) {
     if (a.symbol === state.symbol && a.ts_event_us > now - DAY_US && a.ts_event_us <= now) n += 1;
   }
-  const rose = n > state.alertCount;
+  const rose = state.alertCountKnown && n > state.alertCount;
   state.alertCount = n;
+  if (state.alertsLoaded) state.alertCountKnown = true;
   tweenNumber(box, n, 0);
-  if (rose) flash(box.parentNode);
+  if (rose) flash($("card-alerts"));
+  return n;
 }
+
+// ------------------------------------------------------------------ home: hero status
+
+// the one sentence at the top of Home; pure, so the rules are tested in node
+function heroStatus({ nowUs, alerts, f, tau, auditor, symbol } = {}) {
+  let recent = null;
+  if (isNum(nowUs)) {
+    for (const a of alerts || []) {
+      if (!a || !isNum(a.ts_event_us) || a.ts_event_us < nowUs - HERO_RECENT_US || a.ts_event_us > nowUs) continue;
+      if (!recent || a.ts_event_us > recent.ts_event_us) recent = a;
+    }
+  }
+  if (recent) {
+    const where = recent.symbol || symbol || "";
+    return {
+      level: "alert",
+      title: "พบความผิดปกติทางสถิติ",
+      line: `ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ ${where} เมื่อ ${fmtThaiTime(recent.ts_event_us)}`,
+      alertId: typeof recent.alert_id === "string" ? recent.alert_id : null,
+    };
+  }
+  const near = isNum(f) && isNum(tau) && f >= HERO_WATCH_RATIO * tau;
+  if (near || auditor === "warn") {
+    const over = near && f >= tau;
+    return {
+      level: "watch",
+      title: "กำลังเฝ้าระวัง",
+      line: over ? "ระดับความผิดปกติข้ามเส้นเตือน" : near ? "ระดับความผิดปกติใกล้เส้นเตือน" : "ระบบตรวจตัวเองพบจุดที่ควรดู",
+      alertId: null,
+    };
+  }
+  return { level: "normal", title: "ตลาดปกติ", line: "ไม่มีแจ้งเตือนใน 30 นาทีล่าสุด", alertId: null };
+}
+
+// runs on every health, score and alert update; writes the DOM only when the sentence changes
+function renderHero() {
+  if (!state.health && !isNum(state.lastBarUs)) return; // no clock yet: keep "กำลังอ่านสถานะ"
+  const next = heroStatus({
+    nowUs: eventNowUs(),
+    alerts: state.alerts.values(),
+    f: chart.now.f,
+    tau: chart.tau,
+    auditor: state.health && state.health.overall,
+    symbol: state.symbol,
+  });
+  const prev = state.hero;
+  if (prev && prev.level === next.level && prev.title === next.title && prev.line === next.line && prev.alertId === next.alertId) {
+    return;
+  }
+  state.hero = next;
+  $("hero").dataset.level = next.level;
+  $("hero-title").textContent = next.title;
+  const line = clear($("hero-line"));
+  line.appendChild(next.alertId ? el("a", { href: alertHref(next.alertId) }, next.line) : document.createTextNode(next.line));
+  if (!prev || prev.level !== next.level) {
+    const orb = $("hero-orb");
+    orb.className = `orb ${next.level}`;
+    flash(orb, "orb-change");
+  }
+}
+
+// the replay bar's clock: the event time, and how far through its UTC day it is
+function renderReplayClock(now) {
+  const clock = $("replay-clock");
+  const fill = $("replay-fill");
+  if (!isNum(now)) {
+    clock.textContent = "–";
+    fill.style.width = "0";
+    return;
+  }
+  clock.textContent = `เวลาในข้อมูล ${fmtThaiTime(now, true)}`;
+  clock.title = fmtUs(now);
+  const th = now + TH_OFFSET_US;
+  const day = (((th % DAY_US) + DAY_US) % DAY_US) / DAY_US;
+  fill.style.width = `${(day * 100).toFixed(2)}%`;
+}
+
+// the first sentence of an explanation, for a one-line headline: it ends at a "." or ";" that is
+// followed by a space or the end (so 3.5 and 1.2e-5 stay whole), and is cut to 120 characters
+function firstSentence(text) {
+  const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+  const stop = /[.;](?= |$)/.exec(flat);
+  const head = (stop ? flat.slice(0, stop.index) : flat).trim();
+  return head.length > HEADLINE_MAX ? `${head.slice(0, HEADLINE_MAX - 1)}…` : head;
+}
+
 
 // ------------------------------------------------------------------ monitor chart
 
@@ -605,6 +787,7 @@ const chart = {
   api: null,
   price: null,
   f: null,
+  fGlow: null, // a wide faint copy under the F line: its glow
   lanes: {},
   tau: null,
   tauLine: null,
@@ -612,6 +795,7 @@ const chart = {
   last: {}, // series key -> last plotted time (s)
   priceTimes: [], // sorted times of the price series, for snapping markers
   now: { price: null, f: null }, // latest plotted values, shown while the pointer is away
+  hover: false, // the pointer is on the chart: the readout follows it, not the stream
 };
 
 function chartColors() {
@@ -621,6 +805,7 @@ function chartColors() {
     grid: cssVar("--line"),
     price: cssVar("--line-price"),
     f: cssVar("--line-f"),
+    fGlow: cssVar("--line-f-glow"),
     tau: cssVar("--tau"),
     shade: cssVar("--shade"),
   };
@@ -639,8 +824,18 @@ function baseChartOptions() {
     },
     grid: { vertLines: { color: c.grid }, horzLines: { color: c.grid } },
     rightPriceScale: { borderColor: c.grid },
-    timeScale: { borderColor: c.grid, timeVisible: true, secondsVisible: true },
-    localization: { timeFormatter: (t) => (isNum(t) ? fmtSec(t) : "") },
+    timeScale: {
+      borderColor: c.grid,
+      timeVisible: true,
+      secondsVisible: true,
+      // ticks in Thai time too: a day mark shows the date (dd/mm), the rest the clock
+      tickMarkFormatter: (t, kind) => {
+        if (!isNum(t)) return "";
+        if (kind <= 2) return new Date((t * S_US + TH_OFFSET_US) / 1000).toISOString().slice(5, 10).split("-").reverse().join("/");
+        return thaiClock(t * S_US, kind === 4);
+      },
+    },
+    localization: { timeFormatter: (t) => (isNum(t) ? fmtThaiTime(t * S_US, true) : "") },
   };
 }
 
@@ -664,9 +859,16 @@ function initChart() {
     lineOptions(c.price, "ราคา", { priceFormat: { type: "price", precision: 8, minMove: 1e-8 } }),
     0,
   );
+  // the glow goes first so the F line draws on top of it; it has no label and no crosshair dot
+  chart.fGlow = chart.api.addSeries(
+    LWC.LineSeries,
+    lineOptions(c.fGlow, "", { lineWidth: 6, lastValueVisible: false, crosshairMarkerVisible: false }),
+    1,
+  );
   chart.f = chart.api.addSeries(
     LWC.LineSeries,
-    lineOptions(c.f, "F (−log10 p)", {
+    lineOptions(c.f, "ระดับความผิดปกติ", {
+      lineWidth: 2,
       // keep the τ line in view even while F stays far below it
       autoscaleInfoProvider: (original) => {
         const r = original();
@@ -707,6 +909,7 @@ function setLayersOpen(open) {
   const btn = $("layers-toggle");
   btn.setAttribute("aria-expanded", String(open));
   btn.textContent = open ? "ซ่อน L1/L2/L3" : "แสดง L1/L2/L3";
+  $("chart").classList.toggle("lanes", open); // three more panes need more height
   if (!chart.api) return;
   if (open) {
     addLanes();
@@ -716,47 +919,41 @@ function setLayersOpen(open) {
   }
 }
 
-function setInfoOpen(open) {
-  $("chart-info").setAttribute("aria-expanded", String(open));
-  $("chart-info-body").hidden = !open;
-}
-
 function bindMonitor() {
   $("layers-toggle").addEventListener("click", () => setLayersOpen(!state.layersOpen));
-  $("chart-info").addEventListener("click", () => setInfoOpen($("chart-info-body").hidden));
+}
+
+// the crosshair in plain words: when, the price, and how the level stands against the warning line
+function readoutText(time, price, f, tau) {
+  const when = isNum(time) ? `เวลา ${fmtThaiTime(time * S_US, true)}` : "ล่าสุด";
+  const parts = [when, `ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`];
+  let level = `ระดับความผิดปกติ ${isNum(f) ? fmtNum(f, 2) : "–"}`;
+  if (isNum(f) && isNum(tau)) level += f >= tau ? ` (ถึงเส้นเตือน ${fmtNum(tau, 2)})` : ` (เส้นเตือน ${fmtNum(tau, 2)})`;
+  parts.push(level);
+  return parts.join(" · ");
 }
 
 function renderReadout(time, price, f) {
-  const parts = [];
-  if (isNum(time)) parts.push(fmtSec(time));
-  parts.push(`ราคา ${isNum(price) ? fmtNum(price, 8) : "–"}`);
-  parts.push(`F ${isNum(f) ? fmtNum(f, 2) : "–"}`);
-  $("readout").textContent = parts.join(" · ");
+  $("readout").textContent = readoutText(time, price, f, chart.tau);
+}
+
+function renderSymbolPrice() {
+  const p = chart.now.price;
+  $("symbol-price").textContent = `ราคาล่าสุด ${isNum(p) ? fmtNum(p, 8) : "–"}`;
 }
 
 function onCrosshair(param) {
   if (!param || !isNum(param.time) || !param.seriesData) {
+    chart.hover = false;
     renderReadout(null, chart.now.price, chart.now.f); // pointer left: show the latest
     return;
   }
+  chart.hover = true;
   const at = (series) => {
     const pt = series && param.seriesData.get(series);
     return pt && isNum(pt.value) ? pt.value : null;
   };
   renderReadout(param.time, at(chart.price), at(chart.f));
-}
-
-function restyleCharts() {
-  if (chart.api) {
-    chart.api.applyOptions(baseChartOptions());
-    chart.price.applyOptions({ color: cssVar("--line-price") });
-    chart.f.applyOptions({ color: cssVar("--line-f") });
-    LANES.forEach(([key, , color]) => {
-      if (chart.lanes[key]) chart.lanes[key].applyOptions({ color: cssVar(color) });
-    });
-    if (chart.tauLine) chart.tauLine.applyOptions({ color: cssVar("--tau") });
-  }
-  if (state.detailChart) state.detailChart.restyle();
 }
 
 function seriesData(times, values) {
@@ -774,14 +971,6 @@ function seriesData(times, values) {
 function lastValue(data) {
   for (let i = data.length - 1; i >= 0; i -= 1) if ("value" in data[i]) return data[i].value;
   return null;
-}
-
-function showTau(tau) {
-  $("kpi-tau").textContent = fmtNum(tau, 2);
-}
-
-function showF(f) {
-  tweenNumber($("kpi-f"), f, 2);
 }
 
 function lastTime(data) {
@@ -802,7 +991,7 @@ function setTau(tau) {
       lineWidth: 1,
       lineStyle: LWC.LineStyle ? LWC.LineStyle.Dashed : 2,
       axisLabelVisible: true,
-      title: "τ",
+      title: "เส้นเตือน",
     });
   }
 }
@@ -825,9 +1014,9 @@ async function loadSeries() {
   chart.last = { price: lastTime(price) };
   const f = seriesData(times, s.F || []);
   chart.f.setData(f);
+  chart.fGlow.setData(f);
   chart.last.f = lastTime(f);
   chart.now = { price: lastValue(price), f: lastValue(f) };
-  renderReadout(null, chart.now.price, chart.now.f);
   for (const [key] of LANES) {
     if (!chart.lanes[key]) continue;
     const d = seriesData(times, s[key] || []);
@@ -835,10 +1024,11 @@ async function loadSeries() {
     chart.last[key] = lastTime(d);
   }
   setTau(s.tau);
-  showTau(s.tau);
-  showF(chart.now.f);
+  renderReadout(null, chart.now.price, chart.now.f);
+  renderSymbolPrice();
   $("chart-empty").hidden = price.length > 0;
   renderMarkers();
+  renderHero();
 }
 
 function nearestTime(t) {
@@ -879,8 +1069,7 @@ function renderMarkers() {
       time: t,
       position: "aboveBar",
       shape: "arrowDown",
-      color: sevColor(a.severity),
-      text: a.technique_id,
+      color: sevColor(a.severity), // colour and shape only: no technique id on the Home chart
     });
   }
   markers.sort((a, b) => a.time - b.time);
@@ -901,20 +1090,25 @@ function onBar(bar) {
   if (!bar || !isNum(bar.t_us)) return;
   const closeUs = bar.t_us + S_US;
   if (!isNum(state.lastBarUs) || closeUs > state.lastBarUs) state.lastBarUs = closeUs;
-  if (state.mode === "live") $("clock").textContent = fmtUs(state.lastBarUs);
+  if (state.mode === "live") $("clock").textContent = fmtThaiTime(state.lastBarUs, true);
   if (bar.symbol !== state.symbol || !chart.api) return;
   const t = toSec(closeUs); // a bar closes at t_us + 1 s, where its score row ends
   if (plot("price", chart.price, t, bar.close)) {
     chart.priceTimes.push(t);
     $("chart-empty").hidden = true;
+    renderSymbolPrice();
   }
 }
 
 function onScore(p) {
   if (!p || p.symbol !== state.symbol || !chart.api || !isNum(p.t_end_us)) return;
   const t = toSec(p.t_end_us);
-  if (plot("f", chart.f, t, p.F)) showF(p.F);
+  if (plot("f", chart.f, t, p.F)) {
+    chart.fGlow.update({ time: t, value: p.F });
+    if (!chart.hover) renderReadout(null, chart.now.price, chart.now.f);
+  }
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);
+  renderHero();
 }
 
 // ------------------------------------------------------------------ replay controls
@@ -923,26 +1117,60 @@ async function control(action, value) {
   const status = $("replay-status");
   if (!can("analyst")) {
     status.textContent = NEED_ANALYST_TH;
-    return;
+    return false;
   }
   status.textContent = "…";
   try {
     const body = value === undefined ? { action } : { action, value };
     const r = await postJson("/api/replay/control", body);
     noteReplayAction(action);
+    if (action === "play" || action === "seek") {
+      state.simEnded = false; // the server took it: the cursor can move again, let the cards try
+      applySimGates();
+    }
     if (action === "play" || action === "pause") setLive(state.replaying);
-    status.textContent = `ตำแหน่ง ${fmtUs(r.cursor_us)}`;
+    renderPlayButton();
+    // the button and the chips already show play and speed; only a jump says where it landed
+    status.textContent = action === "seek" ? `ไปที่ ${fmtThaiTime(r.cursor_us, true)} แล้ว` : "";
+    return true;
   } catch (e) {
     status.textContent = e.message;
+    return false;
+  }
+}
+
+// one big button: ❚❚ while the replay runs, ▶ while it is paused
+function renderPlayButton() {
+  const btn = $("btn-play");
+  const playing = state.replaying;
+  btn.textContent = playing ? "❚❚" : "▶";
+  const label = playing ? "หยุดชั่วคราว" : "เล่นต่อ";
+  btn.setAttribute("aria-label", label);
+  if (can("analyst")) btn.title = `${label} (กด Space)`;
+}
+
+function renderSpeedChips() {
+  for (const chip of $("replay-bar").querySelectorAll(".chip")) {
+    chip.setAttribute("aria-pressed", String(Number(chip.dataset.speed) === state.speed));
   }
 }
 
 function bindReplay() {
-  $("btn-play").addEventListener("click", () => control("play"));
-  $("btn-pause").addEventListener("click", () => control("pause"));
-  $("speed-select").addEventListener("change", (ev) => {
-    const v = Number(ev.target.value);
-    if (Number.isFinite(v)) control("speed", v);
+  $("btn-play").addEventListener("click", () => {
+    const next = playToggleAction(state.mode, state.replaying);
+    if (next) control(next);
+  });
+  const chips = $("replay-bar").querySelectorAll(".chip");
+  chips.forEach((chip, i) => {
+    const c = SPEED_CHIPS[i];
+    chip.textContent = c.label;
+    chip.dataset.speed = String(c.v);
+    chip.addEventListener("click", async () => {
+      if (await control("speed", c.v)) {
+        state.speed = c.v;
+        renderSpeedChips();
+      }
+    });
   });
   $("btn-seek").addEventListener("click", () => {
     const raw = $("seek-input").value;
@@ -958,31 +1186,65 @@ function bindReplay() {
 // ------------------------------------------------------------------ alerts
 
 async function loadAlerts() {
+  const err = $("alerts-error");
+  let items;
+  let rows;
   try {
-    const items = await api("/api/alerts?limit=1000");
-    state.alerts = new Map(items.map((a) => [a.alert_id, a]));
+    [items, rows] = await Promise.all([
+      api("/api/alerts?limit=1000"),
+      api("/api/feedback").catch((e) => {
+        console.warn("feedback:", e.message);
+        return null; // the cards still show; only the verdict chips and filters lack data
+      }),
+    ]);
   } catch (e) {
     console.warn("alerts:", e.message);
+    err.textContent = `อ่านรายการแจ้งเตือนไม่ได้ (${e.message}) จะลองใหม่เมื่อเชื่อมต่อได้`;
+    err.hidden = false;
     return;
   }
+  state.alerts = new Map(items.map((a) => [a.alert_id, a]));
+  if (rows) state.feedback = groupFeedback(rows);
+  state.alertsLoaded = true;
+  err.textContent = rows ? "" : "อ่านผลการตรวจไม่ได้ ตัวกรองตามผลตรวจอาจยังไม่ครบ";
+  err.hidden = !!rows;
   alertsChanged();
 }
 
+function groupFeedback(rows) {
+  const out = new Map();
+  for (const f of rows || []) {
+    if (!f || typeof f.alert_id !== "string") continue;
+    if (!out.has(f.alert_id)) out.set(f.alert_id, []);
+    out.get(f.alert_id).push(f);
+  }
+  return out;
+}
+
 function alertsChanged() {
-  renderAlertsTable();
+  renderAlertCards();
   renderRail();
   renderMarkers();
   renderBudget();
+  renderHero();
   checkInjections();
 }
 
 function onAlert(data) {
   if (!data || typeof data !== "object") return;
   if (data.event === "resync") {
-    loadAlerts();
+    loadAlerts(); // a re-read, not news: no toast
+    return;
+  }
+  if (data.event === "replay_restarted") {
+    restartRuns(state.injections);
+    renderInjections();
+    state.simEnded = false; // a new round: the cards open again
+    applySimGates();
     return;
   }
   if (data.event === "alerts_reset") {
+    // verdicts stay: the server keeps them, and a replayed alert comes back under the same id
     for (const id of data.deleted || []) state.alerts.delete(id);
     if (resetRuns(state.injections, data.deleted || [])) renderInjections();
     alertsChanged();
@@ -990,8 +1252,25 @@ function onAlert(data) {
     return;
   }
   if (typeof data.alert_id !== "string") return;
+  const fresh = !state.alerts.has(data.alert_id); // an update of a known alert is not a new one
   state.alerts.set(data.alert_id, data);
   alertsChanged();
+  if (fresh) showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
+}
+
+// a toast in the top right for TOAST_MS; at most TOAST_MAX at once, the oldest makes room
+function showToast(text, href) {
+  const root = $("toast-root");
+  if (!root) return;
+  while (root.children.length >= TOAST_MAX) root.removeChild(root.firstChild);
+  const toast = el("div", { class: reducedMotion() ? "toast" : "toast slide" });
+  const close = () => toast.remove();
+  append(toast, [
+    href ? el("a", { class: "toast-text", href, onclick: close }, text) : el("span", { class: "toast-text" }, text),
+    el("button", { type: "button", class: "toast-close", "aria-label": "ปิด", onclick: close }, "×"),
+  ]);
+  root.appendChild(toast);
+  setTimeout(close, TOAST_MS);
 }
 
 function sortedAlerts() {
@@ -1006,38 +1285,123 @@ function sevKey(severity) {
   return severity >= 3 ? "high" : severity === 2 ? "mid" : "low";
 }
 
-function renderAlertsTable() {
-  const body = clear($("alerts-body"));
-  const items = sortedAlerts();
-  $("alerts-empty").hidden = items.length > 0;
-  $("alerts-table").hidden = items.length === 0;
-  for (const a of items) {
-    const row = el(
-      "tr",
-      { class: "clickable", tabindex: "0", "data-sev": sevKey(a.severity) },
-      el("td", {}, el("span", { class: `sev sev-${a.severity}` }, SEVERITY_TH[a.severity] || a.severity)),
-      el("td", { class: "mono" }, a.technique_id),
-      el("td", {}, a.symbol),
-      el("td", { class: "mono" }, fmtUs(a.ts_event_us)),
-      el("td", { class: "num mono" }, fmtP(a.fused_p)),
-      el("td", { class: "num" }, `${a.agreement}/3`),
-      el("td", {}, STATUS_TH[a.status] || a.status),
+// the verdict of the newest row (by time; a tie goes to the later row), or null
+function latestVerdict(rows) {
+  let best = null;
+  for (const f of rows || []) {
+    if (f && (!best || !(f.ts_us < best.ts_us))) best = f;
+  }
+  return best ? best.verdict : null;
+}
+
+// alerts carrying their `feedback` rows, kept by ALERT_FILTERS key, newest first; never mutates
+function filterAlerts(alerts, key) {
+  return [...(alerts || [])]
+    .filter((a) => {
+      if (key === "open") return !(a.feedback && a.feedback.length);
+      if (key === "tp" || key === "fp") return latestVerdict(a.feedback) === key;
+      return true;
+    })
+    .sort((x, y) => y.ts_event_us - x.ts_event_us);
+}
+
+function withFeedback(a) {
+  return { ...a, feedback: state.feedback.get(a.alert_id) || [] };
+}
+
+function verdictChip(verdict) {
+  return verdict ? el("span", { class: `verdict-chip v-${verdict}` }, VERDICT_TH[verdict] || verdict) : null;
+}
+
+function renderAlertFilters(all) {
+  const box = clear($("alerts-filters"));
+  for (const flt of ALERT_FILTERS) {
+    const n = filterAlerts(all, flt.key).length;
+    box.appendChild(
+      el(
+        "button",
+        {
+          type: "button",
+          class: "filter-chip",
+          "aria-pressed": state.alertFilter === flt.key ? "true" : "false",
+          onclick: () => {
+            state.alertFilter = flt.key;
+            state.alertsShown = ALERT_PAGE;
+            renderAlertCards();
+          },
+        },
+        flt.label,
+        el("span", { class: "filter-count" }, n),
+      ),
     );
-    const go = () => {
-      location.hash = alertHref(a.alert_id);
-    };
-    row.addEventListener("click", go);
-    row.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") go();
-    });
-    body.appendChild(row);
   }
 }
 
-// newest eight alerts beside the chart; a row that was not there before slides in
+function alertCard(a) {
+  return el(
+    "a",
+    { class: "card alert-card", href: alertHref(a.alert_id), "data-sev": sevKey(a.severity) },
+    el(
+      "span",
+      { class: "alert-card-main" },
+      el("span", { class: "alert-card-text" }, patternText(a, state.taxonomy)),
+      el(
+        "span",
+        { class: "alert-card-meta small muted" },
+        el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
+        el("span", {}, a.symbol),
+      ),
+    ),
+    el(
+      "span",
+      { class: "alert-card-side" },
+      verdictChip(latestVerdict(a.feedback)),
+      el("span", { class: "alert-card-time" }, fmtThaiTime(a.ts_event_us)),
+    ),
+  );
+}
+
+// the alerts page: filter chips with counts, then one glass card per alert, newest first
+function renderAlertCards() {
+  const list = clear($("alerts-list"));
+  const all = [...state.alerts.values()].map(withFeedback);
+  $("alerts-empty").hidden = all.length > 0;
+  $("alerts-filters").hidden = all.length === 0;
+  renderAlertFilters(all);
+  const items = filterAlerts(all, state.alertFilter);
+  for (const a of items.slice(0, state.alertsShown)) list.appendChild(alertCard(a));
+  $("alerts-none").hidden = !(all.length && !items.length);
+  const more = $("alerts-more");
+  const left = items.length - state.alertsShown;
+  more.hidden = left <= 0;
+  more.textContent = `แสดงเพิ่ม (เหลืออีก ${left} รายการ)`;
+}
+
+// a technique's Thai name for plain view: the parent's name_th without its English "(...)" gloss;
+// null when what is left still has Latin letters, or for MM-T000 (not yet classified)
+function thaiTechniqueName(tax, techniqueId) {
+  const parent = parentTechnique(techniqueId);
+  const t = tax && tax[parent];
+  if (!t || typeof t.name_th !== "string" || /-T000$/.test(parent)) return null;
+  const name = t.name_th.replace(/\s*\([^)]*\)/g, "").trim();
+  return name && !/[A-Za-z]/.test(name) ? name : null;
+}
+
+// what was seen, in Thai and built from fields: the pattern's name, or the plain fallback
+function patternText(a, tax) {
+  const name = thaiTechniqueName(tax, a && a.technique_id);
+  return name ? `รูปแบบคล้าย${name}` : "พบความผิดปกติทางสถิติ";
+}
+
+// the rail's headline, built from fields: the pattern in Thai, the coin and the Thai time
+function railHeadline(a, tax) {
+  return `${patternText(a, tax)} ที่ ${(a && a.symbol) || "–"} เวลา ${fmtThaiTime(a && a.ts_event_us)}`;
+}
+
+// the newest five alerts beside the chart as mini-cards; a card that was not there before rises in
 function renderRail() {
   const box = clear($("alert-rail"));
-  const items = sortedAlerts().slice(0, 8);
+  const items = sortedAlerts().slice(0, 5);
   $("rail-empty").hidden = items.length > 0;
   const seen = state.railIds;
   for (const a of items) {
@@ -1046,8 +1410,13 @@ function renderRail() {
       el(
         "a",
         { class: `rail-row sev-${a.severity}${fresh ? " enter" : ""}`, href: alertHref(a.alert_id) },
-        el("strong", { class: "mono" }, `${a.technique_id} · ${a.symbol}`),
-        el("span", { class: "muted small mono" }, `${fmtUs(a.ts_event_us).slice(11)} · p ${fmtP(a.fused_p)} · ${a.agreement}/3 ชั้น`),
+        el(
+          "span",
+          { class: "rail-meta small" },
+          el("span", { class: `rail-dot sev-${a.severity}`, "aria-hidden": "true" }),
+          el("span", { class: "rail-sev muted" }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
+        ),
+        el("span", { class: "rail-headline" }, railHeadline(a, state.taxonomy)),
       ),
     );
   }
@@ -1072,6 +1441,29 @@ function destroyDetailChart() {
   }
 }
 
+// one explanation fact for plain view, or null when it would need English: "robust z = 7.1"
+// reads as how many usual swings above (or below) normal; anything else with Latin letters stays
+// for "ดูรายละเอียด"
+function plainFact(f) {
+  if (!f || typeof f.label !== "string" || typeof f.value !== "string") return null;
+  let value = f.value;
+  const z = /^robust z = (-?[\d.]+)$/.exec(value);
+  if (z) {
+    const x = Number(z[1]);
+    value = `${x >= 0 ? "สูง" : "ต่ำ"}กว่าปกติ ${Math.abs(x)} เท่าของช่วงแกว่งปกติ`;
+  }
+  const text = `${f.label}: ${value}`;
+  return /[A-Za-z]/.test(text) ? null : text;
+}
+
+function kv(pairs) {
+  return el(
+    "dl",
+    { class: "kv" },
+    pairs.flatMap(([k, v, cls]) => [el("dt", {}, k), el("dd", cls ? { class: cls } : {}, v)]),
+  );
+}
+
 async function showAlert(id) {
   const box = clear($("alert-detail"));
   destroyDetailChart();
@@ -1080,165 +1472,170 @@ async function showAlert(id) {
   try {
     a = await api(`/api/alerts/${encodeURIComponent(id)}`);
   } catch (e) {
-    clear(box).appendChild(el("p", { class: "empty" }, e.message));
+    clear(box).appendChild(
+      el("div", { class: "card" }, el("p", { class: "inline-error" }, `เปิดการแจ้งเตือนนี้ไม่ได้ (${e.message})`)),
+    );
     return;
   }
   const tax = await loadTaxonomy();
   if (state.route !== "alert") return;
   clear(box);
-  const F = nlog10(a.fused_p);
+  if (Array.isArray(a.feedback)) state.feedback.set(a.alert_id, a.feedback);
 
+  // the head: what was seen, the level, the coin, the Thai time and the verdict so far
+  const chipSlot = el("span", { class: "verdict-slot" }, verdictChip(latestVerdict(a.feedback)));
   box.appendChild(
     el(
       "div",
       { class: "detail-head" },
-      el("h1", {}, "พบความผิดปกติทางสถิติ"),
-      el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || a.severity}`),
-      el("span", { class: "badge" }, a.provenance),
-    ),
-  );
-  box.appendChild(
-    el(
-      "p",
-      { class: "muted" },
-      `${a.symbol} · ${a.technique_id} · ${fmtUs(a.ts_event_us)} · สถานะ ${STATUS_TH[a.status] || a.status}`,
-    ),
-  );
-
-  const detail = el("div", { class: "detail" });
-  const main = el("div", { class: "detail-main" });
-  const side = el("div", { class: "detail-side" });
-  detail.appendChild(main);
-  detail.appendChild(side);
-  box.appendChild(detail);
-
-  const explanation = (a.explanation && a.explanation.text_th) || a.explanation_th || "";
-  const facts = (a.explanation && a.explanation.facts) || [];
-  side.appendChild(
-    el(
-      "div",
-      { class: "card" },
-      el("p", { class: "explain" }, explanation),
-      facts.length
-        ? el(
-            "ul",
-            { class: "facts" },
-            facts.map((f) => el("li", {}, `${f.label}: ${f.value}`)),
-          )
-        : null,
-    ),
-  );
-
-  const chartCard = el(
-    "div",
-    { class: "card chart-card" },
-    el("h3", {}, "ช่วงเวลาของการแจ้งเตือน (แถบสี)"),
-  );
-  const mini = el("div", { class: "chart-mini" });
-  chartCard.appendChild(mini);
-  main.appendChild(chartCard);
-
-  side.appendChild(
-    el(
-      "div",
-      { class: "card" },
-      el("h3", {}, "สรุปตัวเลข"),
+      el("h1", {}, patternText(a, tax)),
       el(
-        "dl",
-        { class: "kv" },
-        el("dt", {}, "ค่า p รวม / ความหายากเทียบตลาดปกติ"),
-        el("dd", { class: "mono" }, `${fmtP(a.fused_p)} (F = −log10 p = ${fmtNum(F, 2)})`),
-        el("dt", {}, "ชั้นที่เห็นพ้อง"),
-        el("dd", {}, `${a.agreement}/3 ชั้น มี p < ${AGREEMENT_P}`),
-        el("dt", {}, "ช่วงเวลา"),
-        el("dd", { class: "mono" }, `${fmtUs(a.window[0])} – ${fmtUs(a.window[1])}`),
-        el("dt", {}, "เทคนิคของจุดสูงสุด"),
-        el("dd", { class: "mono" }, a.peak_technique_id || "–"),
-        el("dt", {}, "รหัส"),
-        el("dd", { class: "mono" }, a.alert_id),
+        "p",
+        { class: "detail-meta" },
+        el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
+        el("span", {}, a.symbol),
+        el("span", { class: "muted" }, fmtThaiTime(a.ts_event_us, true)),
+        chipSlot,
       ),
     ),
   );
 
-  side.appendChild(techniqueCard(tax, a.technique_id));
-
-  main.appendChild(
+  // the top: the plain explanation beside the price around the alert
+  const facts = ((a.explanation && a.explanation.facts) || []).map(plainFact).filter(Boolean);
+  const mini = el("div", { class: "chart-mini" });
+  box.appendChild(
     el(
       "div",
-      { class: "card" },
-      el("h3", {}, "หลักฐานรายคุณลักษณะ"),
-      (a.evidence || []).length
-        ? el(
-            "div",
-            { class: "table-wrap" },
-            el(
-              "table",
-              { class: "table" },
-              el("thead", {}, el("tr", {}, el("th", {}, "คุณลักษณะ"), el("th", { class: "num" }, "ค่า"), el("th", { class: "num" }, "น้ำหนัก"))),
-              el(
-                "tbody",
-                {},
-                a.evidence.map(([name, value, contrib]) =>
-                  el(
-                    "tr",
-                    {},
-                    el("td", { class: "mono" }, name),
-                    el("td", { class: "num mono" }, fmtNum(value, 4)),
-                    el("td", { class: "num mono" }, fmtNum(contrib, 2)),
-                  ),
-                ),
-              ),
-            ),
-          )
-        : el("p", { class: "muted" }, "ไม่มีหลักฐานรายคุณลักษณะแนบมา"),
+      { class: "card detail-top" },
+      el(
+        "div",
+        { class: "detail" },
+        el(
+          "div",
+          { class: "detail-side" },
+          el("p", { class: "explain" }, `ระบบพบรูปแบบการซื้อขายที่ต่างจากปกติของ ${a.symbol} เมื่อ ${fmtThaiTime(a.ts_event_us, true)}`),
+          facts.length
+            ? [el("h3", {}, "สิ่งที่ต่างจากปกติ"), el("ul", { class: "facts" }, facts.map((t) => el("li", {}, t)))]
+            : null,
+          el("p", { class: "small muted" }, "เป็นความผิดปกติทางสถิติเมื่อเทียบกับตลาดปกติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร"),
+        ),
+        el("div", { class: "detail-main" }, el("h3", {}, "ราคาช่วงนั้น แถบสีคือช่วงที่ระบบเตือน"), mini),
+      ),
     ),
   );
 
-  side.appendChild(
+  box.appendChild(
+    feedbackCard(a, (rows) => {
+      state.feedback.set(a.alert_id, rows);
+      clear(chipSlot).appendChild(verdictChip(latestVerdict(rows)) || document.createTextNode(""));
+      renderAlertCards();
+    }),
+  );
+  box.appendChild(techDetails(a, tax));
+  drawDetailChart(mini, a);
+}
+
+// "ดูรายละเอียด": the full explanation, the numbers, the detectors with their layers and p-values,
+// the evidence, the technique card and the provenance; closed by default
+function techDetails(a, tax) {
+  const explanation = (a.explanation && a.explanation.text_th) || a.explanation_th || "";
+  const facts = (a.explanation && a.explanation.facts) || [];
+  const F = nlog10(a.fused_p);
+  const [w0, w1] = Array.isArray(a.window) ? a.window : [null, null];
+  return el(
+    "details",
+    { class: "card tech" },
+    el("summary", {}, "ดูรายละเอียด"),
     el(
       "div",
-      { class: "card" },
-      el("h3", {}, "ตัวตรวจจับและค่า p"),
+      { class: "tech-grid" },
       el(
-        "div",
-        { class: "table-wrap" },
+        "section",
+        { class: "tech-sec" },
+        el("h3", {}, "คำอธิบายเต็ม"),
+        el("p", { class: "small" }, explanation),
+        facts.length ? el("ul", { class: "facts small" }, facts.map((f) => el("li", {}, `${f.label}: ${f.value}`))) : null,
+        el("h3", {}, "สรุปตัวเลข"),
+        kv([
+          ["ค่า p รวม / ความหายากเทียบตลาดปกติ", `${fmtP(a.fused_p)} (F = −log10 p = ${fmtNum(F, 2)})`, "mono"],
+          ["ชั้นที่เห็นพ้อง", `${a.agreement}/3 ชั้น มี p < ${AGREEMENT_P}`],
+          ["เวลาเกิด", fmtUs(a.ts_event_us), "mono"],
+          ["ช่วงเวลา", `${fmtUs(w0)} – ${fmtUs(w1)}`, "mono"],
+          ["สถานะ", STATUS_TH[a.status] || a.status],
+          ["เทคนิค", a.technique_id, "mono"],
+          ["เทคนิคของจุดสูงสุด", a.peak_technique_id || "–", "mono"],
+          ["ที่มาของข้อมูล", el("span", { class: "badge" }, a.provenance)],
+          ["รหัส", a.alert_id, "mono"],
+        ]),
+      ),
+      el(
+        "section",
+        { class: "tech-sec" },
+        el("h3", {}, "ตัวตรวจจับและค่า p"),
         el(
-          "table",
-          { class: "table" },
+          "div",
+          { class: "table-wrap" },
           el(
-            "thead",
-            {},
-            el("tr", {}, el("th", {}, "ตัวตรวจจับ"), el("th", {}, "ชั้น"), el("th", { class: "num" }, "ค่า p"), el("th", {}, "เห็นพ้อง")),
-          ),
-          el(
-            "tbody",
-            {},
-            (a.detectors || []).map((d) =>
-              el(
-                "tr",
-                {},
-                el("td", { class: "mono" }, d.name),
-                el("td", {}, d.layer),
-                el("td", { class: "num mono" }, fmtP(d.p)),
-                el("td", {}, FUSION_LAYERS.includes(d.layer) && d.p < AGREEMENT_P ? "✓" : ""),
+            "table",
+            { class: "table" },
+            el(
+              "thead",
+              {},
+              el("tr", {}, el("th", {}, "ตัวตรวจจับ"), el("th", {}, "ชั้น"), el("th", { class: "num" }, "ค่า p"), el("th", {}, "เห็นพ้อง")),
+            ),
+            el(
+              "tbody",
+              {},
+              (a.detectors || []).map((d) =>
+                el(
+                  "tr",
+                  {},
+                  el("td", { class: "mono" }, d.name),
+                  el("td", {}, d.layer),
+                  el("td", { class: "num" }, fmtP(d.p)),
+                  el("td", {}, FUSION_LAYERS.includes(d.layer) && d.p < AGREEMENT_P ? "✓" : ""),
+                ),
               ),
             ),
           ),
         ),
+        el("h3", {}, "หลักฐานรายคุณลักษณะ"),
+        (a.evidence || []).length
+          ? el(
+              "div",
+              { class: "table-wrap" },
+              el(
+                "table",
+                { class: "table" },
+                el("thead", {}, el("tr", {}, el("th", {}, "คุณลักษณะ"), el("th", { class: "num" }, "ค่า"), el("th", { class: "num" }, "น้ำหนัก"))),
+                el(
+                  "tbody",
+                  {},
+                  a.evidence.map(([name, value, contrib]) =>
+                    el(
+                      "tr",
+                      {},
+                      el("td", { class: "mono" }, name),
+                      el("td", { class: "num" }, fmtNum(value, 4)),
+                      el("td", { class: "num" }, fmtNum(contrib, 2)),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : el("p", { class: "muted small" }, "ไม่มีหลักฐานรายคุณลักษณะแนบมา"),
+        techniqueCard(tax, a.technique_id),
       ),
     ),
   );
-
-  side.appendChild(feedbackCard(a));
-  drawDetailChart(mini, a);
 }
 
 function techniqueCard(tax, techniqueId) {
-  const card = el("div", { class: "card" }, el("h3", {}, "การ์ดเทคนิค"));
+  const card = el("div", { class: "tech-technique" }, el("h3", {}, "การ์ดเทคนิค"));
   const parent = parentTechnique(techniqueId);
   const t = tax && tax[parent];
   if (!t) {
-    card.appendChild(el("p", { class: "muted" }, `ไม่พบ ${techniqueId} ใน taxonomy`));
+    card.appendChild(el("p", { class: "muted small" }, `ไม่พบ ${techniqueId} ใน taxonomy`));
     return card;
   }
   const sub = (t.sub_techniques || []).find((s) => s.id === techniqueId);
@@ -1247,13 +1644,19 @@ function techniqueCard(tax, techniqueId) {
     el("p", { class: "small" }, t.definition_th || ""),
     sub ? el("p", { class: "small" }, el("strong", { class: "mono" }, sub.id), ` ${sub.name_th || ""}: ${sub.definition_th || ""}`) : null,
     el("p", { class: "small muted" }, t.observability_th || ""),
-    el("p", {}, el("a", { href: "#/taxonomy" }, "ดู taxonomy ทั้งหมด")),
+    el("p", { class: "small" }, el("a", { href: "#/taxonomy" }, "ดู taxonomy ทั้งหมด")),
   ]);
   return card;
 }
 
-function feedbackCard(a) {
-  const card = el("div", { class: "card" }, el("h3", {}, "ผลการตรวจของผู้วิเคราะห์"));
+// the verdict: three large buttons (analyst and up), the status in this card, and who said what
+function feedbackCard(a, onSaved) {
+  const card = el(
+    "div",
+    { class: "card verdict-card" },
+    el("h2", { class: "verdict-title" }, "ผลตรวจของคุณ"),
+    el("p", { class: "small muted" }, "ดูกราฟและคำอธิบายแล้ว รายการนี้ผิดปกติจริงหรือไม่"),
+  );
   const analyst = el("input", {
     type: "text",
     maxlength: "64",
@@ -1261,18 +1664,28 @@ function feedbackCard(a) {
     value: storageGet("idsai.analyst") || "",
     "aria-label": "ชื่อผู้วิเคราะห์",
   });
-  const status = el("span", { class: "small" });
-  const list = el("ul", { class: "small" });
+  const status = el("p", { class: "small verdict-status", role: "status" });
+  const list = el("ul", { class: "verdict-history small" });
+  const buttons = {};
   const renderList = (items) => {
     clear(list);
-    for (const f of items || []) {
-      list.appendChild(el("li", {}, `${fmtUs(f.ts_us)} · ${f.analyst}: ${VERDICT_TH[f.verdict] || f.verdict}`));
+    const rows = items || [];
+    for (const f of [...rows].reverse()) {
+      list.appendChild(el("li", {}, `${fmtThaiTime(f.ts_us)} · ${f.analyst}: ${VERDICT_TH[f.verdict] || f.verdict}`));
     }
+    if (!rows.length) list.appendChild(el("li", { class: "muted" }, "ยังไม่มีใครตรวจรายการนี้"));
+    const latest = latestVerdict(rows);
+    for (const v of VERDICTS) buttons[v].setAttribute("aria-pressed", latest === v ? "true" : "false");
   };
-  renderList(a.feedback);
+  let saving = false;
+  const setBusy = (on) => {
+    saving = on;
+    for (const v of VERDICTS) buttons[v].disabled = on; // one save at a time: no double post
+  };
   const send = async (verdict) => {
+    if (saving) return;
     if (!can("analyst")) {
-      status.textContent = NEED_ANALYST_TH;
+      status.textContent = VIEWER_VERDICT_TH;
       return;
     }
     // signed in: the server records the session user, so no name is typed or remembered here
@@ -1282,31 +1695,48 @@ function feedbackCard(a) {
       return;
     }
     if (!authOn()) storageSet("idsai.analyst", name);
+    status.classList.remove("inline-error");
     status.textContent = "กำลังบันทึก…";
+    setBusy(true);
     try {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
-      status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]}`;
-      const fresh = await api(`/api/alerts/${encodeURIComponent(a.alert_id)}`);
-      renderList(fresh.feedback);
     } catch (e) {
-      status.textContent = e.message;
+      status.classList.add("inline-error");
+      status.textContent = `บันทึกไม่สำเร็จ (${e.message})`;
+      setBusy(false);
+      return;
     }
+    // saved: the follow-up read only refreshes the history; its failure is not a failed save
+    status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]}`;
+    let rows = [...(state.feedback.get(a.alert_id) || a.feedback || []), { alert_id: a.alert_id, verdict, analyst: name, ts_us: Date.now() * 1000 }];
+    try {
+      const fresh = await api(`/api/alerts/${encodeURIComponent(a.alert_id)}`);
+      if (Array.isArray(fresh.feedback)) rows = fresh.feedback;
+    } catch (e) {
+      status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]} (อ่านประวัติล่าสุดไม่ได้)`;
+    }
+    renderList(rows);
+    if (onSaved) onSaved(rows);
+    setBusy(false);
   };
-  const gate = can("analyst") ? {} : { disabled: true, title: NEED_ANALYST_TH };
-  if (!can("analyst")) {
+  const allowed = can("analyst");
+  const gate = allowed ? {} : { disabled: true, title: VIEWER_VERDICT_TH };
+  if (!allowed) {
     analyst.disabled = true;
-    analyst.title = NEED_ANALYST_TH;
+    analyst.title = VIEWER_VERDICT_TH;
+  }
+  for (const v of VERDICTS) {
+    buttons[v] = el("button", { type: "button", class: `verdict-btn v-${v}`, ...gate, onclick: () => send(v) }, VERDICT_TH[v]);
   }
   append(card, [
-    el(
-      "div",
-      { class: "feedback" },
-      authOn() ? null : el("label", { class: "field" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
-      ["tp", "fp", "unsure"].map((v) => el("button", { type: "button", ...gate, onclick: () => send(v) }, VERDICT_TH[v])),
-    ),
+    authOn() ? null : el("label", { class: "field verdict-name" }, el("span", {}, "ผู้วิเคราะห์"), analyst),
+    el("div", { class: "verdict-buttons" }, VERDICTS.map((v) => buttons[v])),
+    allowed ? null : el("p", { class: "small muted" }, VIEWER_VERDICT_TH),
     status,
+    el("h3", { class: "verdict-history-title" }, "ประวัติการตรวจ"),
     list,
   ]);
+  renderList(a.feedback);
   return card;
 }
 
@@ -1325,7 +1755,13 @@ async function drawDetailChart(node, a) {
   const times = ((s && s.t_end_us) || []).map((t) => (isNum(t) ? toSec(t) : null));
   const price = seriesData(times, (s && s.close) || []);
   if (!price.length) {
-    node.replaceWith(el("p", { class: "muted small" }, "ไม่มีข้อมูลกราฟของช่วงนี้ในหน่วยความจำของระบบ (เก็บย้อนหลัง 24 ชั่วโมงของการเล่นครั้งนี้)"));
+    node.replaceWith(
+      el(
+        "p",
+        { class: "muted small chart-none" },
+        s ? "ไม่มีข้อมูลราคาของช่วงนี้ในหน่วยความจำ (ระบบเก็บย้อนหลัง 24 ชั่วโมงของการเล่นครั้งนี้)" : "อ่านข้อมูลราคาไม่ได้ ลองเปิดหน้านี้ใหม่อีกครั้ง",
+      ),
+    );
     return;
   }
   const c = LWC.createChart(node, baseChartOptions());
@@ -1348,55 +1784,100 @@ async function drawDetailChart(node, a) {
   line.setData(price);
   shade.setData(shadeData());
   const t = price.reduce((best, p) => (Math.abs(p.time - toSec(a.ts_event_us)) < Math.abs(best - toSec(a.ts_event_us)) ? p.time : best), price[0].time);
-  LWC.createSeriesMarkers(line, [
-    { time: t, position: "aboveBar", shape: "arrowDown", color: sevColor(a.severity), text: a.technique_id },
-  ]);
+  // colour and shape only: the technique id stays in "ดูรายละเอียด"
+  LWC.createSeriesMarkers(line, [{ time: t, position: "aboveBar", shape: "arrowDown", color: sevColor(a.severity) }]);
   c.timeScale().fitContent();
   state.detailChart = {
     remove: () => c.remove(),
-    restyle: () => {
-      c.applyOptions(baseChartOptions());
-      line.applyOptions({ color: cssVar("--line-price") });
-      shade.setData(shadeData());
-    },
   };
 }
 
 // ------------------------------------------------------------------ red team
 
-function bindRedTeam() {
-  $("redteam-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    if (!redTeamAllowed(state.mode)) return;
-    const status = $("rt-status");
-    if (!can("analyst")) {
-      status.textContent = NEED_ANALYST_TH;
-      return;
+function simTitle(family) {
+  const card = SIM_CARDS.find((c) => c.family === family);
+  return card ? card.title : "การปั่นจำลอง";
+}
+
+// the POST body for one card click: the defaults, with any filled-in advanced field on top
+function simulateRequest(family, adv, currentSymbol) {
+  const req = { family, region: SIM_DEFAULTS.region, offset_s: SIM_DEFAULTS.offset_s, symbol: currentSymbol || null };
+  for (const k of ["region", "offset_s", "symbol"]) {
+    const v = adv ? adv[k] : undefined;
+    if (v !== undefined && v !== null && v !== "") req[k] = v;
+  }
+  return req;
+}
+
+// a refused inject, in plain Thai: the server's own text can carry field names in English
+function simErrorText(err) {
+  const status = err && err.status;
+  const msg = String((err && err.message) || "");
+  if (status === 409 && msg === REPLAY_ENDED_TH) return SIM_REASON.ended;
+  if (status === 403) return msg.includes("สิทธิ์") ? SIM_REASON.viewer : SIM_REASON.live;
+  if (status === 422 && /offset|ข้อมูลสุดท้าย/.test(msg)) return SIM_PAST_END_TH;
+  if (status === 422 && /symbol/.test(msg)) return SIM_SYMBOL_TH;
+  return SIM_FAILED_TH;
+}
+
+// the advanced fields; null when the start offset is out of range
+function readAdvanced() {
+  const raw = String($("rt-offset").value ?? "").trim();
+  let offset;
+  if (raw !== "") {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n > 3600) return null;
+    offset = Math.round(n);
+  }
+  return { region: $("rt-region").value, offset_s: offset, symbol: $("rt-symbol").value };
+}
+
+function bindSimulate() {
+  for (const c of SIM_CARDS) {
+    const card = $(`sim-${c.family}`);
+    card.addEventListener("click", () => startSimulation(c.family, card));
+  }
+}
+
+async function startSimulation(family, card) {
+  if (!redTeamAllowed(state.mode)) return;
+  const status = $("rt-status");
+  if (!can("analyst")) {
+    status.textContent = SIM_REASON.viewer;
+    return;
+  }
+  if (state.simBusy || state.simEnded) return;
+  const adv = readAdvanced();
+  if (adv === null) {
+    status.textContent = SIM_OFFSET_TH;
+    $("sim-advanced").open = true;
+    return;
+  }
+  const body = simulateRequest(family, adv, state.symbol);
+  const title = simTitle(family);
+  status.textContent = `กำลังเริ่ม ${title}`;
+  state.simBusy = true;
+  card.setAttribute("aria-busy", "true");
+  applySimGates();
+  const known = snapshotAlerts(state.alerts.values()); // before the click: never a detection
+  try {
+    const r = await postJson("/api/redteam/inject", body);
+    status.textContent = `เริ่ม ${title} แล้ว ดูผลด้านล่าง`;
+    addInjection(r, body, known);
+  } catch (e) {
+    if (e.status === 409 && e.message === REPLAY_ENDED_TH) {
+      state.simEnded = true; // said once, on the reason line
+      status.textContent = "";
+    } else {
+      const text = simErrorText(e);
+      if (text === SIM_FAILED_TH) console.warn("simulate:", e && e.message);
+      status.textContent = text;
     }
-    const offset = Number($("rt-offset").value);
-    if (!Number.isFinite(offset) || offset <= 0 || offset > 3600) {
-      status.textContent = "offset ต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
-      return;
-    }
-    const body = {
-      family: $("rt-family").value,
-      region: $("rt-region").value,
-      offset_s: Math.round(offset),
-      symbol: $("rt-symbol").value || null,
-    };
-    status.textContent = "กำลังฉีด…";
-    $("rt-submit").disabled = true;
-    const known = snapshotAlerts(state.alerts.values()); // before the click: never a detection
-    try {
-      const r = await postJson("/api/redteam/inject", body);
-      status.textContent = "ฉีดแล้ว กำลังจับเวลา";
-      addInjection(r, body, known);
-    } catch (e) {
-      status.textContent = e.message;
-    } finally {
-      $("rt-submit").disabled = !(redTeamAllowed(state.mode) && can("analyst"));
-    }
-  });
+  } finally {
+    state.simBusy = false;
+    card.removeAttribute("aria-busy");
+    applySimGates();
+  }
 }
 
 function addInjection(r, body, known) {
@@ -1413,7 +1894,7 @@ function addInjection(r, body, known) {
     t_end_us: label.t_end_us,
     wallStart: Date.now(),
     detected: null,
-    node: null,
+    card: null,
   };
   state.injections.unshift(run);
   renderInjections();
@@ -1458,6 +1939,7 @@ function resetRuns(runs, deleted) {
   const gone = new Set(deleted);
   let changed = false;
   for (const run of runs) {
+    if (run.closed) continue; // a run of an earlier replay round keeps its verdict
     for (const id of gone) if (run.known) run.known.delete(id);
     if (run.detected && gone.has(run.detected.alert_id)) {
       run.detected = null;
@@ -1467,11 +1949,21 @@ function resetRuns(runs, deleted) {
   return changed;
 }
 
+function restartRuns(runs) {
+  // the replay day started again from the original trades: every run so far is over; one not
+  // detected yet never will be (its injected trades are gone) and counts as missed
+  for (const run of runs) {
+    run.closed = true;
+    if (!run.detected) run.restarted = true;
+  }
+}
+
 function injectionStatus(run, nowUs) {
   // "detected" wins whenever it comes; "missed" once the eval matching window (scenario end +
   // 300 s) plus a grace has passed without a qualifying alert; it follows the clock, so a seek
   // back makes the run "waiting" again
   if (run.detected) return "detected";
+  if (run.restarted) return "missed";
   if (!isNum(nowUs) || !isNum(run.t_start_us)) return "waiting";
   if (isNum(run.t_end_us) && nowUs > run.t_end_us + MATCH_AFTER_US + MISSED_GRACE_US) return "missed";
   return nowUs < run.t_start_us ? "pending" : "waiting";
@@ -1480,7 +1972,7 @@ function injectionStatus(run, nowUs) {
 function checkInjections() {
   let changed = false;
   for (const run of state.injections) {
-    if (run.detected) continue;
+    if (run.detected || run.closed) continue; // a closed run's trades are gone
     const a = firstDetection(run, state.alerts.values());
     if (a) {
       run.detected = {
@@ -1496,150 +1988,158 @@ function checkInjections() {
 
 function renderInjections() {
   const box = clear($("rt-runs"));
-  for (const run of state.injections) {
-    const sc = run.scenario;
-    const ring = svg("circle", {
-      id: "rt-ring",
-      class: "rt-ring-arc",
-      cx: 26,
-      cy: 26,
-      r: RING_R,
-      fill: "none",
-      "stroke-width": 4,
-      "stroke-dasharray": RING_C.toFixed(2),
-      "stroke-dashoffset": RING_C.toFixed(2),
-      transform: "rotate(-90 26 26)",
-    });
-    const ringSvg = svg(
-      "svg",
-      { viewBox: "0 0 52 52", class: "rt-ring", role: "img", "aria-label": "เวลาที่ผ่านไปเทียบกับช่วงตรวจจับ" },
-      svg("circle", { cx: 26, cy: 26, r: RING_R, fill: "none", "stroke-width": 4, class: "rt-ring-track" }),
-      ring,
-    );
-    const banner = el("div", { class: "rt-banner", id: "rt-banner" });
-    banner.hidden = true;
-    const detail = el("div", { class: "small timer-detail" });
-    const timer = el("div", { class: "timer rt-timer" }, ringSvg, el("div", { class: "rt-timer-text" }, banner, detail));
-    const card = el(
-      "div",
-      { class: "card" },
-      el(
-        "div",
-        { class: "detail-head" },
-        el("h3", {}, `${run.family} · ${run.symbol}`),
-        el("span", { class: "badge SEMI-SYN" }, "SEMI-SYN"),
-      ),
-      el(
-        "dl",
-        { class: "kv small" },
-        el("dt", {}, "ช่วงเหตุการณ์จำลอง"),
-        el("dd", { class: "mono" }, `${fmtUs(run.t_start_us)} – ${fmtUs(run.t_end_us)}`),
-        el("dt", {}, "เทคนิค"),
-        el("dd", { class: "mono" }, `${sc.technique_id || "–"} / ${sc.sub_technique || "–"}`),
-        el("dt", {}, "พารามิเตอร์"),
-        el(
-          "dd",
-          { class: "mono" },
-          `region ${run.region} · ${fmtNum(sc.duration_s, 0)} s · impact ${fmtNum(sc.impact, 3)} · vol ×${fmtNum(sc.vol_mult, 1)}`,
-        ),
-      ),
-      timer,
-    );
-    run.node = timer;
-    run.ring = ring;
-    run.banner = banner;
-    run.detail = detail;
-    run.bannerState = null;
-    box.appendChild(card);
-  }
+  $("rt-empty").hidden = state.injections.length > 0;
+  for (const run of state.injections) box.appendChild(runCard(run));
   tickInjections();
 }
 
-const RING_R = 22;
-const RING_C = 2 * Math.PI * RING_R;
+// one run: started -> waiting -> result, then the technical facts folded away
+function runCard(run) {
+  const sc = run.scenario || {};
+  const step = (cls, label, ...mark) => {
+    const text = el("span", { class: "step-label" }, label);
+    const sub = el("span", { class: "step-sub small" });
+    const node = el(
+      "li",
+      { class: `step ${cls}` },
+      el("span", { class: "step-dot", "aria-hidden": "true" }, ...mark),
+      el("span", { class: "step-text" }, text, sub),
+    );
+    return { node, text, sub };
+  };
+  const steps = [
+    step("step-start", simStatusText("pending", run)),
+    step("step-wait", simStatusText("waiting", run)),
+    step(
+      "step-result",
+      "ผลลัพธ์",
+      svg(
+        "svg",
+        { viewBox: "0 0 12 12", width: 10, height: 10, fill: "none", stroke: "currentColor", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round", class: "step-check" },
+        svg("path", { d: "M2.5 6.2l2.3 2.3 4.7-5" }),
+      ),
+    ),
+  ];
+  const list = el("ol", { class: "sim-steps" }, ...steps.map((st) => st.node));
+  const note = el("p", { class: "sim-run-note small" });
+  const tech = el(
+    "details",
+    { class: "sim-tech small" },
+    el("summary", {}, "ดูรายละเอียด"),
+    el(
+      "dl",
+      { class: "kv small" },
+      el("dt", {}, "ช่วงเหตุการณ์ (UTC)"),
+      el("dd", { class: "mono" }, `${fmtUs(run.t_start_us)} – ${fmtUs(run.t_end_us)}`),
+      el("dt", {}, "เทคนิค"),
+      el("dd", { class: "mono" }, `${run.family} · ${sc.technique_id || "–"} / ${sc.sub_technique || "–"}`),
+      el("dt", {}, "พารามิเตอร์"),
+      el(
+        "dd",
+        { class: "mono" },
+        `region ${run.region} · ${fmtNum(sc.duration_s, 0)} s · impact ${fmtNum(sc.impact, 3)} · vol ×${fmtNum(sc.vol_mult, 1)}`,
+      ),
+      el("dt", {}, "ที่มาข้อมูล"),
+      el("dd", {}, el("span", { class: "badge SEMI-SYN" }, "SEMI-SYN")),
+    ),
+  );
+  const card = el(
+    "div",
+    { class: "card sim-run" },
+    el(
+      "div",
+      { class: "sim-run-head" },
+      el("h3", {}, `${simTitle(run.family)} · ${run.symbol || "–"}`),
+      el("span", { class: "small muted" }, `เหตุการณ์เริ่ม ${fmtThaiTime(run.t_start_us)}`),
+    ),
+    list,
+    note,
+    tech,
+  );
+  run.card = card;
+  run.steps = steps;
+  run.note = note;
+  run.shown = null; // the status drawn; data-state changes only when it does
+  return card;
+}
 
-function bannerText(status, seconds) {
-  // the verdict line on a Red-Team card; empty while the run is still undecided
-  const n = Math.max(0, Math.round(Number(seconds) || 0));
-  if (status === "detected") return `ตรวจพบใน ${n} วินาที`;
-  if (status === "missed") return `ไม่พบภายใน ${n} วินาทีหลังจบเหตุการณ์`;
+// one line per run state: the step labels and the verdict
+function simStatusText(status, run) {
+  if (status === "restarted" || (status === "missed" && run && run.restarted)) return "พลาด (replay เริ่มใหม่)";
+  if (status === "pending") return "เริ่มแล้ว";
+  if (status === "waiting") return "กำลังรอระบบ";
+  if (status === "missed") return "ไม่ทันจับ";
+  if (status === "detected" && run && run.detected) {
+    const ev = Math.max(0, Math.round(Number(run.detected.eventS) || 0));
+    const wall = Math.max(0, Math.round(Number(run.detected.wallS) || 0));
+    return `จับได้ใน ${ev} วินาที (เวลาจริง ${wall} วินาที)`;
+  }
   return "";
+}
+
+function setText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
 }
 
 function tickInjections() {
   const now = eventNowUs();
   for (const run of state.injections) {
-    if (!run.node || !run.ring) continue;
+    if (!run.card) continue;
     const status = injectionStatus(run, now);
-    const windowS = Math.max(1, (run.t_end_us - run.t_start_us) / S_US + MATCH_AFTER_US / S_US);
-    const ev = isNum(now) && isNum(run.t_start_us) ? (now - run.t_start_us) / S_US : null;
-    let frac = ev === null ? 0 : Math.max(0, Math.min(1, ev / windowS));
-    if (status === "detected") frac = Math.max(0, Math.min(1, run.detected.eventS / windowS));
-    else if (status === "missed") frac = 1;
-    run.ring.setAttribute("stroke-dasharray", RING_C.toFixed(2));
-    run.ring.setAttribute("stroke-dashoffset", (RING_C * (1 - frac)).toFixed(2));
-    run.ring.setAttribute("class", `rt-ring-arc ${status}`);
-
-    const seconds = status === "detected" ? run.detected.eventS : MATCH_AFTER_US / S_US;
     const verdict = status === "detected" || status === "missed";
-    run.banner.hidden = !verdict;
-    if (verdict) {
-      run.banner.textContent = bannerText(status, seconds);
-      if (run.bannerState !== status) { // class only on a state change: a tick never restarts the sweep
-        run.bannerState = status;
-        const hit = status === "detected";
-        run.banner.className = `rt-banner ${hit ? "hit" : "miss"}`;
-        if (hit && !reducedMotion()) run.banner.classList.add("sweep");
+    if (run.shown !== status) {
+      run.shown = status;
+      run.card.setAttribute("data-state", status);
+      setText(run.steps[2].text, verdict ? simStatusText(status, run) : "ผลลัพธ์");
+      clear(run.note);
+      if (status === "detected") {
+        run.note.appendChild(el("a", { href: alertHref(run.detected.alert_id) }, "ดูการแจ้งเตือนที่จับได้"));
       }
-    } else {
-      run.bannerState = null;
-      run.banner.className = "rt-banner";
+      run.note.hidden = status !== "detected";
     }
-
-    clear(run.detail);
+    // the small lines under the steps follow the clock
+    const toStart = isNum(now) && isNum(run.t_start_us) ? Math.ceil((run.t_start_us - now) / S_US) : null;
+    setText(run.steps[0].sub, status === "pending" && toStart !== null ? `เหตุการณ์จะเริ่มในอีก ${toStart} วินาที` : "");
+    const waited = Math.max(0, Math.round((Date.now() - run.wallStart) / 1000));
+    setText(run.steps[1].sub, status === "pending" || status === "waiting" ? `รอมาแล้ว ${waited} วินาที` : "");
+    let why = "";
     if (status === "missed") {
-      run.detail.textContent =
-        "ไม่พบความผิดปกติทางสถิติภายในช่วงที่นับตามเกณฑ์ประเมิน (ถึงสิ้นสุดเหตุการณ์ + 300 s) · นับเป็นการตรวจไม่พบ";
-    } else if (status === "detected") {
-      const d = run.detected;
-      append(run.detail, [
-        `ตรวจพบความผิดปกติทางสถิติ: ${d.eventS >= 0 ? "+" : ""}${d.eventS.toFixed(0)} s (เวลาเหตุการณ์) · ${d.wallS.toFixed(1)} s (เวลาจริง) `,
-        el("a", { href: alertHref(d.alert_id), class: "small" }, "ดูการแจ้งเตือน"),
-      ]);
-    } else {
-      const wall = (Date.now() - run.wallStart) / 1000;
-      const evText =
-        ev === null ? "–" : ev < 0 ? `อีก ${(-ev).toFixed(0)} s จะเริ่ม` : `+${ev.toFixed(0)} s`;
-      run.detail.textContent = `รอการตรวจจับ… ${evText} (เวลาเหตุการณ์) · ${wall.toFixed(0)} s (เวลาจริง)`;
+      why = run.restarted
+        ? "ข้อมูลจำลองหายไปเมื่อการย้อนดูเริ่มรอบใหม่"
+        : "ไม่มีการแจ้งเตือนภายใน 5 นาทีหลังเหตุการณ์จบ";
     }
+    setText(run.steps[2].sub, why);
   }
 }
 
-// ------------------------------------------------------------------ eval
+// ------------------------------------------------------------------ results (eval)
 
 function evalEmpty(report) {
   return !report || !report.runs || !report.experiments;
 }
 
-// pass / miss / unmeasured: absent data is never a pass
-function targetVerdict(report, target) {
+// pass / miss / unmeasured: absent data is never a pass. `budget` (alerts per symbol-day) picks the
+// report cell; it defaults to the target's own, and a false-alarm cap of "≤ budget" follows it.
+function targetVerdict(report, target, budget) {
   const none = { state: "unmeasured", value: null, ci: null, n: null };
   if (evalEmpty(report) || target.cmp === "none") return none; // the report has no latency metric
+  const b = budget === null || budget === undefined || !Number.isFinite(Number(budget)) ? target.budget : Number(budget);
   if (target.cmp === "pair") {
     const paired = report.paired_bootstrap;
-    if (!paired || Number(paired.budget) !== Number(target.budget)) return none;
+    if (!paired || Number(paired.budget) !== b) return none;
     const found = (paired.rows || []).find((r) => r.baseline === target.variant);
     if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
     const st = target.reference ? "reference" : found.ci[0] > target.threshold ? "pass" : "miss";
     return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events };
   }
   const variants = report.experiments[target.experiment] || {};
-  const cell = (variants[target.variant] || {})[String(target.budget)];
+  const cell = (variants[target.variant] || {})[String(b)];
   const value = cell && cell.mean ? cell.mean[target.metric] : null;
   if (!isNum(value)) return none;
   const ci = cell.ci && Array.isArray(cell.ci[target.metric]) ? cell.ci[target.metric] : null;
-  const ok = target.cmp === ">=" ? value >= target.threshold : value <= target.threshold;
-  const out = { state: ok ? "pass" : "miss", value, ci, n: cell.n_events };
+  const cap = target.capIsBudget ? b : target.threshold;
+  const ok = target.cmp === ">=" ? value >= cap : value <= cap;
+  const out = { state: ok ? "pass" : "miss", value, ci, n: cell.n_events, unit: cell.ci_unit || null, seeds: cell.n_seeds };
   if (target.correct && isNum(cell.mean.recall_correct)) {
     const cc = cell.ci && cell.ci.recall_correct;
     out.correct = { value: cell.mean.recall_correct, ci: Array.isArray(cc) ? cc : null };
@@ -1648,12 +2148,157 @@ function targetVerdict(report, target) {
 }
 
 const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด", reference: "อ้างอิง" };
+// the plain badge: a glyph and a word, never colour alone
+const RESULT_BADGE = { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" };
+const RESULT_GLYPH = { pass: "✓", fail: "✗", none: "—" };
+const RESULT_STATE = { pass: "pass", miss: "fail", unmeasured: "none" }; // a reference card has no badge
+const PER_DAY_TH = "ครั้งต่อเหรียญต่อวัน";
+const MAIN_BUDGET = "2"; // the budget the project's targets are set at
 
-function fmtSigned(x) {
-  return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
+// 1.6498 -> "1.65", 11.17 -> "11.17", 2 -> "2"
+function fmtPlain(x) {
+  return String(Number(x.toFixed(2)));
 }
 
-function targetCard(target, verdict, index) {
+// one plain Thai sentence per card (spec 4.8); `extra` = { budget, k, n, ci }
+function resultSentence(target, value, extra) {
+  const x = extra || {};
+  const b = isNum(x.budget) ? x.budget : target.budget;
+  if (target.cmp === "none") return "ความเร็วในการเตือน: ยังไม่วัด";
+  if (target.cmp === "pair") {
+    const ci = x.ci;
+    if (!Array.isArray(ci) || !isNum(ci[0]) || !isNum(ci[1])) return "เทียบกับวิธีพื้นฐาน: ยังไม่วัดที่งบเตือนนี้";
+    // the 95% CI of the difference: wholly above 0, wholly below 0, or across it
+    return `เทียบกับวิธีพื้นฐาน: ${ci[0] > 0 ? "ดีกว่า" : ci[1] < 0 ? "แย่กว่า" : "ไม่ต่างอย่างมีนัยสำคัญ"}`;
+  }
+  if (target.metric === "recall_any") {
+    const at = `(เมื่อเตือนไม่เกิน ${fmtPlain(b)} ${PER_DAY_TH})`;
+    if (!isNum(value)) return `จับเหตุการณ์ที่มีบันทึกได้: ยังไม่มีผล ${at}`;
+    const got = isNum(x.k) && isNum(x.n) ? `${x.k} จาก ${x.n} ครั้ง` : `${Math.round(value * 100)}%`;
+    return `จับเหตุการณ์ที่มีบันทึกได้ ${got} ${at}`;
+  }
+  if (target.metric === "fa_per_symbol_day") {
+    return isNum(value) ? `เตือนผิดเฉลี่ย ${fmtPlain(value)} ${PER_DAY_TH}` : "เตือนผิดเฉลี่ย: ยังไม่มีผล";
+  }
+  if (target.metric === "fa_per_symbol_day_hard") {
+    return isNum(value) ? `เตือนผิดในวันที่ไม่มีเหตุการณ์ ${fmtPlain(value)} ครั้ง` : "เตือนผิดในวันที่ไม่มีเหตุการณ์: ยังไม่มีผล";
+  }
+  return "ยังไม่มีผล";
+}
+
+function resultGoal(target, budget) {
+  if (target.reference) return "ใช้เป็นจุดเทียบ ไม่มีเป้า";
+  if (target.cmp === "none") return `เป้า: ไม่เกิน ${target.threshold} วินาที`;
+  if (target.cmp === "pair") return "เป้า: ดีกว่าอย่างมีนัยสำคัญ";
+  if (target.metric === "recall_any") return `เป้า: อย่างน้อย ${Math.round(target.threshold * 100)}%`;
+  if (target.capIsBudget) return `เป้า: ไม่เกิน ${fmtPlain(budget)} ${PER_DAY_TH}`;
+  return `เป้า: ${fmtPlain(target.threshold)} ครั้ง`;
+}
+
+function resultBadge(st) {
+  return el(
+    "span",
+    { class: "result-badge", "data-state": st },
+    el("span", { "aria-hidden": "true" }, RESULT_GLYPH[st]),
+    ` ${RESULT_BADGE[st]}`,
+  );
+}
+
+// the last big number shown per card, so a budget change counts from it
+const resultShown = {};
+
+function resultCard(target, verdict, budget) {
+  const wide = target.id === "real_recall";
+  const st = RESULT_STATE[verdict.state] || null;
+  const extra = { budget, ci: verdict.ci };
+  // a count of events only where the unit is the event (a symbol-day ratio is no count)
+  if (verdict.unit === "event" && isNum(verdict.value) && isNum(verdict.n) && verdict.n > 0) {
+    extra.k = Math.round(verdict.value * verdict.n);
+    extra.n = verdict.n;
+  }
+  const card = el(
+    "div",
+    {
+      class: `card result-card${wide ? " result-wide" : ""}${target.reference ? " result-ref-card" : ""}`,
+      "data-target": target.id,
+      "data-state": st || "reference",
+    },
+    el(
+      "div",
+      { class: "result-head" },
+      el("h3", { class: "result-title" }, target.title),
+      st ? resultBadge(st) : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
+    ),
+  );
+  if (wide && isNum(verdict.value)) {
+    const pct = Math.round(verdict.value * 100);
+    const num = el("span", {}, String(isNum(resultShown[target.id]) ? resultShown[target.id] : pct));
+    card.appendChild(el("div", { class: "result-value" }, num, el("span", { class: "result-value-unit" }, "%")));
+    tweenNumber(num, pct, 0);
+    resultShown[target.id] = pct;
+    card.appendChild(
+      el(
+        "div",
+        { class: "result-bar", "aria-hidden": "true" },
+        el("span", { class: "result-fill", style: `width: ${Math.max(0, Math.min(100, pct))}%` }),
+        el("span", { class: "result-mark", style: `left: ${Math.round(target.threshold * 100)}%` }),
+      ),
+    );
+  }
+  card.appendChild(el("p", { class: "result-sentence" }, resultSentence(target, verdict.value, extra)));
+  const seeds = wide && isNum(verdict.seeds) && verdict.seeds > 1 ? ` · ค่าเฉลี่ยจากการทดสอบ ${verdict.seeds} รอบ` : "";
+  card.appendChild(el("p", { class: "result-goal small muted" }, resultGoal(target, budget) + seeds));
+  return card;
+}
+
+const RESULT_GROUPS = [
+  {
+    title: "ข้อมูลการซื้อขายจริงย้อนหลัง",
+    lead: "เทียบกับเหตุการณ์ที่มีบันทึกไว้แล้ว",
+    pick: (tg) => tg.experiment === "real_t001" || tg.cmp === "none",
+  },
+  {
+    title: "เหตุการณ์ปั่นจำลองที่ใส่ลงในข้อมูลจริง",
+    lead: "ใส่เหตุการณ์ที่รู้คำตอบอยู่แล้วลงไป แล้วดูว่าระบบจับได้เท่าไร",
+    pick: (tg) => tg.experiment === "semisyn",
+  },
+  {
+    title: "เทียบกับวิธีอื่น",
+    lead: "ตัวตรวจที่เรียนรู้รูปแบบการซื้อขายปกติ เทียบกับวิธีอื่นที่งบเตือนเดียวกัน",
+    pick: (tg) => tg.cmp === "pair",
+  },
+];
+
+function renderResultCards(box, report, budget) {
+  clear(box);
+  for (const g of RESULT_GROUPS) {
+    box.appendChild(
+      el(
+        "section",
+        { class: "result-group" },
+        el("h2", {}, g.title),
+        el("p", { class: "small muted result-lead" }, g.lead),
+        el(
+          "div",
+          { class: "result-cards" },
+          EVAL_TARGETS.filter(g.pick).map((t) => resultCard(t, targetVerdict(report, t, budget), budget)),
+        ),
+      ),
+    );
+  }
+}
+
+function committeeBox(...children) {
+  return el(
+    "details",
+    { class: "card committee" },
+    el("summary", {}, "รายละเอียดสำหรับกรรมการ"),
+    el("div", { class: "committee-body" }, children),
+  );
+}
+
+// the committee's view of the targets: ids, value, CI, n and the goal as the MVP spec states it
+function targetRow(target, verdict) {
   const paired = target.cmp === "pair";
   const goal =
     target.cmp === "none"
@@ -1662,23 +2307,40 @@ function targetCard(target, verdict, index) {
         ? "ไม่มีเป้า (อ้างอิง)"
         : paired
           ? "CI ขอบล่าง > 0"
-          : `${target.cmp === ">=" ? "≥" : "≤"} ${target.threshold}`;
+          : `${target.cmp === ">=" ? "≥" : "≤"} ${target.capIsBudget ? "งบ" : target.threshold}`;
   const none = verdict.state === "unmeasured";
   return el(
-    "div",
-    { class: `target ${verdict.state} rise`, style: `animation-delay: ${index * 50}ms` },
-    el("span", { class: "label" }, target.label),
-    el("strong", { class: `verdict ${verdict.state}` }, TARGET_STATE_TH[verdict.state]),
-    el("span", { class: "mono big" }, none ? "–" : paired ? fmtSigned(verdict.value) : fmtNum(verdict.value, 3)),
-    el(
-      "span",
-      { class: "small mono muted" },
-      none ? `เป้า ${goal}` : `${verdict.ci ? ciText(verdict.value, verdict.ci) : "ไม่มี CI"} · n ${verdict.n ?? "–"} · เป้า ${goal}`,
-    ),
-    verdict.correct
-      ? el("span", { class: "small mono muted" }, `recall_correct ${ciText(verdict.correct.value, verdict.correct.ci)}`)
-      : null,
+    "tr",
+    {},
+    el("td", { class: "mono" }, target.label),
+    el("td", {}, TARGET_STATE_TH[verdict.state]),
+    el("td", { class: "num mono" }, none ? "–" : paired ? `${fmtSigned(verdict.value)} [${fmtSigned(verdict.ci[0])}, ${fmtSigned(verdict.ci[1])}]` : ciText(verdict.value, verdict.ci)),
+    el("td", { class: "num" }, verdict.n ?? "–"),
+    el("td", { class: "mono" }, goal),
+    el("td", { class: "small mono muted" }, verdict.correct ? `recall_correct ${ciText(verdict.correct.value, verdict.correct.ci)}` : ""),
   );
+}
+
+function targetTable(report, budget) {
+  return el(
+    "div",
+    { class: "committee-sec" },
+    el("h3", {}, `เป้าหมายตามแผน (งบ ${budget} ครั้ง/สัญลักษณ์-วัน)`),
+    el(
+      "div",
+      { class: "table-wrap" },
+      el(
+        "table",
+        { class: "table" },
+        el("thead", {}, el("tr", {}, ["เป้า", "ผล", "ค่า [95% CI]", "n", "เกณฑ์", "หมายเหตุ"].map((h) => el("th", {}, h)))),
+        el("tbody", {}, EVAL_TARGETS.map((t) => targetRow(t, targetVerdict(report, t, budget)))),
+      ),
+    ),
+  );
+}
+
+function fmtSigned(x) {
+  return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
 }
 
 async function showEval() {
@@ -1693,70 +2355,94 @@ async function showEval() {
   }
   clear(box);
   if (evalEmpty(report)) {
-    box.appendChild(el("p", { class: "empty" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่"));
+    box.appendChild(
+      el("div", { class: "card empty-state" }, el("p", { class: "empty-text" }, "ยังไม่มีผลวัดระบบ เมื่อสร้างรายงานผลแล้วให้เปิดหน้านี้ใหม่")),
+    );
+    box.appendChild(committeeBox(el("p", { class: "small" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่")));
     return;
   }
-  box.appendChild(
-    el(
-      "p",
-      { class: "small muted" },
-      `ทั้งหมด ${report.runs} run · git ${(report.git_sha || []).join(", ") || "–"} · config ${(report.config_hash || []).join(", ") || "–"} · signatures ${(report.signatures_sha || []).join(", ") || "–"}`,
-    ),
-  );
-  box.appendChild(
-    el(
-      "p",
-      { class: "small muted" },
-      "ตัวเลขหลักคือ recall ต่อเหตุการณ์ (พร้อม 95% CI) และจำนวนการเตือนผิดต่อสัญลักษณ์-วัน precision แสดงคู่กับ prevalence เสมอ ทุกแถวมีป้ายที่มา",
-    ),
-  );
 
-  box.appendChild(el("h2", { class: "section-label" }, "เป้าหมาย (งบ 2 ครั้ง/สัญลักษณ์-วัน)"));
-  box.appendChild(el("div", { class: "targets" }, EVAL_TARGETS.map((t, i) => targetCard(t, targetVerdict(report, t), i))));
-
-  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
-  if (report.retrain_decision) {
-    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
-    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
-  }
-
-  const budgets = new Set();
+  const found = new Set();
   for (const variants of Object.values(report.experiments)) {
-    for (const cells of Object.values(variants)) Object.keys(cells).forEach((b) => budgets.add(b));
+    for (const cells of Object.values(variants)) Object.keys(cells).forEach((b) => found.add(b));
   }
-  const sorted = [...budgets].sort((a, b) => Number(a) - Number(b));
-  const select = el(
-    "select",
-    { "aria-label": "งบการแจ้งเตือน" },
-    sorted.map((b) => el("option", { value: b }, `${b} ครั้ง/สัญลักษณ์-วัน`)),
-  );
+  const budgets = [...found].sort((a, b) => Number(a) - Number(b));
   const saved = state.evalBudget;
-  select.value = sorted.includes(saved) ? saved : sorted.includes("2") ? "2" : sorted[0] || "";
-  const tables = el("div");
-  box.appendChild(el("div", { class: "toolbar" }, el("label", { class: "field" }, el("span", {}, "งบการแจ้งเตือน"), select)));
-  box.appendChild(tables);
-  const draw = () => {
-    clear(tables);
-    for (const [exp, variants] of Object.entries(report.experiments)) {
-      tables.appendChild(experimentTable(exp, variants, select.value));
-    }
-  };
-  select.addEventListener("change", () => {
-    draw();
-    const b = Number(select.value);
-    if (Number.isFinite(b)) {
-      state.evalBudget = String(b);
-      savePrefs({ eval_budget: b });
-    }
-  });
-  draw();
+  let budget = budgets.includes(saved) ? saved : budgets.includes(MAIN_BUDGET) ? MAIN_BUDGET : budgets[0] || MAIN_BUDGET;
 
-  const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
-  if (notes.length) {
-    box.appendChild(
-      el("details", { class: "card notes-box" }, el("summary", {}, "หมายเหตุวิธีวัด"), el("ul", { class: "small" }, notes.map((n) => el("li", {}, n)))),
+  // the chips: flat pills, one pressed; the plain cards and the committee tables follow them
+  const chips = el("div", { class: "budget-chips", role: "group", "aria-label": "งบเตือน ครั้งต่อวัน" });
+  const note = el("p", { class: "small muted budget-note" });
+  const plain = el("div", { class: "results-plain" });
+  const targets = el("div");
+  const tables = el("div");
+  const draw = () => {
+    for (const c of chips.children) c.setAttribute("aria-pressed", String(c.getAttribute("data-budget") === budget));
+    note.textContent = budget === MAIN_BUDGET ? "" : `เป้าหมายของโครงการตั้งไว้ที่งบเตือน ${MAIN_BUDGET} ครั้งต่อวัน`;
+    note.hidden = budget === MAIN_BUDGET;
+    renderResultCards(plain, report, Number(budget));
+    clear(targets).appendChild(targetTable(report, Number(budget)));
+    clear(tables);
+    for (const [exp, variants] of Object.entries(report.experiments)) tables.appendChild(experimentTable(exp, variants, budget));
+  };
+  for (const b of budgets) {
+    chips.appendChild(
+      el(
+        "button",
+        {
+          type: "button",
+          class: "budget-chip",
+          "data-budget": b,
+          "aria-pressed": "false",
+          onclick: () => {
+            if (budget === b) return;
+            budget = b;
+            state.evalBudget = b;
+            savePrefs({ eval_budget: Number(b) });
+            draw();
+          },
+        },
+        b,
+      ),
     );
   }
+  box.appendChild(
+    el(
+      "div",
+      { class: "budget-row" },
+      el("span", { class: "budget-label" }, "งบเตือน"),
+      chips,
+      el("span", { class: "budget-unit" }, "ครั้งต่อวัน"),
+    ),
+  );
+  box.appendChild(note);
+  box.appendChild(plain);
+
+  const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
+  const retrain = report.retrain_decision;
+  box.appendChild(
+    committeeBox(
+      el(
+        "p",
+        { class: "small muted" },
+        `ทั้งหมด ${report.runs} run · git ${(report.git_sha || []).join(", ") || "–"} · config ${(report.config_hash || []).join(", ") || "–"} · signatures ${(report.signatures_sha || []).join(", ") || "–"}`,
+      ),
+      el(
+        "p",
+        { class: "small muted" },
+        "ตัวเลขหลักคือ recall ต่อเหตุการณ์ (พร้อม 95% CI) และจำนวนการเตือนผิดต่อสัญลักษณ์-วัน precision แสดงคู่กับ prevalence เสมอ ทุกแถวมีป้ายที่มา",
+      ),
+      targets,
+      report.paired_bootstrap ? pairedCard(report.paired_bootstrap) : null,
+      retrain ? retrainCard("Champion / challenger (full stack)", retrain) : null,
+      retrain && retrain.ai_only ? retrainCard("AE alone (diagnostic)", retrain.ai_only) : null,
+      tables,
+      notes.length
+        ? el("details", { class: "notes-box" }, el("summary", {}, "หมายเหตุวิธีวัด"), el("ul", { class: "small" }, notes.map((n) => el("li", {}, n))))
+        : null,
+    ),
+  );
+  draw();
 }
 
 function ciText(mean, ci) {
@@ -1806,7 +2492,7 @@ function experimentTable(exp, variants, budget) {
       ),
     );
   }
-  const card = el("div", { class: "card" }, el("h3", {}, exp));
+  const card = el("div", { class: "committee-sec" }, el("h3", {}, exp));
   if (!rows.length) {
     card.appendChild(el("p", { class: "muted small" }, "ไม่มีผลที่งบนี้"));
     return card;
@@ -1837,7 +2523,7 @@ function experimentTable(exp, variants, budget) {
 }
 
 function pairedCard(paired) {
-  const card = el("div", { class: "card" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
+  const card = el("div", { class: "committee-sec" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
   if ((paired.rows || []).length) card.appendChild(forestPlot(paired));
   const rows = (paired.rows || []).map((row) =>
     el(
@@ -1938,7 +2624,7 @@ function whiskerChart(series, order) {
 function retrainCard(title, block) {
   const card = el(
     "div",
-    { class: "card" },
+    { class: "committee-sec" },
     el("div", { class: "detail-head" }, el("h3", {}, title), provenanceBadges(block.provenance)),
     el(
       "p",
@@ -1998,17 +2684,32 @@ async function showTaxonomy() {
 const PAGES = {
   login: "page-login",
   activity: "page-activity",
-  monitor: "page-monitor",
+  home: "page-home",
   alerts: "page-alerts",
   alert: "page-alert",
-  redteam: "page-redteam",
-  eval: "page-eval",
-  taxonomy: "page-taxonomy",
-  about: "page-about",
+  simulate: "page-simulate",
+  results: "page-results",
 };
 
+// old links keep working: the 6-tab names map onto the 4 pages; About and Taxonomy live in help
+const ROUTE_REDIRECTS = { "#/monitor": "#/home", "#/redteam": "#/simulate", "#/eval": "#/results" };
+const HELP_ROUTES = ["#/about", "#/taxonomy"];
+const KNOWN_ROUTES = ["#/home", "#/alerts", "#/simulate", "#/results", "#/activity"];
+
+// where a hash should land: { route, help }; anything unknown goes home
+function routeFor(hash) {
+  const raw = typeof hash === "string" ? hash : "";
+  if (ROUTE_REDIRECTS[raw]) return { route: ROUTE_REDIRECTS[raw], help: false };
+  if (HELP_ROUTES.includes(raw)) return { route: DEFAULT_ROUTE, help: true };
+  if (KNOWN_ROUTES.includes(raw)) return { route: raw, help: false };
+  if (raw === "#/alerts/") return { route: "#/alerts", help: false };
+  if (/^#\/alerts\/./.test(raw)) return { route: raw, help: false };
+  if (raw === "#/login" || raw.startsWith("#/login?")) return { route: raw, help: false };
+  return { route: DEFAULT_ROUTE, help: false };
+}
+
 function parseRoute() {
-  const hash = location.hash || "#/monitor";
+  const hash = routeFor(location.hash).route;
   const m = /^#\/alerts\/(.+)$/.exec(hash);
   if (m) {
     let id = m[1];
@@ -2021,11 +2722,26 @@ function parseRoute() {
   }
   const [path, query] = hash.replace(/^#\//, "").split("?");
   if (path === "login") return { name: "login", next: safeNext(new URLSearchParams(query || "").get("next")) };
-  return { name: PAGES[path] ? path : "monitor" };
+  return { name: PAGES[path] ? path : "home" };
 }
 
 function route() {
+  const hash = location.hash || "";
+  const target = routeFor(hash);
+  if (target.help) {
+    if (state.view === "app") openHelp();
+    else state.pendingHelp = true; // no help over the loader or the sign-in page
+  }
+  if (target.route !== hash) {
+    location.replace(target.route); // the hashchange that follows renders the page
+    return;
+  }
+  if (state.view === "loading") return; // boot() routes once /api/me has answered
   const r = parseRoute();
+  if (r.name !== "login" && !state.me) {
+    goLogin(); // no session yet: a typed or bookmarked page waits behind the sign-in
+    return;
+  }
   if (r.name === "activity" && !can("admin")) {
     // a convenience redirect: GET /api/audit answers 403 for anyone else anyway
     location.hash = DEFAULT_ROUTE;
@@ -2037,24 +2753,26 @@ function route() {
   }
   state.route = r.name;
   document.body.classList.toggle("login-mode", r.name === "login");
+  $("topbar").hidden = r.name === "login"; // the sign-in page carries its own logo
+  const chip = $("user-chip");
+  if (chip) chip.open = false;
   if (r.name !== "alert") destroyDetailChart();
   for (const [name, id] of Object.entries(PAGES)) $(id).hidden = name !== r.name;
   const tab = r.name === "alert" ? "alerts" : r.name;
-  for (const a of document.querySelectorAll(".tabs a")) {
+  for (const a of document.querySelectorAll(".nav a")) {
     if (a.dataset.route === tab) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
-  if (r.name === "monitor") {
+  if (r.name === "home") {
     initChart();
   } else if (r.name === "alert") {
     showAlert(r.id);
-  } else if (r.name === "eval") {
+  } else if (r.name === "results") {
     showEval();
-  } else if (r.name === "taxonomy") {
-    showTaxonomy();
   } else if (r.name === "activity") {
     showActivity();
   } else if (r.name === "login") {
+    applyFramedHint(window, $("login-framed"), $("login-framed-link"));
     $("login-user").focus();
   }
 }
@@ -2063,40 +2781,78 @@ function route() {
 
 let loginFails = 0;
 
+// inside someone else's frame (e.g. the huggingface.co Space page) the browser drops the
+// SameSite=Strict cookie, so sign-in cannot stick: say so and link to the site itself
+function isFramed(win) {
+  try {
+    return win.top !== win;
+  } catch (e) {
+    return true; // a cross-origin top that cannot even be compared is still a frame
+  }
+}
+
+function applyFramedHint(win, box, link) {
+  const framed = isFramed(win);
+  box.hidden = !framed;
+  if (framed) link.href = win.location.href;
+  return framed;
+}
+
 function showLoginError(text) {
   const box = $("login-error");
   box.hidden = !text;
   box.textContent = text || "";
 }
 
+// with auth off the one local user is shown too, so the menu (activity, tour) stays reachable
 function renderUserChip() {
   const chip = $("user-chip");
+  const me = state.me;
+  chip.hidden = !me;
+  if (!me) return;
   const on = authOn();
-  chip.hidden = !on;
-  $("theme-toggle").hidden = on; // with an account the theme lives in the user menu
-  if (!on) return;
-  $("user-name").textContent = state.me.display_name || state.me.username;
-  $("user-role").textContent = String(state.me.role || "").toUpperCase();
+  $("user-name").textContent = on ? me.display_name || me.username : "ใช้งานในเครื่อง";
+  $("user-role").textContent = ROLE_TH[me.role] || "";
+  $("btn-logout").hidden = !on;
 }
 
 // the sign-in answer or /api/me: apply the account, its saved choices, and the role gates
 function adoptMe(me) {
   setMe(me);
   const prefs = loadedPrefs();
-  if (prefs.theme && THEMES.includes(prefs.theme)) applyTheme(prefs.theme);
   if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
   renderUserChip();
   applyRoleGates();
 }
 
+// whether sign-in is on: true or false once /api/me answers, null when it could not be reached
 async function loadMe() {
+  state.bootError = null;
   try {
-    adoptMe(await api("/api/me"));
-    return true;
+    const me = await api("/api/me");
+    if (!me || typeof me !== "object" || Array.isArray(me)) {
+      // a 200 without an account is not "sign-in is off": keep asking
+      setMe(null);
+      state.bootError = { answered: true };
+      console.warn("dashboard: /api/me answered without an account", me);
+      return null;
+    }
+    adoptMe(me);
+    return !!me.auth_enabled;
   } catch (e) {
     setMe(null);
-    return false;
+    if (e.status === 401) return true; // only sign-in answers 401
+    state.bootError = isNum(e.status) ? { status: e.status } : {};
+    console.warn("dashboard: /api/me failed:", e.status || "no answer", e.message);
+    return null;
   }
+}
+
+// leave the loader for the sign-in page or the app
+function showView(view) {
+  state.view = view;
+  $("boot-loader").hidden = view !== "loading";
+  $("site-footer").hidden = view === "loading";
 }
 
 function bindLogin() {
@@ -2142,6 +2898,12 @@ function bindLogin() {
   document.addEventListener("click", (ev) => {
     const chip = $("user-chip");
     if (chip.open && !chip.contains(ev.target)) chip.open = false;
+  });
+  document.addEventListener("keydown", (ev) => {
+    const chip = $("user-chip");
+    if (ev.key !== "Escape" || !chip.open) return;
+    chip.open = false;
+    chip.querySelector("summary").focus();
   });
 }
 
@@ -2275,7 +3037,7 @@ function onWsClose(ws, code) {
 function scheduleReconnect() {
   const delay = Math.min(1000 * 2 ** state.wsRetry, 15000);
   state.wsRetry += 1;
-  wsBanner(`การเชื่อมต่อสดหลุด กำลังเชื่อมต่อใหม่ในอีก ${Math.round(delay / 1000)} วินาที (ข้อมูลบนจออาจไม่เป็นปัจจุบัน)`);
+  wsBanner("การเชื่อมต่อหลุด กำลังเชื่อมใหม่…");
   setTimeout(connect, delay);
 }
 
@@ -2297,11 +3059,17 @@ function fillSymbols() {
     for (const s of state.symbols) sel.appendChild(el("option", { value: s }, s));
     sel.value = state.symbol || "";
   }
-  $("kpi-symbol").textContent = state.symbol || "–";
+  $("symbol-name").textContent = state.symbol || "–";
+  $("symbol-pick").hidden = state.symbols.length < 2; // one coin: nothing to choose
 }
 
 // the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
 async function enterApp() {
+  showView("app");
+  if (state.pendingHelp) {
+    state.pendingHelp = false;
+    openHelp();
+  }
   if (state.started) {
     // signed in again mid-session: the same page, fresh data
     applyRoleGates();
@@ -2324,9 +3092,10 @@ async function enterApp() {
   try {
     renderHealth(await api("/api/health"));
   } catch (e) {
-    $("auditor-text").textContent = "อ่านสถานะไม่ได้";
+    $("health-text").textContent = "อ่านสถานะไม่ได้";
   }
   initChart();
+  loadTaxonomy().then(() => renderRail()); // the rail names patterns in Thai once the taxonomy is in
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
@@ -2334,27 +3103,42 @@ async function enterApp() {
 
 async function boot() {
   window.addEventListener("hashchange", safely(route));
-  bindTheme();
+  $("help-btn").addEventListener("click", openHelp);
+  $("menu-tour").addEventListener("click", () => {
+    $("user-chip").open = false;
+    startTour();
+  });
   bindLogin();
   bindActivity();
   document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
   bindMonitor();
-  bindRedTeam();
+  bindSimulate();
+  $("alerts-more").addEventListener("click", () => {
+    state.alertsShown += ALERT_PAGE;
+    renderAlertCards();
+  });
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
     $("rt-symbol").value = state.symbol;
-    $("kpi-symbol").textContent = state.symbol || "–";
+    $("symbol-name").textContent = state.symbol || "–";
     savePrefs({ symbol: state.symbol });
     state.alertCount = 0;
-    renderAlertsKpi();
+    state.alertCountKnown = false; // a new coin's count is not news
+    renderBudget(); // the count and the budget line are per coin
     loadSeries();
   });
-  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
-  if (media && media.addEventListener) media.addEventListener("change", safely(restyleCharts));
   if (!LWC) console.warn("dashboard: the chart library did not load");
 
-  if (!(await loadMe())) {
+  let authEnabled = await loadMe();
+  for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {
+    // no usable answer: keep only the loader up, say why, and ask again with a growing wait
+    $("boot-text").textContent = bootRetryText(state.bootError);
+    await new Promise((resolve) => setTimeout(resolve, bootRetryDelay(attempt)));
+    authEnabled = await loadMe();
+  }
+  if (bootView(state.me, authEnabled) === "login") {
+    showView("login");
     route(); // the 401 already sent the page to the sign-in route
     return;
   }
@@ -2371,22 +3155,63 @@ if (typeof document !== "undefined") {
     eligibleForRun,
     firstDetection,
     resetRuns,
+    restartRuns,
     injectionStatus,
-    bannerText,
+    simStatusText,
+    simulateRequest,
+    simReason,
+    simErrorText,
+    control,
+    SIM_CARDS,
+    SIM_REASON,
+    setMode,
+    bindSimulate,
     redTeamAllowed,
     reducedMotion,
     EVAL_TARGETS,
     targetVerdict,
+    resultSentence,
+    RESULT_BADGE,
+    showEval,
     evalEmpty,
     forestPlot,
     tweenNumber,
     flash,
     presenterKey,
+    bootView,
+    bootRetryText,
+    bootRetryDelay,
+    loadMe,
+    getBootError: () => state.bootError,
     playToggleAction,
     noteReplayAction,
     getReplaying: () => state.replaying,
     PAGE_ORDER,
+    DEFAULT_ROUTE,
+    heroStatus,
+    HERO_WATCH_RATIO,
+    HERO_RECENT_US,
+    SPEED_CHIPS,
+    firstSentence,
+    applyRoleGates,
+    ALERT_FILTERS,
+    VERDICT_TH,
+    filterAlerts,
+    onAlert,
+    showToast,
+    showAlert,
+    setRoute: (r) => {
+      state.route = r;
+    },
+    getAlertIds: () => [...state.alerts.keys()],
+    getAlertsWithFeedback: () => [...state.alerts.values()].map(withFeedback),
+    fmtThaiTime,
+    railHeadline,
+    ROLE_TH,
+    routeFor,
     safeNext,
+    isFramed,
+    applyFramedHint,
     can,
     setMe,
     savePrefs,

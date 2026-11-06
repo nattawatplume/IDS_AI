@@ -84,7 +84,10 @@ def token_hash(t: str) -> str:
 
 
 class LoginLimiter:
-    """In-memory: max_fail failures per username within window_s -> lock for lock_s."""
+    """In-memory: max_fail failures per username within window_s -> lock for lock_s.
+
+    Names whose failures are all past the window and whose lock is over are pruned (at most once
+    a second, from `locked`), so many distinct names cannot grow it without bound."""
 
     def __init__(
         self,
@@ -99,8 +102,27 @@ class LoginLimiter:
         self._clock = clock
         self._fails: dict[str, list[float]] = {}
         self._locked_until: dict[str, float] = {}
+        self._hit: set[str] = set()  # names whose current lock already had a rejected attempt
+        self._pruned_at: float | None = None
+
+    def prune(self) -> None:
+        now = self._clock()
+        self._pruned_at = now
+        for name, until in list(self._locked_until.items()):
+            if now >= until:
+                del self._locked_until[name]
+                self._fails.pop(name, None)  # as in `locked`: an expired lock starts afresh
+                self._hit.discard(name)
+        for name, ts in list(self._fails.items()):
+            if name not in self._locked_until and all(now - t >= self.window_s for t in ts):
+                del self._fails[name]
+
+    def size(self) -> int:
+        return len(self._fails.keys() | self._locked_until.keys())
 
     def locked(self, username: str) -> bool:
+        if self._pruned_at is None or self._clock() - self._pruned_at >= 1.0:
+            self.prune()
         until = self._locked_until.get(username)
         if until is None:
             return False
@@ -108,7 +130,15 @@ class LoginLimiter:
             return True
         del self._locked_until[username]
         self._fails.pop(username, None)
+        self._hit.discard(username)
         return False
+
+    def first_locked_hit(self, username: str) -> bool:
+        """True only for the first rejected attempt within the current lock."""
+        if username in self._hit:
+            return False
+        self._hit.add(username)
+        return True
 
     def fail(self, username: str) -> None:
         now = self._clock()
@@ -117,7 +147,9 @@ class LoginLimiter:
         self._fails[username] = recent
         if len(recent) >= self.max_fail:
             self._locked_until[username] = now + self.lock_s
+            self._hit.discard(username)
 
     def ok(self, username: str) -> None:
         self._fails.pop(username, None)
         self._locked_until.pop(username, None)
+        self._hit.discard(username)

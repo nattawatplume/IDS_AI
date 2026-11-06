@@ -2,72 +2,79 @@
 <html lang="th">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
   <title>Market IDS</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-name">MARKET·IDS</span>
-      <span id="mode-badge" class="badge badge-mode">…</span>
-    </div>
-    <nav class="tabs" aria-label="หน้า">
-      <a href="#/monitor" data-route="monitor">Monitor</a>
-      <a href="#/alerts" data-route="alerts">Alerts</a>
-      <a href="#/redteam" data-route="redteam">Red-Team</a>
-      <a href="#/eval" data-route="eval">Eval</a>
-      <a href="#/taxonomy" data-route="taxonomy">Taxonomy</a>
-      <a href="#/about" data-route="about">About</a>
-      <a href="#/activity" data-route="activity" id="tab-activity" hidden>Activity</a>
+  <div class="bg" aria-hidden="true"><span class="blob blob-1"></span><span class="blob blob-2"></span><span class="blob blob-3"></span></div>
+
+  <div id="boot-loader" class="boot-loader" role="status">
+    <span class="boot-spinner" aria-hidden="true"></span>
+    <span id="boot-text" class="small muted">กำลังตรวจสอบการเข้าสู่ระบบ</span>
+  </div>
+
+  <header id="topbar" class="topbar" hidden>
+    <a class="brand" href="#/home" aria-label="Market IDS หน้าหลัก">
+      <svg class="brand-mark" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false">
+        <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="8" fill="rgba(139, 92, 246, 0.18)" stroke="rgba(255, 255, 255, 0.16)" stroke-width="1.5"/>
+        <path d="M7 18.5l4.5-5.5 3.5 3.5 6-8" stroke="#c4b5fd" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="21" cy="8.5" r="1.75" fill="#eef0ff"/>
+      </svg>
+      <span class="brand-name">Market IDS</span>
+    </a>
+    <nav class="nav" aria-label="หน้า">
+      <a href="#/home" data-route="home"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></svg><span>หน้าหลัก</span></a>
+      <a href="#/alerts" data-route="alerts"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span>การแจ้งเตือน</span></a>
+      <a href="#/simulate" data-route="simulate"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><path d="M10.25 8.75 15.25 12l-5 3.25z"/></svg><span>ทดลองจำลอง</span></a>
+      <a href="#/results" data-route="results"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 20h16M6.5 20v-7M12 20V5.5M17.5 20v-10"/></svg><span>ผลวัดระบบ</span></a>
     </nav>
-    <div class="topbar-stats">
-      <div class="stat" title="เวลาเหตุการณ์">
+    <div class="topbar-side">
+      <span class="chip mode-chip" title="โหมดข้อมูลและเวลาเหตุการณ์ (UTC)">
         <span id="live-dot" class="dot"></span>
+        <span id="mode-badge" class="badge-mode">…</span>
         <span id="clock" class="clock">–</span>
-      </div>
-      <details id="auditor" class="stat auditor">
-        <summary>
-          <span class="stat-label">Auditor</span>
-          <span class="stat-value"><span id="auditor-dot" class="dot"></span><span id="auditor-text" class="small">กำลังโหลด…</span></span>
-        </summary>
-        <ul id="auditor-checks" class="auditor-checks"></ul>
-      </details>
-      <div class="stat budget" title="งบการแจ้งเตือน (24 ชม.ล่าสุด)">
-        <span class="stat-label">งบ</span>
-        <span class="stat-value">
-          <span id="budget-meter" class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
-          <span id="budget-text" class="mono small">–</span>
-        </span>
-      </div>
-      <details id="user-chip" class="stat user-chip" hidden>
-        <summary>
-          <span id="user-name" class="small">–</span>
-          <span id="user-role" class="badge">–</span>
+      </span>
+      <button id="help-btn" class="icon-btn" type="button" aria-label="วิธีใช้" title="วิธีใช้ (กด ?)">?</button>
+      <details id="user-chip" class="user-chip" hidden>
+        <summary class="chip" aria-label="เมนูผู้ใช้">
+          <span id="user-name">–</span>
+          <span id="user-role" class="role">–</span>
         </summary>
         <div class="user-menu">
-          <div class="menu-label">ธีม</div>
-          <div class="menu-row">
-            <button type="button" class="mini" data-theme-choice="auto">AUTO</button>
-            <button type="button" class="mini" data-theme-choice="dark">DARK</button>
-            <button type="button" class="mini" data-theme-choice="light">LIGHT</button>
-          </div>
+          <a id="menu-activity" href="#/activity" data-route="activity" hidden>กิจกรรม</a>
+          <button id="menu-tour" type="button">ดูทัวร์อีกครั้ง</button>
           <button id="btn-logout" type="button">ออกจากระบบ</button>
         </div>
       </details>
-      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="ธีม">AUTO</button>
     </div>
   </header>
 
-  <div id="ws-banner" class="banner banner-warn" role="status" hidden></div>
+  <div id="ws-banner" class="ws-toast" role="status" hidden></div>
+  <div id="toast-root" class="toast-root" aria-live="polite"></div>
 
   <main>
     <!-- Sign-in -->
     <section id="page-login" class="page" hidden>
-      <form id="login-form" class="card login-card" method="post" autocomplete="on">
-        <h1 class="login-mark">MARKET·IDS</h1>
-        <p class="muted small">เข้าสู่ระบบเพื่อดูแดชบอร์ด</p>
+      <div class="login-hero">
+        <div class="login-brand">
+          <svg class="login-mark" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false">
+            <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="8" fill="rgba(139, 92, 246, 0.18)" stroke="rgba(255, 255, 255, 0.16)" stroke-width="1.5"/>
+            <path d="M7 18.5l4.5-5.5 3.5 3.5 6-8" stroke="#c4b5fd" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="21" cy="8.5" r="1.75" fill="#eef0ff"/>
+          </svg>
+          <h1 class="login-name">Market IDS</h1>
+        </div>
+        <p class="login-tagline"><span>กล้องวงจรปิดของตลาดคริปโต</span> <span>เตือนเมื่อการซื้อขายผิดปกติทางสถิติ</span></p>
+        <svg class="login-line" viewBox="0 0 520 170" fill="none" aria-hidden="true" focusable="false">
+          <path class="login-line-limit" d="M0 64H520"/>
+          <path class="login-line-rest" pathLength="1000" d="M0 130 L20 124 L40 132 L60 126 L80 129 L100 121 L120 128 L140 123 L160 131 L180 125 L200 127 L220 120 L240 129 L260 124 L280 128 L300 122 L320 126 L338 118 L354 100 L368 56 L380 36 L392 72 L406 110 L422 123 L440 128 L460 121 L480 126 L500 123 L520 127"/>
+          <path class="login-line-trace" pathLength="1000" d="M0 130 L20 124 L40 132 L60 126 L80 129 L100 121 L120 128 L140 123 L160 131 L180 125 L200 127 L220 120 L240 129 L260 124 L280 128 L300 122 L320 126 L338 118 L354 100 L368 56 L380 36 L392 72 L406 110 L422 123 L440 128 L460 121 L480 126 L500 123 L520 127"/>
+        </svg>
+      </div>
+      <form id="login-form" class="card login-card" method="post" autocomplete="on" aria-label="เข้าสู่ระบบ">
+        <p id="login-framed" class="small login-framed" role="note" hidden>หน้านี้ถูกเปิดอยู่ในกรอบของเว็บอื่น ล็อกอินได้เฉพาะเมื่อเปิดเว็บนี้โดยตรงเท่านั้น <a id="login-framed-link" target="_top" href="#">เปิดเว็บนี้โดยตรง</a></p>
         <label class="field">
           <span>ชื่อผู้ใช้</span>
           <input id="login-user" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required>
@@ -78,86 +85,132 @@
         </label>
         <label class="check">
           <input id="login-remember" type="checkbox">
-          <span>จดจำฉัน</span>
+          <span>จำฉันไว้</span>
         </label>
         <p id="login-error" class="small login-error" role="alert" hidden></p>
         <button id="login-submit" type="submit" class="primary">เข้าสู่ระบบ</button>
+        <p class="small muted login-note">บัญชีผู้ใช้สร้างโดยผู้ดูแลระบบ</p>
       </form>
     </section>
 
-    <!-- Monitor -->
-    <section id="page-monitor" class="page" hidden>
-      <div class="toolbar">
-        <label class="field">
-          <span>สัญลักษณ์</span>
-          <select id="symbol-select"></select>
-        </label>
-        <div id="replay-controls" class="replay" hidden>
-          <button id="btn-play" type="button">▶ เล่น</button>
-          <button id="btn-pause" type="button">❚❚ หยุด</button>
-          <label class="field">
-            <span>ความเร็ว</span>
-            <select id="speed-select">
-              <option value="" selected disabled>เลือก…</option>
-              <option value="1">1×</option>
-              <option value="10">10×</option>
-              <option value="60">60×</option>
-              <option value="300">300×</option>
-              <option value="0">เร็วสุด</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>ไปที่เวลา (UTC)</span>
-            <input id="seek-input" type="datetime-local" step="1">
-          </label>
-          <button id="btn-seek" type="button">ไป</button>
-          <span id="replay-status" class="muted small"></span>
+    <!-- Home: the status first, then the numbers, the chart and the replay, newest alerts beside -->
+    <section id="page-home" class="page" hidden>
+      <div id="hero" class="card hero">
+        <span id="hero-orb" class="orb wait" aria-hidden="true"></span>
+        <div class="hero-text" role="status" aria-live="polite">
+          <h1 id="hero-title" class="hero-title">กำลังอ่านสถานะ</h1>
+          <p id="hero-line" class="hero-line"></p>
         </div>
       </div>
-      <div class="kpis">
-        <div class="kpi"><span class="kpi-label">สัญลักษณ์</span><span class="kpi-value mono" id="kpi-symbol">–</span></div>
-        <div class="kpi"><span class="kpi-label">ค่า F ล่าสุด / τ</span><span class="kpi-value mono"><span id="kpi-f">–</span><small class="kpi-sub">/ <span id="kpi-tau">–</span></small></span></div>
-        <div class="kpi"><span class="kpi-label">แจ้งเตือน 24 ชม.</span><span class="kpi-value mono kpi-alert"><span id="kpi-alerts">–</span><small class="kpi-sub" id="kpi-budget">งบ –</small></span></div>
-        <div class="kpi"><span class="kpi-label">Auditor</span><span class="kpi-value" id="kpi-auditor">–</span></div>
+
+      <div class="home-cards">
+        <div id="card-alerts" class="card stat-card">
+          <span class="card-label">แจ้งเตือนวันนี้</span>
+          <span class="card-value"><span id="alerts-count">–</span> <span class="card-unit">ครั้ง</span></span>
+          <span class="card-sub">
+            <span class="meter" aria-hidden="true"><span id="budget-fill" class="meter-fill"></span></span>
+            <span id="budget-line">ใช้งบแจ้งเตือนไป –</span>
+          </span>
+        </div><!-- /card-alerts -->
+        <div id="card-symbol" class="card stat-card">
+          <span class="card-label">เหรียญที่ดูอยู่</span>
+          <span id="symbol-name" class="card-value">–</span>
+          <label id="symbol-pick" class="symbol-pick" hidden>
+            <span class="card-sub">เปลี่ยนเหรียญ</span>
+            <select id="symbol-select"></select>
+          </label>
+          <span id="symbol-price" class="card-sub">ราคาล่าสุด –</span>
+        </div>
+        <details id="card-health" class="card stat-card health-card">
+          <summary>
+            <span class="card-label">สุขภาพระบบ</span>
+            <span class="card-value"><span id="health-dot" class="dot"></span><span id="health-text">–</span></span>
+            <span id="health-sub" class="card-sub">กดเพื่อดูรายการตรวจ</span>
+          </summary>
+          <ul id="health-checks" class="health-checks"></ul>
+        </details>
       </div>
-      <div class="monitor-body">
-        <div class="monitor-main">
-          <div class="chart-card">
-            <div class="chart-bar">
-              <span id="readout" class="readout mono small">–</span>
-              <button id="layers-toggle" class="mini" type="button" aria-expanded="false">แสดง L1/L2/L3</button>
-              <button id="chart-info" class="mini" type="button" aria-expanded="false" aria-label="คำอธิบายกราฟ">i</button>
+
+      <div class="home-body">
+        <div class="home-main">
+          <div id="chart-card" class="card chart-card">
+            <div class="chart-head">
+              <h2 class="card-title">ราคาและระดับความผิดปกติ</h2>
+              <span id="readout" class="readout small">–</span>
             </div>
-            <p id="chart-info-body" class="legend small muted" hidden>
-              บน: ราคาปิด และลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
-              F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก) เส้นประ τ คือเกณฑ์แจ้งเตือน ·
-              L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
-            </p>
             <div id="chart" class="chart"></div>
-            <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลคะแนนของสัญลักษณ์นี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+            <p id="chart-empty" class="empty" hidden>ยังไม่มีข้อมูลของเหรียญนี้ (ระบบกำลังอุ่นเครื่องหรือยังไม่เริ่มเล่น)</p>
+            <details id="chart-details" class="chart-details">
+              <summary>ดูรายละเอียด</summary>
+              <p id="chart-info-body" class="small muted">
+                กราฟบนคือราคาปิด ลูกศรคือจุดที่พบความผิดปกติทางสถิติ ·
+                กราฟล่างคือระดับความผิดปกติ F = ค่า p รวม / ความหายากเทียบตลาดปกติ แสดงเป็น −log10 p (ยิ่งสูงยิ่งหายาก)
+                เส้นประสีส้มคือเส้นเตือน τ เมื่อ F ขึ้นถึงเส้นนี้ระบบจะแจ้งเตือน ·
+                L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้น
+              </p>
+              <button id="layers-toggle" class="mini" type="button" aria-expanded="false">แสดง L1/L2/L3</button>
+            </details>
           </div>
         </div>
-        <aside class="rail" aria-label="แจ้งเตือนล่าสุด">
-          <h2 class="rail-title">แจ้งเตือนล่าสุด</h2>
-          <div id="alert-rail" class="rail-list"></div>
-          <p id="rail-empty" class="empty small" hidden>ยังไม่มีการแจ้งเตือน</p>
-        </aside>
+
+        <div class="home-side">
+          <div id="replay-bar" class="card replay-bar" hidden>
+            <div class="replay-top">
+              <button id="btn-play" type="button" class="primary play-btn" aria-label="หยุดชั่วคราว" title="หยุดชั่วคราว (กด Space)">❚❚</button>
+              <div class="replay-now">
+                <span class="replay-label">ย้อนดูข้อมูลจริง</span>
+                <span id="replay-clock" class="replay-clock small">–</span>
+              </div>
+            </div>
+            <div class="replay-track" title="ตำแหน่งของเวลาในข้อมูลภายในวันนั้น (UTC)"><span id="replay-fill" class="replay-fill"></span></div>
+            <div class="speed-row">
+              <span class="small muted">ความเร็ว</span>
+              <div class="speed-chips" role="group" aria-label="ความเร็วในการเล่น">
+                <button type="button" class="chip speed-chip" data-speed="1" aria-pressed="false">1×</button>
+                <button type="button" class="chip speed-chip" data-speed="10" aria-pressed="false">10×</button>
+                <button type="button" class="chip speed-chip" data-speed="60" aria-pressed="false">60×</button>
+                <button type="button" class="chip speed-chip" data-speed="0" aria-pressed="false">เร็วสุด</button>
+              </div>
+            </div>
+            <p id="replay-reason" class="small muted replay-reason" hidden></p>
+            <span id="replay-status" class="small muted replay-status"></span>
+            <details class="replay-advanced">
+              <summary class="small">ขั้นสูง</summary>
+              <div id="advanced-seek" class="advanced-seek">
+                <label class="field">
+                  <span>ไปที่เวลา (UTC)</span>
+                  <input id="seek-input" type="datetime-local" step="1">
+                </label>
+                <button id="btn-seek" type="button">ไป</button>
+              </div>
+            </details>
+          </div><!-- /replay-bar -->
+
+          <aside id="rail" class="rail" aria-label="แจ้งเตือนล่าสุด">
+            <div class="rail-head">
+              <h2 class="rail-title">แจ้งเตือนล่าสุด</h2>
+              <a href="#/alerts" class="small">ดูทั้งหมด</a>
+            </div>
+            <div id="alert-rail" class="rail-list"></div>
+            <p id="rail-empty" class="empty small" hidden>ยังไม่มีการแจ้งเตือน</p>
+          </aside>
+        </div>
       </div>
     </section>
 
-    <!-- Alerts triage -->
+    <!-- Alerts: filter chips, then one card per alert, newest first -->
     <section id="page-alerts" class="page" hidden>
       <h1>การแจ้งเตือน</h1>
-      <p class="muted small">ทุกรายการคือช่วงเวลาที่พบความผิดปกติทางสถิติเมื่อเทียบกับตลาดปกติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร</p>
-      <div class="table-wrap">
-        <table class="table" id="alerts-table">
-          <thead>
-            <tr><th>ระดับ</th><th>เทคนิค</th><th>สัญลักษณ์</th><th>เวลา (UTC)</th><th>ค่า p รวม</th><th>เห็นพ้อง</th><th>สถานะ</th></tr>
-          </thead>
-          <tbody id="alerts-body"></tbody>
-        </table>
+      <p class="muted page-lead">ทุกรายการคือช่วงเวลาที่การซื้อขายต่างจากตลาดปกติทางสถิติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร</p>
+      <p id="alerts-error" class="inline-error" role="alert" hidden></p>
+      <div id="alerts-filters" class="filter-row" role="group" aria-label="กรองรายการ" hidden></div>
+      <div id="alerts-list" class="alert-list"></div>
+      <p id="alerts-none" class="empty small" hidden>ไม่มีรายการในกลุ่มนี้</p>
+      <button id="alerts-more" type="button" class="more-btn" hidden>แสดงเพิ่ม</button>
+      <div id="alerts-empty" class="card empty-state" hidden>
+        <span class="empty-radar" aria-hidden="true"></span>
+        <p class="empty-text">ยังไม่มีการแจ้งเตือน ระบบกำลังเฝ้าดูอยู่</p>
       </div>
-      <p id="alerts-empty" class="empty" hidden>ยังไม่มีการแจ้งเตือน</p>
     </section>
 
     <!-- Alert detail -->
@@ -166,51 +219,63 @@
       <div id="alert-detail"></div>
     </section>
 
-    <!-- Red-Team -->
-    <section id="page-redteam" class="page" hidden>
-      <h1>Red-Team</h1>
-      <p class="muted small">ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่กำลังเล่นย้อนหลัง (เฉพาะสำเนาในหน่วยความจำ) แล้วจับเวลาจนระบบพบความผิดปกติทางสถิติ</p>
-      <!-- fail closed: disabled until /api/health confirms replay or sim (app.js setMode) -->
-      <div id="redteam-refused" class="banner banner-fail">Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)</div>
-      <form id="redteam-form" class="card form-grid rt-row">
-        <label class="field">
-          <span>รูปแบบ (family)</span>
-          <select id="rt-family" disabled>
-            <option value="pump_burst">pump_burst (พุ่งเร็ว)</option>
-            <option value="pump_stealth">pump_stealth (ค่อยเป็นค่อยไป)</option>
-            <option value="wash_pingpong">wash_pingpong (คล้าย wash)</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>ช่วงพารามิเตอร์ (region)</span>
-          <select id="rt-region" disabled>
-            <option value="test">test</option>
-            <option value="train">train</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>เริ่มหลังเวลาปัจจุบัน (วินาที)</span>
-          <input id="rt-offset" disabled type="number" min="1" max="3600" step="1" value="60">
-        </label>
-        <label class="field">
-          <span>สัญลักษณ์</span>
-          <select id="rt-symbol" disabled></select>
-        </label>
-        <div class="form-actions">
-          <button id="rt-submit" type="submit" class="primary" disabled>ฉีดสถานการณ์จำลอง</button>
-          <span id="rt-status" class="small"></span>
+    <!-- Simulate: one click per card, the defaults below; app.js applySimGates keeps it closed -->
+    <section id="page-simulate" class="page" hidden>
+      <h1>ทดลองจำลอง</h1>
+      <p class="sim-intro muted">ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)</p>
+      <!-- fail closed: every control starts disabled until /api/health confirms replay or sim -->
+      <div class="sim-cards">
+        <button id="sim-pump_burst" type="button" class="card sim-card" data-family="pump_burst" disabled>
+          <span class="sim-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20.5h18" opacity="0.4"/><path d="M3 17.5l6-0.5 3-2 3.5-10L19 4"/></svg></span>
+          <span class="sim-card-title">ปั่นเร็ว</span>
+          <span class="sim-card-line">ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที</span>
+        </button>
+        <button id="sim-pump_stealth" type="button" class="card sim-card" data-family="pump_stealth" disabled>
+          <span class="sim-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20.5h18" opacity="0.4"/><path d="M3 17.5l4.5-1 4-1.5 4.5-2.5 4-2.5"/></svg></span>
+          <span class="sim-card-title">ปั่นแบบเนียน</span>
+          <span class="sim-card-line">ค่อยๆ ดันราคาขึ้นช้าๆ</span>
+        </button>
+        <button id="sim-wash_pingpong" type="button" class="card sim-card" data-family="wash_pingpong" disabled>
+          <span class="sim-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 11a7.5 5.5 0 0 1 13.8-3"/><path d="M18.8 4v4.2h-4.2"/><path d="M19.5 13a7.5 5.5 0 0 1-13.8 3"/><path d="M5.2 20v-4.2h4.2"/></svg></span>
+          <span class="sim-card-title">ซื้อขายวนหลอก</span>
+          <span class="sim-card-line">ซื้อขายกันเองไปมาให้ดูคึกคัก</span>
+        </button>
+      </div>
+      <p id="sim-reason" class="sim-reason small">รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู</p>
+      <p id="rt-status" class="sim-status small" role="status" aria-live="polite"></p>
+      <details id="sim-advanced" class="sim-advanced">
+        <summary>ตั้งค่าขั้นสูง</summary>
+        <div class="form-grid sim-fields">
+          <label class="field">
+            <span>ช่วงค่าที่ใช้สุ่มเหตุการณ์</span>
+            <select id="rt-region" disabled>
+              <option value="test">ช่วงค่าทดสอบ</option>
+              <option value="train">ช่วงค่าฝึก</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>เริ่มหลังจากนี้ (วินาที)</span>
+            <input id="rt-offset" disabled type="number" min="1" max="3600" step="1" value="60">
+          </label>
+          <label class="field">
+            <span>เหรียญ</span>
+            <select id="rt-symbol" disabled></select>
+          </label>
         </div>
-      </form>
-      <div id="rt-runs"></div>
+      </details>
+      <h2 class="sim-runs-title">ผลการทดลอง</h2>
+      <p id="rt-empty" class="muted small">ยังไม่มีการทดลอง เลือกการ์ดด้านบนเพื่อเริ่ม</p>
+      <div id="rt-runs" class="sim-runs"></div>
     </section>
 
-    <!-- Eval -->
-    <section id="page-eval" class="page" hidden>
-      <h1>ผลการประเมิน</h1>
+    <!-- Results: plain cards with pass / fail badges; the technical detail is folded for the committee -->
+    <section id="page-results" class="page" hidden>
+      <h1>ผลวัดระบบ</h1>
+      <p class="page-lead muted">ผลทดสอบระบบกับข้อมูลการซื้อขายย้อนหลัง แต่ละการ์ดบอกว่าถึงเป้าที่ตั้งไว้แล้วหรือยัง</p>
       <div id="eval-body"></div>
     </section>
 
-    <!-- Taxonomy -->
+    <!-- Taxonomy: not routed; a later task moves it into the help drawer -->
     <section id="page-taxonomy" class="page" hidden>
       <h1>ATT&amp;CK for Markets</h1>
       <p class="muted small">กรอบเทคนิคที่ทีมสร้างขึ้นเพื่อการศึกษา (ไม่ใช่มาตรฐานทางการ)</p>
@@ -219,7 +284,7 @@
 
     <!-- Activity (admin) -->
     <section id="page-activity" class="page" hidden>
-      <h1>Activity</h1>
+      <h1>กิจกรรม</h1>
       <p class="muted small">บันทึกการใช้งานของผู้ใช้ทุกคน เรียงใหม่สุดก่อน (เฉพาะ admin)</p>
       <div class="toolbar">
         <label class="field">
@@ -244,7 +309,7 @@
       <p><button id="audit-more" type="button">โหลดเก่ากว่านี้</button></p>
     </section>
 
-    <!-- About -->
+    <!-- About: not routed; a later task moves it into the help drawer -->
     <section id="page-about" class="page prose" hidden>
       <h1>เกี่ยวกับ Market IDS</h1>
       <p>Market IDS เป็นต้นแบบเพื่อการศึกษาในวิชา CPE102 ใช้แนวคิดของระบบตรวจจับการบุกรุก (IDS) กับข้อมูลการซื้อขายคริปโตสาธารณะ
@@ -294,7 +359,7 @@
     </section>
   </main>
 
-  <footer class="footer small muted">
+  <footer id="site-footer" class="footer small muted" hidden>
     ข้อมูล: Binance Vision (CC BY-NC-SA 4.0) · กราฟ: TradingView Lightweight Charts™ ·
     เพื่อการศึกษาเท่านั้น ไม่ใช่คำแนะนำการลงทุน · <a href="#/about">ที่มาและข้อจำกัด</a>
   </footer>

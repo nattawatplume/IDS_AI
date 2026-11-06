@@ -413,12 +413,14 @@ class Store:
                 [alert_id, verdict, analyst, _now_us()],
             )
 
-    def list_feedback(self, alert_id: str) -> list[dict]:
+    def list_feedback(self, alert_id: str | None = None) -> list[dict]:
+        """Verdicts on `alert_id`, oldest first; every alert's when `alert_id` is None."""
+        where, args = ("WHERE alert_id = ? ", [alert_id]) if alert_id is not None else ("", [])
         with self._lock:
             cur = self._db().execute(
                 "SELECT alert_id, verdict, analyst, ts_us FROM feedback "
-                "WHERE alert_id = ? ORDER BY ts_us, rowid",
-                [alert_id],
+                f"{where}ORDER BY ts_us, rowid",
+                args,
             )
             names = [d[0] for d in cur.description]
             return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]

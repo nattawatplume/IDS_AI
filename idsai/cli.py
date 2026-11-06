@@ -19,8 +19,9 @@ calibrated on other normal days (`idsai.eval.experiments.fit_and_calibrate`).
 import argparse
 import json
 import math
+import re
 import sys
-from collections.abc import Callable, Coroutine, Iterable
+from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,7 @@ import polars as pl
 from idsai.config import Settings, config_hash, load_settings
 
 if TYPE_CHECKING:  # the store pulls in DuckDB: imported only where a command needs it
+    from idsai.data.replay import Replayer
     from idsai.data.store import Store
 
 S_US = 1_000_000
@@ -702,10 +704,11 @@ def resolve_bind(args: argparse.Namespace, cfg: Settings) -> tuple[str, int]:
     return args.host, args.port if args.port is not None else cfg.port
 
 
-def allowed_hosts(host: str) -> list[str]:
-    """Loopback names plus the bound host: the `Host` header allowlist (DNS rebinding)."""
+def allowed_hosts(host: str, public: Sequence[str] = ()) -> list[str]:
+    """Loopback names, the bound host and any public host names (behind a TLS proxy): the `Host`
+    header allowlist (DNS rebinding)."""
     bound = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return list(dict.fromkeys([*LOOPBACK_HOSTS, bound.lower()]))
+    return list(dict.fromkeys([*LOOPBACK_HOSTS, bound.lower(), *(h.lower() for h in public)]))
 
 
 def run_server(
@@ -796,6 +799,33 @@ def _load(models: Path, cfg: Settings) -> tuple[list[Any], Any, dict[str, Any]]:
         raise CliError(str(e)) from e
 
 
+def looping(
+    state: Any, pipeline: Any, make_replayer: "Callable[[float], Replayer]", start_us: int
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """`serve --loop`: play `state.replayer` to its end, then again from `start_us`, forever.
+
+    An ended replay cannot seek, so each round gets a new replayer from the original trades (no
+    Red-Team injection survives a round) at the old one's speed, except that max speed (0) falls
+    back to `DEFAULT_SPEED` so one click never pegs the CPU round after round. Its first event is
+    `("seek", start_us)`: the pipeline drops its state and the replay alerts from `start_us` on.
+    The routes read `state.replayer` per call, so swapping it is enough.
+    """
+    import asyncio
+
+    async def run() -> None:
+        while True:
+            rp = state.replayer
+            await pipeline.run(rp)
+            rp = make_replayer(rp.speed or DEFAULT_SPEED)
+            rp.seek(start_us)
+            state.replayer = rp
+            state.injected.clear()
+            pipeline.bus.publish("alerts", {"event": "replay_restarted", "t_us": start_us})
+            await asyncio.sleep(0)  # a round that ends at once never starves the server
+
+    return run
+
+
 def prepare_replay(
     args: argparse.Namespace, cfg: Settings, store: "Store"
 ) -> tuple[Any, Callable[[], Coroutine[Any, Any, None]]]:
@@ -809,7 +839,12 @@ def prepare_replay(
     dets, chief, doc = _load(models, cfg)
     d0 = _day_start_us(day)
     trades = store.read_trades(symbol, d0 - DAY_US, d0 + DAY_US)
-    replayer = Replayer(trades, speed=args.speed, start_us=start, preroll_from_us=d0 - DAY_US)
+
+    def make_replayer(speed: float) -> Replayer:
+        # `trades` is never modified: injections change only a replayer's own copy
+        return Replayer(trades, speed=speed, start_us=start, preroll_from_us=d0 - DAY_US)
+
+    replayer = make_replayer(args.speed)
     pipeline = StreamPipeline(cfg, store, dets, chief, Bus(), "replay")
     state = AppState(
         cfg,
@@ -834,6 +869,9 @@ def prepare_replay(
         f"เล่นย้อนหลัง {symbol} วันที่ {day} เริ่มที่ {when} ความเร็ว {args.speed:g} เท่า "
         f"(อุ่นเครื่องจากข้อมูล 24 ชม.ก่อนหน้าก่อน) โมเดลจาก {models}"
     )
+    if getattr(args, "loop", False):
+        _say("เล่นวนซ้ำ: เมื่อจบวันจะเริ่มเล่นใหม่จากจุดเริ่มเอง (ข้อมูลจำลองที่ฉีดไว้จะหายไป)")
+        return state, looping(state, pipeline, make_replayer, start)
     return state, lambda: pipeline.run(replayer)
 
 
@@ -951,6 +989,38 @@ def _when(us: int | None) -> str:
     return datetime.fromtimestamp(us / S_US, UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def parse_seed_users(text: str) -> list[tuple[str, str, str]]:
+    """Parse IDSAI_USERS (`username:role:password` per line; `#` comments, blank lines skipped).
+    The password is everything after the second colon. Errors name the 1-based line, never the
+    password. At least one admin is required."""
+    from idsai.product.auth import ROLES, check_password, check_username
+
+    out: list[tuple[str, str, str]] = []
+    for no, raw in enumerate(text.replace(chr(13), "").split(chr(10)), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            raise CliError(f"บรรทัด {no}: ต้องเป็นรูปแบบ ชื่อ:สิทธิ์:รหัสผ่าน")
+        name, role, pw = parts
+        try:
+            check_username(name)
+            check_password(pw)
+        except ValueError as e:
+            raise CliError(f"บรรทัด {no}: {e}") from None
+        if role not in ROLES:
+            raise CliError(f"บรรทัด {no}: สิทธิ์ต้องเป็นหนึ่งใน {', '.join(ROLES)}")
+        if name in RESERVED_USERNAMES:
+            raise CliError(f"บรรทัด {no}: ชื่อ {name} สงวนไว้ใช้ในบันทึกกิจกรรม เลือกชื่ออื่น")
+        if any(n == name for n, _, _ in out):
+            raise CliError(f"บรรทัด {no}: ชื่อ {name} ซ้ำ")
+        out.append((name, role, pw))
+    if not any(role == "admin" for _, role, _ in out):
+        raise CliError("ต้องมีบัญชี admin อย่างน้อยหนึ่งบัญชีใน IDSAI_USERS")
+    return out
+
+
 def cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
     import duckdb
 
@@ -983,6 +1053,26 @@ def _cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
                     f"{u['username']}{shown}  {u['role']}{flag}  "
                     f"สร้างเมื่อ {_when(u['created_us'])}  เข้าล่าสุด {_when(u['last_seen_us'])}"
                 )
+            return 0
+        if act == "seed-env":
+            import os
+
+            text = os.environ.get("IDSAI_USERS", "")
+            if not text.strip():
+                raise CliError("ไม่พบตัวแปร IDSAI_USERS (หรือว่างเปล่า)")
+            accounts = parse_seed_users(text)  # validate everything before writing anything
+            created = updated = 0
+            for name, role, pw in accounts:
+                if store.get_user_by_name(name) is None:
+                    store.add_user(name, "", role, hash_password(pw), _now_us())
+                    created += 1
+                else:
+                    store.set_role(name, role)
+                    store.set_password(name, hash_password(pw))
+                    store.set_disabled(name, False)
+                    updated += 1
+                audit("user_seed", name, {"role": role})
+            _say(f"seeded {len(accounts)} accounts (created {created}, updated {updated})")
             return 0
         name = args.username
         if act == "add":
@@ -1051,9 +1141,16 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     use_auth = auth_enabled(args, cfg)
     with _app_store(cfg) as store:
         check_serve_auth(host, use_auth, store)
+        if args.loop and args.mode == "live":
+            raise CliError("--loop ใช้ได้กับโหมด replay เท่านั้น (ไม่ใช้กับ --mode live)")
+        if args.secure_cookies:
+            cfg = cfg.model_copy(
+                update={"auth": cfg.auth.model_copy(update={"cookie_secure": True})}
+            )
         if host in WILDCARD_BINDS:
             _warn(
-                f"หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ {', '.join(allowed_hosts(host))} "
+                "หมายเหตุ: API รับเฉพาะคำขอที่เรียกด้วยชื่อ "
+                f"{', '.join(allowed_hosts(host, args.public_host))} "
                 "ถ้าให้เครื่องอื่นเรียก ให้เปิดด้วย --host <IP ของเครื่องนี้> แล้วเรียกผ่าน IP นั้น"
             )
         if args.mode == "live":
@@ -1061,7 +1158,7 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
         else:
             state, background = prepare_replay(args, cfg, store)
         store.purge_sessions(_now_us())
-        app = create_app(state, allowed_hosts=allowed_hosts(host))
+        app = create_app(state, allowed_hosts=allowed_hosts(host, args.public_host))
         _say(f"เปิดที่ http://{host if ':' not in host else f'[{host}]'}:{port} (กด Ctrl+C เพื่อหยุด)")
         run_server(app, host, port, with_session_purge(store, background))
     return 0
@@ -1091,6 +1188,18 @@ def _speed(text: str) -> float:
     if not (math.isfinite(x) and x > 0):
         raise argparse.ArgumentTypeError(f"ความเร็วต้องเป็นตัวเลขจำกัดที่มากกว่า 0: {text!r}")
     return x
+
+
+_HOST_RE = re.compile(r"^[a-z0-9.-]+$")
+
+
+def _public_host(text: str) -> str:
+    name = text.strip().lower()
+    if not _HOST_RE.fullmatch(name):
+        raise argparse.ArgumentTypeError(
+            f"ชื่อโฮสต์ต้องเป็นชื่ออย่างเดียว ไม่มี http:// พอร์ต หรือเส้นทาง: {text!r}"
+        )
+    return name
 
 
 def _positive(text: str) -> int:
@@ -1186,6 +1295,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default=DEFAULT_HOST, help="ค่าเริ่มต้น 127.0.0.1 (เฉพาะเครื่องนี้)")
     s.add_argument("--port", type=int, default=None, help="ค่าเริ่มต้น 8800")
     s.add_argument("--speed", type=_speed, default=DEFAULT_SPEED, help="replay: เท่าของเวลาจริง (60)")
+    s.add_argument(
+        "--public-host", action="append", default=[], type=_public_host, metavar="NAME",
+        help="ชื่อโฮสต์สาธารณะหลัง proxy TLS (เช่น x.hf.space) เพิ่มใน allowlist ของ Host; ใช้ซ้ำได้",
+    )
+    s.add_argument(
+        "--secure-cookies", action="store_true",
+        help="ตั้งคุกกี้เซสชันเป็น Secure (แทน auth.cookie_secure)",
+    )
+    s.add_argument(
+        "--loop", action="store_true", help="replay: เล่นวนซ้ำเมื่อจบ (ไม่ใช้กับ --mode live)"
+    )
     g = s.add_mutually_exclusive_group()
     g.add_argument(
         "--auth", dest="auth", action="store_const", const=True, default=None,
@@ -1206,6 +1326,7 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--display-name", default="", help="ชื่อที่แสดง (ไม่เกิน 64 ตัว)")
     u.add_argument("--password-stdin", action="store_true", help="อ่านรหัสผ่านหนึ่งบรรทัดจาก stdin")
     us.add_parser("list", help="แสดงผู้ใช้ทั้งหมด")
+    us.add_parser("seed-env", help="สร้าง/อัปเดตบัญชีจากตัวแปร IDSAI_USERS (ใช้ตอนบูตบนเซิร์ฟเวอร์)")
     u = us.add_parser("passwd", help="เปลี่ยนรหัสผ่าน (ออกจากระบบทุกอุปกรณ์)")
     u.add_argument("username")
     u.add_argument("--password-stdin", action="store_true", help="อ่านรหัสผ่านหนึ่งบรรทัดจาก stdin")

@@ -118,6 +118,11 @@ class Replayer:
         return self._last_tick
 
     @property
+    def speed(self) -> float:
+        """Event-time seconds per wall second; 0 = max speed."""
+        return self._speed
+
+    @property
     def ended(self) -> bool:
         """The iterator ran out or was closed: nothing more will be delivered."""
         return self._ended

@@ -77,3 +77,64 @@ def test_limiter_locks_after_five_then_releases():
     lim.ok("bob")
     lim.fail("bob")
     assert not lim.locked("bob")
+
+
+def test_limiter_prunes():
+    now = [0.0]
+    lim = LoginLimiter(clock=lambda: now[0])
+    for i in range(1000):
+        lim.fail(f"user{i}")
+    for _ in range(5):
+        lim.fail("locked1")
+    assert lim.locked("locked1")
+    assert lim.size() == 1001
+    now[0] += max(lim.window_s, lim.lock_s) + 1
+    assert not lim.locked("x")
+    assert lim.size() == 0
+
+
+def test_limiter_prunes_at_most_once_a_second_and_keeps_live_entries():
+    now = [0.0]
+    lim = LoginLimiter(clock=lambda: now[0])
+    lim.fail("old")
+    now[0] = lim.window_s - 0.2
+    lim.locked("x")  # prunes now: "old" is still inside the window
+    now[0] = lim.window_s + 0.5
+    lim.fail("fresh")
+    lim.locked("x")  # within the second after the last prune: nothing dropped yet
+    assert lim.size() == 2
+    now[0] += 1
+    lim.locked("x")
+    assert lim.size() == 1 and "fresh" in lim._fails
+
+
+def test_limiter_first_locked_hit_once_per_lock():
+    now = [0.0]
+    lim = LoginLimiter(clock=lambda: now[0])
+    for _ in range(5):
+        lim.fail("bob")
+    assert lim.locked("bob")
+    assert lim.first_locked_hit("bob")
+    assert not lim.first_locked_hit("bob")
+    assert not lim.first_locked_hit("bob")
+    now[0] += lim.lock_s + 1
+    assert not lim.locked("bob")
+    for _ in range(5):
+        lim.fail("bob")
+    assert lim.locked("bob")
+    assert lim.first_locked_hit("bob")  # a new lock: reported again
+
+
+def test_prune_expiring_a_lock_also_clears_its_failures():
+    now = [0.0]
+    lim = LoginLimiter(clock=lambda: now[0])
+    for _ in range(5):
+        lim.fail("bob")
+    assert lim.locked("bob")
+    now[0] += lim.lock_s + 2  # past the lock, still inside the window, > 1 s since last prune
+    lim.locked("x")  # the prune expires bob's lock
+    for _ in range(4):
+        lim.fail("bob")
+    assert not lim.locked("bob")
+    lim.fail("bob")
+    assert lim.locked("bob")
