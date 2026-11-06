@@ -1205,10 +1205,8 @@ function onAlert(data) {
     return;
   }
   if (data.event === "alerts_reset") {
-    for (const id of data.deleted || []) {
-      state.alerts.delete(id);
-      state.feedback.delete(id);
-    }
+    // verdicts stay: the server keeps them, and a replayed alert comes back under the same id
+    for (const id of data.deleted || []) state.alerts.delete(id);
     if (resetRuns(state.injections, data.deleted || [])) renderInjections();
     alertsChanged();
     loadSeries();
@@ -1640,7 +1638,13 @@ function feedbackCard(a, onSaved) {
     const latest = latestVerdict(rows);
     for (const v of VERDICTS) buttons[v].setAttribute("aria-pressed", latest === v ? "true" : "false");
   };
+  let saving = false;
+  const setBusy = (on) => {
+    saving = on;
+    for (const v of VERDICTS) buttons[v].disabled = on; // one save at a time: no double post
+  };
   const send = async (verdict) => {
+    if (saving) return;
     if (!can("analyst")) {
       status.textContent = VIEWER_VERDICT_TH;
       return;
@@ -1654,16 +1658,27 @@ function feedbackCard(a, onSaved) {
     if (!authOn()) storageSet("idsai.analyst", name);
     status.classList.remove("inline-error");
     status.textContent = "กำลังบันทึก…";
+    setBusy(true);
     try {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
-      status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]}`;
-      const fresh = await api(`/api/alerts/${encodeURIComponent(a.alert_id)}`);
-      renderList(fresh.feedback);
-      if (onSaved) onSaved(fresh.feedback || []);
     } catch (e) {
       status.classList.add("inline-error");
       status.textContent = `บันทึกไม่สำเร็จ (${e.message})`;
+      setBusy(false);
+      return;
     }
+    // saved: the follow-up read only refreshes the history; its failure is not a failed save
+    status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]}`;
+    let rows = [...(state.feedback.get(a.alert_id) || a.feedback || []), { alert_id: a.alert_id, verdict, analyst: name, ts_us: Date.now() * 1000 }];
+    try {
+      const fresh = await api(`/api/alerts/${encodeURIComponent(a.alert_id)}`);
+      if (Array.isArray(fresh.feedback)) rows = fresh.feedback;
+    } catch (e) {
+      status.textContent = `บันทึกแล้ว: ${VERDICT_TH[verdict]} (อ่านประวัติล่าสุดไม่ได้)`;
+    }
+    renderList(rows);
+    if (onSaved) onSaved(rows);
+    setBusy(false);
   };
   const allowed = can("analyst");
   const gate = allowed ? {} : { disabled: true, title: VIEWER_VERDICT_TH };
@@ -2898,6 +2913,7 @@ if (typeof document !== "undefined") {
       state.route = r;
     },
     getAlertIds: () => [...state.alerts.keys()],
+    getAlertsWithFeedback: () => [...state.alerts.values()].map(withFeedback),
     fmtThaiTime,
     railHeadline,
     ROLE_TH,

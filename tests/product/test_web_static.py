@@ -1538,7 +1538,8 @@ class FakeNode {
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   hasAttribute(k) { return k in this.attrs; }
   removeAttribute(k) { delete this.attrs[k]; }
-  addEventListener() {}
+  addEventListener(type, f) { ((this.listeners ||= {})[type] ||= []).push(f); }
+  click() { for (const f of (this.listeners && this.listeners.click) || []) f({}); }
   get classList() {
     const n = this;
     const list = () => n.className.split(/\s+/).filter(Boolean);
@@ -1807,3 +1808,124 @@ def test_alert_detail_markup(tmp_path, client):
     tax = tmp_path / "tax.json"
     tax.write_text(json.dumps(client.get("/api/taxonomy").json()), encoding="utf-8")
     _run_dom(tmp_path, "true", DETAIL_BODY, detail, tax)
+
+
+RESET_KEEPS_VERDICT_BODY = r"""
+(async () => {
+  const at = Date.UTC(2021, 0, 18, 16, 30) * 1000;
+  const mk = () => ({ alert_id: "r1", symbol: "STEEMBTC", ts_event_us: at, technique_id: "MM-T001",
+    severity: 2, status: "open", window: [at - 60e6, at] });
+  const fb = [{ alert_id: "r1", verdict: "tp", analyst: "ann", ts_us: 5 }];
+  globalThis.fetch = async (path) => ({ ok: true, status: 200, json: async () =>
+    (path.startsWith("/api/alerts") ? [mk()] : path.startsWith("/api/feedback") ? fb : {}) });
+  m.onAlert({ event: "resync" });
+  for (let i = 0; i < 5; i += 1) await tick();
+  const list = document.getElementById("alerts-list");
+  const chip = () =>
+    walk(list, (n) => n.classList.contains("verdict-chip")).map((n) => n.textContent);
+  assert.deepStrictEqual(chip(), ["ผิดปกติจริง"]);
+  // a seek back deletes the alert on the server, but not its verdicts; the replay brings it back
+  m.onAlert({ event: "alerts_reset", deleted: ["r1"] });
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.deepStrictEqual(m.getAlertIds(), []);
+  m.onAlert(mk());
+  assert.deepStrictEqual(chip(), ["ผิดปกติจริง"]);
+  const all = m.getAlertsWithFeedback();
+  assert.deepStrictEqual(m.filterAlerts(all, "tp").map((a) => a.alert_id), ["r1"]);
+  assert.deepStrictEqual(m.filterAlerts(all, "open").map((a) => a.alert_id), []);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_alerts_reset_keeps_verdicts_for_a_replayed_alert(tmp_path):
+    _run_dom(tmp_path, "true", RESET_KEEPS_VERDICT_BODY)
+
+
+def test_ws_toast_dot_does_not_loop():
+    css = text("styles.css")
+    dot = re.search(r"\.ws-toast::before\s*\{([^}]*)\}", css).group(1)
+    assert "animation" not in dot
+    for rule in re.findall(r"\.ws-toast[^{]*\{([^}]*)\}", css):
+        assert "infinite" not in rule
+
+
+SAVE_BODY = r"""
+(async () => {
+  const fs = require("fs");
+  const detail = JSON.parse(fs.readFileSync(process.argv[3], "utf-8"));
+  let posts = 0;
+  let release;
+  let postFails = false;
+  let getFails = false;
+  globalThis.fetch = async (path, opts) => {
+    if (opts && opts.method === "POST") {
+      posts += 1;
+      await new Promise((r) => { release = r; });
+      return postFails
+        ? { ok: false, status: 500, json: async () => ({ detail: "พัง" }) }
+        : { ok: true, status: 201, json: async () => ({}) };
+    }
+    if (path.startsWith("/api/taxonomy")) return { ok: true, status: 200, json: async () => ({}) };
+    if (getFails) return { ok: false, status: 500, json: async () => ({ detail: "อ่านไม่ได้" }) };
+    return { ok: true, status: 200, json: async () => detail };
+  };
+  m.setMe({ username: "ann", role: "analyst", auth_enabled: true, prefs: {} });
+  m.setRoute("alert");
+  const box = document.getElementById("alert-detail");
+  await m.showAlert(detail.alert_id);
+  const btns = walk(box, (n) => n.tagName === "BUTTON");
+  const status = walk(box, (n) => n.classList.contains("verdict-status"))[0];
+  // the POST succeeds, the follow-up read fails: still "saved", never "บันทึกไม่สำเร็จ"
+  getFails = true;
+  btns[0].click();
+  await tick();
+  assert.strictEqual(posts, 1);
+  for (const b of btns) assert.strictEqual(b.disabled, true, "buttons wait for the save");
+  btns[1].click();  // a second click while saving sends nothing
+  await tick();
+  assert.strictEqual(posts, 1);
+  release();
+  for (let i = 0; i < 10; i += 1) await tick();
+  assert.ok(status.textContent.startsWith("บันทึกแล้ว: ผิดปกติจริง"), status.textContent);
+  assert.ok(!status.textContent.includes("ไม่สำเร็จ"), status.textContent);
+  for (const b of btns) assert.strictEqual(b.disabled, false);
+  assert.strictEqual(btns[0].getAttribute("aria-pressed"), "true");
+  // the POST fails: say so, and the buttons come back
+  postFails = true;
+  btns[1].click();
+  await tick();
+  release();
+  for (let i = 0; i < 10; i += 1) await tick();
+  assert.ok(status.textContent.startsWith("บันทึกไม่สำเร็จ"), status.textContent);
+  for (const b of btns) assert.strictEqual(b.disabled, false);
+  assert.strictEqual(posts, 2);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_verdict_save_reports_the_post_and_blocks_double_posts(tmp_path, client):
+    ts = 1610987405 * 1_000_000
+    alert = Alert(
+        alert_id="a1",
+        ts_event_us=ts,
+        symbol="TESTBTC",
+        technique_id="MM-T001",
+        severity=2,
+        status="open",
+        fused_p=0.0004,
+        detectors=[DetectorRef(name="rule.x", layer="rule", p=0.01, score=1.0)],
+        agreement=2,
+        evidence=[("z_quote_vol_60", 7.1, 7.1)],
+        window=(ts - 60_000_000, ts),
+        dedup_key="k",
+        suppress_for_s=60,
+        config_hash="h",
+        model_versions={},
+        provenance="replay",
+    )
+    client.app.state.idsai.store.upsert_alert(alert)
+    detail = tmp_path / "detail.json"
+    detail.write_text(json.dumps(client.get("/api/alerts/a1").json()), encoding="utf-8")
+    _run_dom(tmp_path, "true", SAVE_BODY, detail)

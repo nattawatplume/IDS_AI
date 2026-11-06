@@ -453,7 +453,8 @@ a.toast-text:hover { text-decoration: underline; }
   color: var(--amber);
   font-size: 14px;
 }
-.ws-toast::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); animation: pulse 1.2s ease-in-out infinite; }
+.ws-toast::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--amber); }
+.ws-toast:not([hidden]) { animation: pop 0.2s ease-out; } /* one entry pop; the dot is still (only the drift, the orb and the login line loop) */
 
 /* ------------------------------------------------------------------ alert detail */
 .detail-head { margin-bottom: 4px; }
