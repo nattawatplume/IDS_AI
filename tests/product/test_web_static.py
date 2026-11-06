@@ -226,25 +226,30 @@ def test_live_mode_gates_replay_and_red_team():
     body = js[js.index("function setMode(") : js.index("function eventNowUs(")]
     assert 'const live = mode === "live";' in body
     assert '$("replay-bar").hidden = live;' in body
-    assert "const allowed = redTeamAllowed(mode);" in body
-    assert "refused.hidden = allowed;" in body and "REFUSED_TH" in body
-    assert 'querySelectorAll("select, input, button")' in body
-    assert "node.disabled = !allowed;" in body
-    submit = js[js.index('$("redteam-form").addEventListener') :]
-    assert submit.index("if (!redTeamAllowed(state.mode)) return;") < submit.index("postJson(")
+    assert "applyRoleGates();" in body  # the simulate gate runs on every mode change
+    reason = js[js.index("function simReason(") :]
+    reason = reason[: reason.index("\n}\n")]
+    assert "if (!redTeamAllowed(mode))" in reason  # the mode is checked first: fail closed
+    start = js[js.index("async function startSimulation(") :]
+    assert start.index("if (!redTeamAllowed(state.mode)) return;") < start.index("postJson(")
     assert 'const RED_TEAM_MODES = ["replay", "sim"];' in js
 
 
+def _simulate_page(html: str) -> str:
+    return re.search(r'<section id="page-simulate".*?</section>', html, re.S).group(0)
+
+
 def test_red_team_form_starts_disabled_until_health_confirms_the_mode():
-    html = text("index.html")
-    start = html.index('<form id="redteam-form"')
-    form = html[start : html.index("</form>", start)]
-    controls = re.findall(r"<(?:select|input|button)\b[^>]*>", form)
-    assert len(controls) == 5
+    page = _simulate_page(text("index.html"))
+    controls = re.findall(r"<(?:select|input|button)\b[^>]*>", page)
+    assert len(controls) == 6  # three cards, region, offset, symbol
+    assert sum('class="card sim-card"' in tag for tag in controls) == 3
     for tag in controls:
         assert re.search(r"\sdisabled[\s>]", tag), tag  # fail closed before any health
-    banner = re.search(r'<div id="redteam-refused"[^>]*>([^<]*)</div>', html)
-    assert banner and "hidden" not in banner.group(0) and "LIVE" in banner.group(1)
+    reason = re.search(r'<p id="sim-reason"[^>]*>([^<]*)</p>', page)
+    assert reason and "hidden" not in reason.group(0)
+    assert reason.group(1) == "รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู"
+    assert 'SIM_WAIT_TH = "รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู"' in text("app.js")
 
 
 def test_top_bar_clock_moves_the_red_team_card():
@@ -541,7 +546,7 @@ def test_reduced_motion_disables_animation():
     css = text("styles.css")
     block = css.split("prefers-reduced-motion: reduce")[1]
     assert "animation" in block and "transition" in block
-    for name in ("pulse", "glow", "pop", "rise", "sweep", "grow"):
+    for name in ("pulse", "glow", "pop", "rise", "grow"):
         assert f"@keyframes {name}" in css, name
 
 
@@ -675,15 +680,19 @@ def test_low_severity_is_grey_and_forest_points_avoid_the_dot_rule():
 
 
 def test_red_team_miss_is_grey_and_the_banner_class_changes_only_with_state():
-    css = text("styles.css")
-    assert re.search(r"\.rt-banner\.hit\s*\{[^}]*var\(--amber\)", css)
-    miss = re.search(r"\.rt-banner\.miss\s*\{([^}]*)\}", css).group(1)
-    assert "var(--dim)" in miss and "--red" not in miss
-    assert not re.search(r"\.rt-ring-arc\.missed\s*\{[^}]*--red", css)
-    tick = text("app.js").split("function tickInjections()")[1].split("\n}\n")[0]
-    block = tick.split("run.bannerState !== status")[1].split("} else {")[0]
-    assert "run.banner.className" in block and "sweep" in block
-    assert "run.banner.className" not in tick.split("run.bannerState !== status")[0]
+    css, js = text("styles.css"), text("app.js")
+    hit = re.search(r'\.sim-run\[data-state="detected"\] \.step-result\s*\{([^}]*)\}', css)
+    assert hit and "var(--green)" in hit.group(1)
+    miss = re.search(r'\.sim-run\[data-state="missed"\] \.step-result\s*\{([^}]*)\}', css)
+    assert miss and "var(--dim)" in miss.group(1) and "--red" not in miss.group(1)
+    # the old shine sweep is gone, and nothing on the page loops
+    assert "sweep" not in css and "sweep" not in js and "rt-banner" not in js
+    sim = css[css.index("/* ---- simulate") : css.index("/* ---- /simulate")]
+    assert "infinite" not in sim and "linear-gradient" not in sim
+    tick = js.split("function tickInjections()")[1].split("\n}\n")[0]
+    before, after = tick.split("run.shown !== status")
+    assert "data-state" in after.split("\n    }\n")[0]
+    assert "data-state" not in before
 
 
 # ---- alerts list and detail ----
@@ -698,25 +707,86 @@ def test_alert_cards_carry_severity_and_detail_has_two_columns():
     assert "[data-sev=" in css and ".detail-side" in css
 
 
-BANNER_BODY = r"""
-assert.strictEqual(m.bannerText("detected", 42), "ตรวจพบใน 42 วินาที");
-assert.strictEqual(m.bannerText("missed", 300), "ไม่พบภายใน 300 วินาทีหลังจบเหตุการณ์");
-assert.strictEqual(m.bannerText("detected", 41.6), "ตรวจพบใน 42 วินาที");
-assert.strictEqual(m.bannerText("waiting", 5), "");
-assert.strictEqual(m.bannerText("detected", -3), "ตรวจพบใน 0 วินาที");
+SIM_STATUS_BODY = r"""
+const t = m.simStatusText;
+assert.strictEqual(t("pending", {}), "เริ่มแล้ว");
+assert.strictEqual(t("waiting", {}), "กำลังรอระบบ");
+const hit = { detected: { alert_id: "a", eventS: 41.6, wallS: 2.4 } };
+assert.strictEqual(t("detected", hit), "จับได้ใน 42 วินาที (เวลาจริง 2 วินาที)");
+const early = { detected: { alert_id: "a", eventS: -3, wallS: 0.2 } };
+assert.strictEqual(t("detected", early), "จับได้ใน 0 วินาที (เวลาจริง 0 วินาที)");
+assert.strictEqual(t("missed", {}), "ไม่ทันจับ");
+assert.strictEqual(t("restarted", {}), "พลาด (replay เริ่มใหม่)");
+assert.strictEqual(t("missed", { restarted: true }), "พลาด (replay เริ่มใหม่)");
+
+const req = m.simulateRequest("pump_burst", null, "STEEMBTC");
+assert.deepStrictEqual(req,
+  { family: "pump_burst", region: "test", offset_s: 60, symbol: "STEEMBTC" });
+assert.deepStrictEqual(m.simulateRequest("pump_burst", { offset_s: 120 }, "STEEMBTC"),
+  { family: "pump_burst", region: "test", offset_s: 120, symbol: "STEEMBTC" });
+assert.deepStrictEqual(
+  m.simulateRequest("wash_pingpong", { region: "train", offset_s: 30, symbol: "ETHBTC" }, "X"),
+  { family: "wash_pingpong", region: "train", offset_s: 30, symbol: "ETHBTC" });
+// an empty field is no override
+assert.deepStrictEqual(m.simulateRequest("pump_stealth", { region: "", symbol: "" }, "STEEMBTC"),
+  { family: "pump_stealth", region: "test", offset_s: 60, symbol: "STEEMBTC" });
+assert.deepStrictEqual(m.SIM_REASON, { live: "ทดลองได้เฉพาะโหมดย้อนดู",
+  viewer: "ต้องเป็นผู้วิเคราะห์ขึ้นไป", ended: "การย้อนดูจบแล้ว รอรอบใหม่" });
+assert.deepStrictEqual(m.SIM_CARDS, [
+  { family: "pump_burst", title: "ปั่นเร็ว", line: "ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที", icon: "steep" },
+  { family: "pump_stealth", title: "ปั่นแบบเนียน", line: "ค่อยๆ ดันราคาขึ้นช้าๆ", icon: "ramp" },
+  { family: "wash_pingpong", title: "ซื้อขายวนหลอก", line: "ซื้อขายกันเองไปมาให้ดูคึกคัก", icon: "loop" },
+]);
 """
 
 
-def test_banner_text_for_hit_and_miss(tmp_path):
-    _run_motion(tmp_path, "false", BANNER_BODY)
+def test_simulate_request_and_status_text(tmp_path):
+    _run_motion(tmp_path, "false", SIM_STATUS_BODY)
 
 
-def test_red_team_ring_and_one_row_form():
-    html = text("index.html")
-    js = text("app.js")
-    assert 'id="rt-ring"' in js or 'id: "rt-ring"' in js or "rt-ring" in js
-    assert "rt-banner" in js and "stroke-dashoffset" in js
-    assert 'class="form-grid rt-row"' in html or "rt-row" in html
+def test_simulate_markup():
+    html, js, css = text("index.html"), text("app.js"), text("styles.css")
+    page = _simulate_page(html)
+    cards = re.findall(r'<button\b[^>]*class="card sim-card"[^>]*>.*?</button>', page, re.S)
+    assert len(cards) == 3
+    want = [
+        ("pump_burst", "ปั่นเร็ว", "ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที"),
+        ("pump_stealth", "ปั่นแบบเนียน", "ค่อยๆ ดันราคาขึ้นช้าๆ"),
+        ("wash_pingpong", "ซื้อขายวนหลอก", "ซื้อขายกันเองไปมาให้ดูคึกคัก"),
+    ]
+    for card, (family, title, line) in zip(cards, want, strict=True):
+        assert f'id="sim-{family}"' in card and f'data-family="{family}"' in card
+        assert 'type="button"' in card
+        icon = re.search(r"<svg\b[^>]*>", card)
+        assert icon and 'aria-hidden="true"' in icon.group(0)
+        assert 'stroke-width="1.5"' in icon.group(0)
+        assert 16 <= int(re.search(r'width="(\d+)"', icon.group(0)).group(1)) <= 24
+        assert title in card and line in card
+        assert f'family: "{family}", title: "{title}", line: "{line}"' in js
+    # the advanced fields are folded away
+    adv = re.search(r"<details\b[^>]*>.*?</details>", page, re.S)
+    assert adv, "no advanced <details>"
+    adv = adv.group(0)
+    assert "open" not in re.search(r"<details\b[^>]*>", adv).group(0)
+    assert re.search(r"<summary[^>]*>([^<]*)</summary>", adv).group(1) == "ตั้งค่าขั้นสูง"
+    for i in ("rt-region", "rt-offset", "rt-symbol"):
+        assert f'id="{i}"' in adv, i
+    assert '<option value="test">ช่วงค่าทดสอบ</option>' in adv
+    assert '<option value="train">ช่วงค่าฝึก</option>' in adv
+    intro = re.search(r'<p class="sim-intro[^"]*">([^<]*)</p>', page).group(1)
+    assert intro == (
+        "ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)"
+    )
+    # plain view: no English labels or codes on the page
+    plain = re.sub(r"<!--.*?-->|<svg\b.*?</svg>|<[^>]+>", " ", page, flags=re.S)
+    assert not re.search(r"[A-Za-z]", plain), plain
+    # the cards are glass cards, never the accent gradient
+    sim = css[css.index("/* ---- simulate") : css.index("/* ---- /simulate")]
+    assert ".sim-card" in sim and "--violet), var(--blue)" not in sim
+    # the server's "ended" refusal is the text the page looks for
+    server = (WEB_DIR.parent / "api" / "app.py").read_text(encoding="utf-8")
+    ended = re.search(r'REPLAY_ENDED_TH = "([^"]+)"', server).group(1)
+    assert f'REPLAY_ENDED_TH = "{ended}"' in js
 
 
 VERDICT_BODY = r"""
@@ -894,7 +964,7 @@ def test_mutating_buttons_check_can():
     )
     fb = js[js.index("function feedbackCard(") : js.index("async function drawDetailChart(")]
     assert 'can("analyst")' in fb and fb.index('can("analyst")') < fb.index("postJson(")
-    rt = js[js.index('$("redteam-form").addEventListener') : js.index("function addInjection(")]
+    rt = js[js.index("async function startSimulation(") : js.index("function addInjection(")]
     assert 'can("analyst")' in rt and rt.index('can("analyst")') < rt.index("postJson(")
     gates = js[js.index("function applyRoleGates(") :]
     assert "ต้องเป็น analyst" in js and "title" in gates[:1500]
@@ -1084,8 +1154,8 @@ assert.strictEqual(pending.restarted, true);
 assert.ok(!hit.restarted);
 assert.strictEqual(m.injectionStatus(pending, 1010 * S), "missed");
 assert.strictEqual(m.injectionStatus(pending, null), "missed");
-assert.strictEqual(m.bannerText("missed", 300, pending), "พลาด (replay เริ่มใหม่)");
-assert.ok(m.bannerText("missed", 300, pending).includes("เริ่มใหม่"));
+assert.strictEqual(m.simStatusText("missed", pending), "พลาด (replay เริ่มใหม่)");
+assert.ok(m.simStatusText("missed", pending).includes("เริ่มใหม่"));
 assert.strictEqual(m.injectionStatus(hit, 1010 * S), "detected");
 // the restart's seek deletes the round's alerts: a closed run keeps its verdict
 assert.strictEqual(m.resetRuns([pending, hit], ["a1"]), false);
@@ -1580,6 +1650,7 @@ globalThis.location = { hash: "#/alerts" };
 globalThis.document = {
   createElement: (t) => new FakeNode(t),
   createTextNode: textNode,
+  createElementNS: (ns, t) => new FakeNode(t),
   getElementById: (id) => (nodes[id] ||= Object.assign(new FakeNode("div"), { id })),
   querySelectorAll: () => [],
   documentElement: new FakeNode("html"),
@@ -1929,3 +2000,98 @@ def test_verdict_save_reports_the_post_and_blocks_double_posts(tmp_path, client)
     detail = tmp_path / "detail.json"
     detail.write_text(json.dumps(client.get("/api/alerts/a1").json()), encoding="utf-8")
     _run_dom(tmp_path, "true", SAVE_BODY, detail)
+
+
+# ---- simulate page ----
+
+SIM_GATES_BODY = r"""
+(async () => {
+  const cards = m.SIM_CARDS.map((c) => document.getElementById(`sim-${c.family}`));
+  const reason = document.getElementById("sim-reason");
+  const posts = [];
+  const S = 1e6;
+  globalThis.fetch = async (path, opts) => {
+    if (opts && opts.method === "POST") posts.push({ path, body: JSON.parse(opts.body) });
+    return { ok: true, status: 202, json: async () => ({
+      scenario: { technique_id: "MM-T001", sub_technique: "burst", duration_s: 120 },
+      label: { symbol: "STEEMBTC", t_start_us: 1060 * S, t_end_us: 1180 * S } }) };
+  };
+  m.bindSimulate();
+  // before any health: closed, even for an analyst
+  m.setMe({ username: "a", role: "analyst", auth_enabled: true, prefs: {} });
+  m.applyRoleGates();
+  for (const c of cards) assert.strictEqual(c.disabled, true, "fail closed");
+  assert.strictEqual(reason.hidden, false);
+  cards[0].click();
+  await tick();
+  assert.strictEqual(posts.length, 0);
+  // simulate cards disabled for viewer
+  m.setMe({ username: "v", role: "viewer", auth_enabled: true, prefs: {} });
+  m.setMode("replay");
+  for (const c of cards) assert.strictEqual(c.disabled, true, "viewer");
+  assert.strictEqual(reason.hidden, false);
+  assert.strictEqual(reason.textContent, m.SIM_REASON.viewer);
+  // an analyst in replay: open, and one click is one POST with the defaults
+  m.setMe({ username: "a", role: "analyst", auth_enabled: true, prefs: {} });
+  m.applyRoleGates();
+  for (const c of cards) assert.strictEqual(c.disabled, false, "analyst");
+  assert.strictEqual(reason.hidden, true);
+  document.getElementById("rt-region").value = "test";
+  document.getElementById("rt-offset").value = "60";
+  document.getElementById("rt-symbol").value = "STEEMBTC";
+  cards[0].click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.strictEqual(posts.length, 1);
+  assert.strictEqual(posts[0].path, "/api/redteam/inject");
+  assert.deepStrictEqual(posts[0].body, m.simulateRequest("pump_burst", null, "STEEMBTC"));
+  // the run is a timeline card with three steps
+  const runs = document.getElementById("rt-runs");
+  assert.strictEqual(runs.children.length, 1);
+  const steps = walk(runs, (n) => n.classList.contains("step"));
+  assert.strictEqual(steps.length, 3);
+  assert.ok(steps[0].textContent.includes("เริ่มแล้ว"), steps[0].textContent);
+  assert.ok(steps[1].textContent.includes("กำลังรอระบบ"), steps[1].textContent);
+  assert.ok(runs.children[0].textContent.includes("ปั่นเร็ว"));
+  const tech = walk(runs, (n) => n.tagName === "DETAILS");
+  assert.strictEqual(tech.length, 1);
+  assert.ok(tech[0].textContent.includes("UTC"));
+  tech[0].parentNode.removeChild(tech[0]);
+  assert.ok(!/[A-Za-z]/.test(runs.textContent.replaceAll("STEEMBTC", "")), runs.textContent);
+  // simulate cards disabled in live
+  m.setMode("live");
+  for (const c of cards) assert.strictEqual(c.disabled, true, "live");
+  assert.strictEqual(reason.textContent, m.SIM_REASON.live);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+SIM_ENDED_BODY = r"""
+(async () => {
+  const cards = m.SIM_CARDS.map((c) => document.getElementById(`sim-${c.family}`));
+  const reason = document.getElementById("sim-reason");
+  globalThis.fetch = async () => ({ ok: false, status: 409,
+    json: async () => ({ detail: "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่" }) });
+  m.bindSimulate();
+  m.setMe({ username: "a", role: "analyst", auth_enabled: true, prefs: {} });
+  m.setMode("replay");
+  document.getElementById("rt-offset").value = "60";
+  cards[1].click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  for (const c of cards) assert.strictEqual(c.disabled, true, "ended");
+  assert.strictEqual(reason.textContent, m.SIM_REASON.ended);
+  // a new replay round opens the cards again
+  m.onAlert({ event: "replay_restarted" });
+  for (const c of cards) assert.strictEqual(c.disabled, false, "new round");
+  assert.strictEqual(reason.hidden, true);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_simulate_cards_disabled_for_viewer_and_in_live(tmp_path):
+    _run_dom(tmp_path, "true", SIM_GATES_BODY)
+
+
+def test_simulate_cards_close_once_the_replay_ended(tmp_path):
+    _run_dom(tmp_path, "true", SIM_ENDED_BODY)

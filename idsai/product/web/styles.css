@@ -541,22 +541,123 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
 .footer { max-width: 1232px; margin: 0 auto; padding: 16px 16px 24px; border-top: 1px solid var(--line); }
 .back { font-size: 15px; }
 
-/* ------------------------------------------------------------------ red-team */
-.rt-row .form-actions { grid-column: auto; }
-@media (min-width: 900px) { .rt-row { grid-template-columns: 1.4fr 0.8fr 1fr 1fr auto; } }
-.rt-timer { display: flex; align-items: center; gap: 12px; font-size: 15px; font-weight: 400; }
-.rt-ring { width: 52px; height: 52px; flex: none; }
-.rt-ring-track { stroke: var(--line); }
-.rt-ring-arc { stroke: var(--amber); stroke-linecap: butt; transition: stroke-dashoffset 0.9s linear, stroke 0.3s; }
-.rt-ring-arc.detected { stroke: var(--green); }
-.rt-ring-arc.missed { stroke: var(--dim); }
-.rt-timer-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.rt-banner { font-family: var(--mono); font-size: 20px; font-weight: 600; padding: 4px 12px; border-radius: var(--r-ctl); background: var(--chip); }
-.rt-banner[hidden] { display: none; }
-.rt-banner.hit { color: var(--amber); background: var(--warn-bg); }
-.rt-banner.miss { color: var(--dim); background: var(--chip); }
-.rt-banner.sweep { background-image: linear-gradient(100deg, transparent 30%, color-mix(in srgb, currentColor 22%, transparent) 50%, transparent 70%); background-size: 60% 100%; background-repeat: no-repeat; animation: sweep 0.9s ease-out 1; }
-.timer { font-family: var(--mono); font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+/* ---- simulate: three glass cards, a reason line, folded settings, one timeline card per run */
+.sim-intro { max-width: 64ch; margin: 0 0 24px; }
+.sim-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.sim-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0;
+  min-height: 0;
+  padding: 16px;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  white-space: normal;
+}
+.sim-card:hover:not(:disabled) { background: var(--glass-strong); border-color: var(--glass-border-hi); }
+.sim-card:disabled { opacity: 0.55; transform: none; }
+.sim-card:disabled:hover { transform: none; border-color: var(--glass-border); }
+.sim-card[aria-busy="true"] { opacity: 1; border-color: rgba(167, 139, 250, 0.6); }
+.sim-icon {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-ctl);
+  background: var(--chip);
+  color: #b9c6ff;
+}
+.sim-card-title { font-size: 18px; font-weight: 600; line-height: 1.3; }
+.sim-card-line { grid-column: 2; font-size: 14px; color: var(--dim); }
+.sim-reason { margin: 12px 0 0; color: var(--dim); }
+.sim-status { margin: 8px 0 0; min-height: 1.5em; }
+.sim-status:empty { min-height: 0; margin: 0; }
+.sim-advanced { margin: 16px 0 0; }
+.sim-advanced summary { display: inline-block; cursor: pointer; font-size: 14px; color: var(--dim); }
+.sim-advanced summary:hover { color: var(--text); }
+.sim-fields { margin-top: 12px; max-width: 720px; }
+.sim-runs-title { margin-top: 32px; }
+.sim-runs { display: grid; gap: 12px; }
+.sim-run { margin: 0; padding: 16px 24px; }
+.sim-run:hover { transform: none; border-color: var(--glass-border); }
+.sim-run-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; }
+.sim-run-head h3 { margin: 0; font-size: 16px; }
+.sim-run-note { margin: 12px 0 0; }
+.sim-tech { margin-top: 12px; color: var(--dim); }
+.sim-tech summary { display: inline-block; cursor: pointer; }
+.sim-tech summary:hover { color: var(--text); }
+.sim-tech .kv { margin-top: 8px; font-size: 13px; }
+
+/* the three steps sit on one track; a step done fills its dot and the track behind it */
+.sim-steps { list-style: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 12px; margin: 16px 0 0; padding: 0; }
+.step { position: relative; display: grid; gap: 8px; min-width: 0; }
+.step + .step::before {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: calc(100% - 4px);
+  width: calc(100% + 4px);
+  height: 2px;
+  background: var(--line);
+  transition: background-color 0.3s;
+}
+.step-dot {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--glass-border-hi);
+  background: var(--bg);
+  color: var(--bg);
+  transition: background-color 0.3s, border-color 0.3s;
+}
+.step-check { display: none; }
+.step-text { display: grid; gap: 2px; min-width: 0; }
+.step-label { font-size: 15px; color: var(--dim); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.step-sub { color: var(--dim); font-variant-numeric: tabular-nums; }
+.step-sub:empty { display: none; }
+
+/* done steps */
+.sim-run[data-state="pending"] .step-start .step-dot,
+.sim-run[data-state="waiting"] .step-start .step-dot,
+.sim-run[data-state="waiting"] .step-wait .step-dot,
+.sim-run[data-state="detected"] .step-dot,
+.sim-run[data-state="missed"] .step-start .step-dot,
+.sim-run[data-state="missed"] .step-wait .step-dot { background: #a78bfa; border-color: #a78bfa; }
+/* the track between two steps: ::before of the later one across, ::after of the earlier one down */
+.sim-run[data-state="waiting"] .step-wait::before,
+.sim-run[data-state="waiting"] .step-start::after,
+.sim-run[data-state="detected"] .step-wait::before,
+.sim-run[data-state="detected"] .step-start::after,
+.sim-run[data-state="missed"] .step-wait::before,
+.sim-run[data-state="missed"] .step-start::after,
+.sim-run[data-state="detected"] .step-result::before,
+.sim-run[data-state="detected"] .step-wait::after,
+.sim-run[data-state="missed"] .step-result::before,
+.sim-run[data-state="missed"] .step-wait::after { background: #a78bfa; }
+.sim-run[data-state="pending"] .step-start .step-label,
+.sim-run[data-state="waiting"] .step-wait .step-label { color: var(--text); }
+/* the result: green with a check when caught, grey when not; never red, a miss is not an alarm */
+.sim-run[data-state="detected"] .step-result { color: var(--green); }
+.sim-run[data-state="detected"] .step-result .step-dot { background: var(--green); border-color: var(--green); box-shadow: 0 0 8px rgba(62, 224, 143, 0.5); }
+.sim-run[data-state="detected"] .step-result .step-check { display: block; }
+.sim-run[data-state="detected"] .step-result .step-label { color: var(--green); font-weight: 600; }
+.sim-run[data-state="missed"] .step-result { color: var(--dim); }
+.sim-run[data-state="missed"] .step-result .step-dot { background: var(--dim); border-color: var(--dim); }
+.sim-run[data-state="missed"] .step-result .step-label { color: var(--text); font-weight: 600; }
+
+@media (max-width: 860px) {
+  .sim-cards { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+}
+/* ---- /simulate */
 
 /* ------------------------------------------------------------------ home: hero, small cards, chart, replay bar, rail */
 .dot.live { animation: pulse 1.6s ease-in-out infinite; }
@@ -796,7 +897,22 @@ td.when { white-space: nowrap; }
   .login-tagline { margin-top: 12px; font-size: 18px; }
   .login-line { display: none; }
   .login-card { padding: 24px; }
-}
+  /* simulate */
+  .sim-run { padding: 16px; }
+  /* the steps go down the card: the track runs between the dots */
+  .sim-steps { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .step { grid-template-columns: 16px minmax(0, 1fr); gap: 12px; }
+  .step + .step::before { display: none; }
+  .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    top: 20px;
+    bottom: -12px;
+    left: 7px;
+    width: 2px;
+    background: var(--line);
+    transition: background-color 0.3s;
+  }
 
 /* ------------------------------------------------------------------ motion */
 @keyframes drift {
@@ -809,7 +925,6 @@ td.when { white-space: nowrap; }
 @keyframes glow { 0% { background-color: rgba(255, 181, 71, 0.3); } 100% { background-color: transparent; } }
 @keyframes pop { 0% { transform: scale(0.92); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 @keyframes rise { 0% { transform: translateY(8px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
-@keyframes sweep { 0% { background-position: -120% 0; } 100% { background-position: 220% 0; } }
 @keyframes grow { 0% { transform: scaleX(0); } 100% { transform: scaleX(1); } }
 @keyframes spin { 100% { transform: rotate(360deg); } }
 @keyframes ring { 0% { transform: scale(1); opacity: 0.55; } 100% { transform: scale(2); opacity: 0; } }

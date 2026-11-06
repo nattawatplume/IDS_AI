@@ -58,11 +58,22 @@ const ALERT_FILTERS = [
 const ALERT_PAGE = 50; // cards drawn at a time; "แสดงเพิ่ม" adds the next page
 const TOAST_MS = 5000;
 const TOAST_MAX = 3;
-const REFUSED_TH =
-  "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง (ใช้ได้เฉพาะโหมด replay / sim)";
-const UNKNOWN_MODE_TH =
-  "Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)";
 const RED_TEAM_MODES = ["replay", "sim"];
+// the simulate page: one card per scenario family; a click runs it with SIM_DEFAULTS
+const SIM_CARDS = [
+  { family: "pump_burst", title: "ปั่นเร็ว", line: "ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที", icon: "steep" },
+  { family: "pump_stealth", title: "ปั่นแบบเนียน", line: "ค่อยๆ ดันราคาขึ้นช้าๆ", icon: "ramp" },
+  { family: "wash_pingpong", title: "ซื้อขายวนหลอก", line: "ซื้อขายกันเองไปมาให้ดูคึกคัก", icon: "loop" },
+];
+const SIM_DEFAULTS = { region: "test", offset_s: 60 };
+const SIM_REASON = {
+  live: "ทดลองได้เฉพาะโหมดย้อนดู",
+  viewer: "ต้องเป็นผู้วิเคราะห์ขึ้นไป",
+  ended: "การย้อนดูจบแล้ว รอรอบใหม่",
+};
+const SIM_WAIT_TH = "รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู";
+const SIM_OFFSET_TH = "เวลาเริ่มต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
+const REPLAY_ENDED_TH = "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่"; // the server's 409 text (api/app.py)
 const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
 // Eval targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6 (spec section 6).
@@ -102,6 +113,8 @@ const state = {
   route: null,
   detailChart: null,
   injections: [],
+  simBusy: false, // an inject POST is on its way: the cards wait for it
+  simEnded: false, // the server said this replay round has ended; a replay_restarted reopens
   railIds: null, // alert ids already on the rail; null until the first render
   alertCount: 0,
   alertCountKnown: false, // the count has been shown once: only a later rise flashes the card
@@ -576,14 +589,24 @@ function setMode(mode) {
   const live = mode === "live";
   $("replay-bar").hidden = live;
   renderPlayButton();
-  const allowed = redTeamAllowed(mode);
-  const refused = $("redteam-refused");
-  refused.hidden = allowed;
-  refused.textContent = allowed ? "" : live ? REFUSED_TH : UNKNOWN_MODE_TH;
-  for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
-    node.disabled = !allowed;
-  }
-  applyRoleGates();
+  applyRoleGates(); // the simulate cards open only in a confirmed replay / sim mode
+}
+
+// why the simulate cards are closed, in Thai; "" when they are open
+function simReason(mode, analyst, ended) {
+  if (!redTeamAllowed(mode)) return mode === "live" ? SIM_REASON.live : SIM_WAIT_TH;
+  if (!analyst) return SIM_REASON.viewer;
+  if (ended) return SIM_REASON.ended;
+  return "";
+}
+
+function applySimGates() {
+  const why = simReason(state.mode, can("analyst"), state.simEnded);
+  for (const c of SIM_CARDS) $(`sim-${c.family}`).disabled = why !== "" || state.simBusy;
+  for (const node of [$("rt-region"), $("rt-offset"), $("rt-symbol")]) node.disabled = why !== "";
+  const box = $("sim-reason");
+  box.hidden = why === "";
+  box.textContent = why;
 }
 
 // UI convenience only: the server enforces the role on every route
@@ -602,11 +625,7 @@ function applyRoleGates() {
   const reason = $("replay-reason");
   reason.hidden = ok;
   reason.textContent = ok ? "" : VIEWER_REPLAY_TH;
-  const allowed = redTeamAllowed(state.mode) && ok;
-  for (const node of $("redteam-form").querySelectorAll("select, input, button")) {
-    node.disabled = !allowed;
-    gate(node);
-  }
+  applySimGates();
   for (const node of document.querySelectorAll(".feedback button, .feedback input")) {
     node.disabled = !ok;
     gate(node);
@@ -1202,6 +1221,8 @@ function onAlert(data) {
   if (data.event === "replay_restarted") {
     restartRuns(state.injections);
     renderInjections();
+    state.simEnded = false; // a new round: the cards open again
+    applySimGates();
     return;
   }
   if (data.event === "alerts_reset") {
@@ -1755,39 +1776,77 @@ async function drawDetailChart(node, a) {
 
 // ------------------------------------------------------------------ red team
 
-function bindRedTeam() {
-  $("redteam-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    if (!redTeamAllowed(state.mode)) return;
-    const status = $("rt-status");
-    if (!can("analyst")) {
-      status.textContent = NEED_ANALYST_TH;
-      return;
-    }
-    const offset = Number($("rt-offset").value);
-    if (!Number.isFinite(offset) || offset <= 0 || offset > 3600) {
-      status.textContent = "offset ต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
-      return;
-    }
-    const body = {
-      family: $("rt-family").value,
-      region: $("rt-region").value,
-      offset_s: Math.round(offset),
-      symbol: $("rt-symbol").value || null,
-    };
-    status.textContent = "กำลังฉีด…";
-    $("rt-submit").disabled = true;
-    const known = snapshotAlerts(state.alerts.values()); // before the click: never a detection
-    try {
-      const r = await postJson("/api/redteam/inject", body);
-      status.textContent = "ฉีดแล้ว กำลังจับเวลา";
-      addInjection(r, body, known);
-    } catch (e) {
+function simTitle(family) {
+  const card = SIM_CARDS.find((c) => c.family === family);
+  return card ? card.title : "การปั่นจำลอง";
+}
+
+// the POST body for one card click: the defaults, with any filled-in advanced field on top
+function simulateRequest(family, adv, currentSymbol) {
+  const req = { family, region: SIM_DEFAULTS.region, offset_s: SIM_DEFAULTS.offset_s, symbol: currentSymbol || null };
+  for (const k of ["region", "offset_s", "symbol"]) {
+    const v = adv ? adv[k] : undefined;
+    if (v !== undefined && v !== null && v !== "") req[k] = v;
+  }
+  return req;
+}
+
+// the advanced fields; null when the start offset is out of range
+function readAdvanced() {
+  const raw = String($("rt-offset").value ?? "").trim();
+  let offset;
+  if (raw !== "") {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n > 3600) return null;
+    offset = Math.round(n);
+  }
+  return { region: $("rt-region").value, offset_s: offset, symbol: $("rt-symbol").value };
+}
+
+function bindSimulate() {
+  for (const c of SIM_CARDS) {
+    const card = $(`sim-${c.family}`);
+    card.addEventListener("click", () => startSimulation(c.family, card));
+  }
+}
+
+async function startSimulation(family, card) {
+  if (!redTeamAllowed(state.mode)) return;
+  const status = $("rt-status");
+  if (!can("analyst")) {
+    status.textContent = SIM_REASON.viewer;
+    return;
+  }
+  if (state.simBusy || state.simEnded) return;
+  const adv = readAdvanced();
+  if (adv === null) {
+    status.textContent = SIM_OFFSET_TH;
+    $("sim-advanced").open = true;
+    return;
+  }
+  const body = simulateRequest(family, adv, state.symbol);
+  const title = simTitle(family);
+  status.textContent = `กำลังเริ่ม ${title}`;
+  state.simBusy = true;
+  card.setAttribute("aria-busy", "true");
+  applySimGates();
+  const known = snapshotAlerts(state.alerts.values()); // before the click: never a detection
+  try {
+    const r = await postJson("/api/redteam/inject", body);
+    status.textContent = `เริ่ม ${title} แล้ว ดูผลด้านล่าง`;
+    addInjection(r, body, known);
+  } catch (e) {
+    if (e.status === 409 && e.message === REPLAY_ENDED_TH) {
+      state.simEnded = true; // said once, on the reason line
+      status.textContent = "";
+    } else {
       status.textContent = e.message;
-    } finally {
-      $("rt-submit").disabled = !(redTeamAllowed(state.mode) && can("analyst"));
     }
-  });
+  } finally {
+    state.simBusy = false;
+    card.removeAttribute("aria-busy");
+    applySimGates();
+  }
 }
 
 function addInjection(r, body, known) {
@@ -1804,7 +1863,7 @@ function addInjection(r, body, known) {
     t_end_us: label.t_end_us,
     wallStart: Date.now(),
     detected: null,
-    node: null,
+    card: null,
   };
   state.injections.unshift(run);
   renderInjections();
@@ -1898,126 +1957,127 @@ function checkInjections() {
 
 function renderInjections() {
   const box = clear($("rt-runs"));
-  for (const run of state.injections) {
-    const sc = run.scenario;
-    const ring = svg("circle", {
-      id: "rt-ring",
-      class: "rt-ring-arc",
-      cx: 26,
-      cy: 26,
-      r: RING_R,
-      fill: "none",
-      "stroke-width": 4,
-      "stroke-dasharray": RING_C.toFixed(2),
-      "stroke-dashoffset": RING_C.toFixed(2),
-      transform: "rotate(-90 26 26)",
-    });
-    const ringSvg = svg(
-      "svg",
-      { viewBox: "0 0 52 52", class: "rt-ring", role: "img", "aria-label": "เวลาที่ผ่านไปเทียบกับช่วงตรวจจับ" },
-      svg("circle", { cx: 26, cy: 26, r: RING_R, fill: "none", "stroke-width": 4, class: "rt-ring-track" }),
-      ring,
-    );
-    const banner = el("div", { class: "rt-banner", id: "rt-banner" });
-    banner.hidden = true;
-    const detail = el("div", { class: "small timer-detail" });
-    const timer = el("div", { class: "timer rt-timer" }, ringSvg, el("div", { class: "rt-timer-text" }, banner, detail));
-    const card = el(
-      "div",
-      { class: "card" },
-      el(
-        "div",
-        { class: "detail-head" },
-        el("h3", {}, `${run.family} · ${run.symbol}`),
-        el("span", { class: "badge SEMI-SYN" }, "SEMI-SYN"),
-      ),
-      el(
-        "dl",
-        { class: "kv small" },
-        el("dt", {}, "ช่วงเหตุการณ์จำลอง"),
-        el("dd", { class: "mono" }, `${fmtUs(run.t_start_us)} – ${fmtUs(run.t_end_us)}`),
-        el("dt", {}, "เทคนิค"),
-        el("dd", { class: "mono" }, `${sc.technique_id || "–"} / ${sc.sub_technique || "–"}`),
-        el("dt", {}, "พารามิเตอร์"),
-        el(
-          "dd",
-          { class: "mono" },
-          `region ${run.region} · ${fmtNum(sc.duration_s, 0)} s · impact ${fmtNum(sc.impact, 3)} · vol ×${fmtNum(sc.vol_mult, 1)}`,
-        ),
-      ),
-      timer,
-    );
-    run.node = timer;
-    run.ring = ring;
-    run.banner = banner;
-    run.detail = detail;
-    run.bannerState = null;
-    box.appendChild(card);
-  }
+  $("rt-empty").hidden = state.injections.length > 0;
+  for (const run of state.injections) box.appendChild(runCard(run));
   tickInjections();
 }
 
-const RING_R = 22;
-const RING_C = 2 * Math.PI * RING_R;
+// one run: started -> waiting -> result, then the technical facts folded away
+function runCard(run) {
+  const sc = run.scenario || {};
+  const step = (cls, label, ...mark) => {
+    const text = el("span", { class: "step-label" }, label);
+    const sub = el("span", { class: "step-sub small" });
+    const node = el(
+      "li",
+      { class: `step ${cls}` },
+      el("span", { class: "step-dot", "aria-hidden": "true" }, ...mark),
+      el("span", { class: "step-text" }, text, sub),
+    );
+    return { node, text, sub };
+  };
+  const steps = [
+    step("step-start", simStatusText("pending", run)),
+    step("step-wait", simStatusText("waiting", run)),
+    step(
+      "step-result",
+      "ผลลัพธ์",
+      svg(
+        "svg",
+        { viewBox: "0 0 12 12", width: 10, height: 10, fill: "none", stroke: "currentColor", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round", class: "step-check" },
+        svg("path", { d: "M2.5 6.2l2.3 2.3 4.7-5" }),
+      ),
+    ),
+  ];
+  const list = el("ol", { class: "sim-steps" }, ...steps.map((st) => st.node));
+  const note = el("p", { class: "sim-run-note small" });
+  const tech = el(
+    "details",
+    { class: "sim-tech small" },
+    el("summary", {}, "ดูรายละเอียด"),
+    el(
+      "dl",
+      { class: "kv small" },
+      el("dt", {}, "ช่วงเหตุการณ์ (UTC)"),
+      el("dd", { class: "mono" }, `${fmtUs(run.t_start_us)} – ${fmtUs(run.t_end_us)}`),
+      el("dt", {}, "เทคนิค"),
+      el("dd", { class: "mono" }, `${run.family} · ${sc.technique_id || "–"} / ${sc.sub_technique || "–"}`),
+      el("dt", {}, "พารามิเตอร์"),
+      el(
+        "dd",
+        { class: "mono" },
+        `region ${run.region} · ${fmtNum(sc.duration_s, 0)} s · impact ${fmtNum(sc.impact, 3)} · vol ×${fmtNum(sc.vol_mult, 1)}`,
+      ),
+      el("dt", {}, "ที่มาข้อมูล"),
+      el("dd", {}, el("span", { class: "badge SEMI-SYN" }, "SEMI-SYN")),
+    ),
+  );
+  const card = el(
+    "div",
+    { class: "card sim-run" },
+    el(
+      "div",
+      { class: "sim-run-head" },
+      el("h3", {}, `${simTitle(run.family)} · ${run.symbol || "–"}`),
+      el("span", { class: "small muted" }, `เหตุการณ์เริ่ม ${fmtThaiTime(run.t_start_us)}`),
+    ),
+    list,
+    note,
+    tech,
+  );
+  run.card = card;
+  run.steps = steps;
+  run.note = note;
+  run.shown = null; // the status drawn; data-state changes only when it does
+  return card;
+}
 
-function bannerText(status, seconds, run) {
-  // the verdict line on a Red-Team card; empty while the run is still undecided
-  if (status === "missed" && run && run.restarted) return "พลาด (replay เริ่มใหม่)";
-  const n = Math.max(0, Math.round(Number(seconds) || 0));
-  if (status === "detected") return `ตรวจพบใน ${n} วินาที`;
-  if (status === "missed") return `ไม่พบภายใน ${n} วินาทีหลังจบเหตุการณ์`;
+// one line per run state: the step labels and the verdict
+function simStatusText(status, run) {
+  if (status === "restarted" || (status === "missed" && run && run.restarted)) return "พลาด (replay เริ่มใหม่)";
+  if (status === "pending") return "เริ่มแล้ว";
+  if (status === "waiting") return "กำลังรอระบบ";
+  if (status === "missed") return "ไม่ทันจับ";
+  if (status === "detected" && run && run.detected) {
+    const ev = Math.max(0, Math.round(Number(run.detected.eventS) || 0));
+    const wall = Math.max(0, Math.round(Number(run.detected.wallS) || 0));
+    return `จับได้ใน ${ev} วินาที (เวลาจริง ${wall} วินาที)`;
+  }
   return "";
+}
+
+function setText(node, value) {
+  if (node.textContent !== value) node.textContent = value;
 }
 
 function tickInjections() {
   const now = eventNowUs();
   for (const run of state.injections) {
-    if (!run.node || !run.ring) continue;
+    if (!run.card) continue;
     const status = injectionStatus(run, now);
-    const windowS = Math.max(1, (run.t_end_us - run.t_start_us) / S_US + MATCH_AFTER_US / S_US);
-    const ev = isNum(now) && isNum(run.t_start_us) ? (now - run.t_start_us) / S_US : null;
-    let frac = ev === null ? 0 : Math.max(0, Math.min(1, ev / windowS));
-    if (status === "detected") frac = Math.max(0, Math.min(1, run.detected.eventS / windowS));
-    else if (status === "missed") frac = 1;
-    run.ring.setAttribute("stroke-dasharray", RING_C.toFixed(2));
-    run.ring.setAttribute("stroke-dashoffset", (RING_C * (1 - frac)).toFixed(2));
-    run.ring.setAttribute("class", `rt-ring-arc ${status}`);
-
-    const seconds = status === "detected" ? run.detected.eventS : MATCH_AFTER_US / S_US;
     const verdict = status === "detected" || status === "missed";
-    run.banner.hidden = !verdict;
-    if (verdict) {
-      run.banner.textContent = bannerText(status, seconds, run);
-      if (run.bannerState !== status) { // class only on a state change: a tick never restarts the sweep
-        run.bannerState = status;
-        const hit = status === "detected";
-        run.banner.className = `rt-banner ${hit ? "hit" : "miss"}`;
-        if (hit && !reducedMotion()) run.banner.classList.add("sweep");
+    if (run.shown !== status) {
+      run.shown = status;
+      run.card.setAttribute("data-state", status);
+      setText(run.steps[2].text, verdict ? simStatusText(status, run) : "ผลลัพธ์");
+      clear(run.note);
+      if (status === "detected") {
+        run.note.appendChild(el("a", { href: alertHref(run.detected.alert_id) }, "ดูการแจ้งเตือนที่จับได้"));
       }
-    } else {
-      run.bannerState = null;
-      run.banner.className = "rt-banner";
+      run.note.hidden = status !== "detected";
     }
-
-    clear(run.detail);
-    if (status === "missed" && run.restarted) {
-      run.detail.textContent =
-        "replay เริ่มเล่นใหม่ก่อนตรวจพบ ข้อมูลจำลองที่ฉีดไว้หายไปแล้ว · นับเป็นการตรวจไม่พบ";
-    } else if (status === "missed") {
-      run.detail.textContent =
-        "ไม่พบความผิดปกติทางสถิติภายในช่วงที่นับตามเกณฑ์ประเมิน (ถึงสิ้นสุดเหตุการณ์ + 300 s) · นับเป็นการตรวจไม่พบ";
-    } else if (status === "detected") {
-      const d = run.detected;
-      append(run.detail, [
-        `ตรวจพบความผิดปกติทางสถิติ: ${d.eventS >= 0 ? "+" : ""}${d.eventS.toFixed(0)} s (เวลาเหตุการณ์) · ${d.wallS.toFixed(1)} s (เวลาจริง) `,
-        el("a", { href: alertHref(d.alert_id), class: "small" }, "ดูการแจ้งเตือน"),
-      ]);
-    } else {
-      const wall = (Date.now() - run.wallStart) / 1000;
-      const evText =
-        ev === null ? "–" : ev < 0 ? `อีก ${(-ev).toFixed(0)} s จะเริ่ม` : `+${ev.toFixed(0)} s`;
-      run.detail.textContent = `รอการตรวจจับ… ${evText} (เวลาเหตุการณ์) · ${wall.toFixed(0)} s (เวลาจริง)`;
+    // the small lines under the steps follow the clock
+    const toStart = isNum(now) && isNum(run.t_start_us) ? Math.ceil((run.t_start_us - now) / S_US) : null;
+    setText(run.steps[0].sub, status === "pending" && toStart !== null ? `เหตุการณ์จะเริ่มในอีก ${toStart} วินาที` : "");
+    const waited = Math.max(0, Math.round((Date.now() - run.wallStart) / 1000));
+    setText(run.steps[1].sub, status === "pending" || status === "waiting" ? `รอมาแล้ว ${waited} วินาที` : "");
+    let why = "";
+    if (status === "missed") {
+      why = run.restarted
+        ? "ข้อมูลจำลองหายไปเมื่อการย้อนดูเริ่มรอบใหม่"
+        : "ไม่มีการแจ้งเตือนภายใน 5 นาทีหลังเหตุการณ์จบ";
     }
+    setText(run.steps[2].sub, why);
   }
 }
 
@@ -2833,7 +2893,7 @@ async function boot() {
   document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
   bindMonitor();
-  bindRedTeam();
+  bindSimulate();
   $("alerts-more").addEventListener("click", () => {
     state.alertsShown += ALERT_PAGE;
     renderAlertCards();
@@ -2877,7 +2937,13 @@ if (typeof document !== "undefined") {
     resetRuns,
     restartRuns,
     injectionStatus,
-    bannerText,
+    simStatusText,
+    simulateRequest,
+    simReason,
+    SIM_CARDS,
+    SIM_REASON,
+    setMode,
+    bindSimulate,
     redTeamAllowed,
     reducedMotion,
     EVAL_TARGETS,

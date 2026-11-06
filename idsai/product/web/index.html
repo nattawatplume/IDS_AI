@@ -219,42 +219,53 @@
       <div id="alert-detail"></div>
     </section>
 
-    <!-- Simulate (redesigned in a later task) -->
+    <!-- Simulate: one click per card, the defaults below; app.js applySimGates keeps it closed -->
     <section id="page-simulate" class="page" hidden>
       <h1>ทดลองจำลอง</h1>
-      <p class="muted small">ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่กำลังเล่นย้อนหลัง (เฉพาะสำเนาในหน่วยความจำ) แล้วจับเวลาจนระบบพบความผิดปกติทางสถิติ</p>
-      <!-- fail closed: disabled until /api/health confirms replay or sim (app.js setMode) -->
-      <div id="redteam-refused" class="banner banner-fail">Red-Team ยังปิดอยู่จนกว่าจะยืนยันจากเซิร์ฟเวอร์ได้ว่าไม่ใช่โหมด LIVE (ใช้ได้เฉพาะโหมด replay / sim)</div>
-      <form id="redteam-form" class="card form-grid rt-row">
-        <label class="field">
-          <span>รูปแบบ (family)</span>
-          <select id="rt-family" disabled>
-            <option value="pump_burst">pump_burst (พุ่งเร็ว)</option>
-            <option value="pump_stealth">pump_stealth (ค่อยเป็นค่อยไป)</option>
-            <option value="wash_pingpong">wash_pingpong (คล้าย wash)</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>ช่วงพารามิเตอร์ (region)</span>
-          <select id="rt-region" disabled>
-            <option value="test">test</option>
-            <option value="train">train</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>เริ่มหลังเวลาปัจจุบัน (วินาที)</span>
-          <input id="rt-offset" disabled type="number" min="1" max="3600" step="1" value="60">
-        </label>
-        <label class="field">
-          <span>สัญลักษณ์</span>
-          <select id="rt-symbol" disabled></select>
-        </label>
-        <div class="form-actions">
-          <button id="rt-submit" type="submit" class="primary" disabled>ฉีดสถานการณ์จำลอง</button>
-          <span id="rt-status" class="small"></span>
+      <p class="sim-intro muted">ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)</p>
+      <!-- fail closed: every control starts disabled until /api/health confirms replay or sim -->
+      <div class="sim-cards">
+        <button id="sim-pump_burst" type="button" class="card sim-card" data-family="pump_burst" disabled>
+          <span class="sim-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20.5h18" opacity="0.4"/><path d="M3 17.5l6-0.5 3-2 3.5-10L19 4"/></svg></span>
+          <span class="sim-card-title">ปั่นเร็ว</span>
+          <span class="sim-card-line">ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที</span>
+        </button>
+        <button id="sim-pump_stealth" type="button" class="card sim-card" data-family="pump_stealth" disabled>
+          <span class="sim-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 20.5h18" opacity="0.4"/><path d="M3 17.5l4.5-1 4-1.5 4.5-2.5 4-2.5"/></svg></span>
+          <span class="sim-card-title">ปั่นแบบเนียน</span>
+          <span class="sim-card-line">ค่อยๆ ดันราคาขึ้นช้าๆ</span>
+        </button>
+        <button id="sim-wash_pingpong" type="button" class="card sim-card" data-family="wash_pingpong" disabled>
+          <span class="sim-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 11a7.5 5.5 0 0 1 13.8-3"/><path d="M18.8 4v4.2h-4.2"/><path d="M19.5 13a7.5 5.5 0 0 1-13.8 3"/><path d="M5.2 20v-4.2h4.2"/></svg></span>
+          <span class="sim-card-title">ซื้อขายวนหลอก</span>
+          <span class="sim-card-line">ซื้อขายกันเองไปมาให้ดูคึกคัก</span>
+        </button>
+      </div>
+      <p id="sim-reason" class="sim-reason small">รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู</p>
+      <p id="rt-status" class="sim-status small" role="status" aria-live="polite"></p>
+      <details id="sim-advanced" class="sim-advanced">
+        <summary>ตั้งค่าขั้นสูง</summary>
+        <div class="form-grid sim-fields">
+          <label class="field">
+            <span>ช่วงค่าที่ใช้สุ่มเหตุการณ์</span>
+            <select id="rt-region" disabled>
+              <option value="test">ช่วงค่าทดสอบ</option>
+              <option value="train">ช่วงค่าฝึก</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>เริ่มหลังจากนี้ (วินาที)</span>
+            <input id="rt-offset" disabled type="number" min="1" max="3600" step="1" value="60">
+          </label>
+          <label class="field">
+            <span>เหรียญ</span>
+            <select id="rt-symbol" disabled></select>
+          </label>
         </div>
-      </form>
-      <div id="rt-runs"></div>
+      </details>
+      <h2 class="sim-runs-title">ผลการทดลอง</h2>
+      <p id="rt-empty" class="muted small">ยังไม่มีการทดลอง เลือกการ์ดด้านบนเพื่อเริ่ม</p>
+      <div id="rt-runs" class="sim-runs"></div>
     </section>
 
     <!-- Results (redesigned in a later task) -->
