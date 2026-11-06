@@ -73,6 +73,9 @@ const SIM_REASON = {
 };
 const SIM_WAIT_TH = "รอยืนยันจากเซิร์ฟเวอร์ว่าเป็นโหมดย้อนดู";
 const SIM_OFFSET_TH = "เวลาเริ่มต้องอยู่ระหว่าง 1 ถึง 3600 วินาที";
+const SIM_PAST_END_TH = "เหตุการณ์จะเลยข้อมูลสุดท้าย ลองลดเวลาเริ่มในตั้งค่าขั้นสูง";
+const SIM_SYMBOL_TH = "ไม่รู้จักเหรียญนี้";
+const SIM_FAILED_TH = "เริ่มการทดลองไม่สำเร็จ ลองใหม่อีกครั้ง";
 const REPLAY_ENDED_TH = "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่"; // the server's 409 text (api/app.py)
 const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 
@@ -580,6 +583,7 @@ function setMode(mode) {
   if (!mode || mode === state.mode) return;
   state.mode = mode;
   state.replaying = true; // a new mode starts with a running replay
+  state.simEnded = false; // a new mode is a new replay round
   const lamp = $("live-dot");
   lamp.classList.remove("ok", "fail");
   lamp.classList.add(mode === "live" ? "fail" : "ok");
@@ -1110,6 +1114,10 @@ async function control(action, value) {
     const body = value === undefined ? { action } : { action, value };
     const r = await postJson("/api/replay/control", body);
     noteReplayAction(action);
+    if (action === "play" || action === "seek") {
+      state.simEnded = false; // the server took it: the cursor can move again, let the cards try
+      applySimGates();
+    }
     if (action === "play" || action === "pause") setLive(state.replaying);
     renderPlayButton();
     // the button and the chips already show play and speed; only a jump says where it landed
@@ -1791,6 +1799,17 @@ function simulateRequest(family, adv, currentSymbol) {
   return req;
 }
 
+// a refused inject, in plain Thai: the server's own text can carry field names in English
+function simErrorText(err) {
+  const status = err && err.status;
+  const msg = String((err && err.message) || "");
+  if (status === 409 && msg === REPLAY_ENDED_TH) return SIM_REASON.ended;
+  if (status === 403) return msg.includes("สิทธิ์") ? SIM_REASON.viewer : SIM_REASON.live;
+  if (status === 422 && /offset|ข้อมูลสุดท้าย/.test(msg)) return SIM_PAST_END_TH;
+  if (status === 422 && /symbol/.test(msg)) return SIM_SYMBOL_TH;
+  return SIM_FAILED_TH;
+}
+
 // the advanced fields; null when the start offset is out of range
 function readAdvanced() {
   const raw = String($("rt-offset").value ?? "").trim();
@@ -1840,7 +1859,9 @@ async function startSimulation(family, card) {
       state.simEnded = true; // said once, on the reason line
       status.textContent = "";
     } else {
-      status.textContent = e.message;
+      const text = simErrorText(e);
+      if (text === SIM_FAILED_TH) console.warn("simulate:", e && e.message);
+      status.textContent = text;
     }
   } finally {
     state.simBusy = false;
@@ -2940,6 +2961,8 @@ if (typeof document !== "undefined") {
     simStatusText,
     simulateRequest,
     simReason,
+    simErrorText,
+    control,
     SIM_CARDS,
     SIM_REASON,
     setMode,

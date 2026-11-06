@@ -2095,3 +2095,106 @@ def test_simulate_cards_disabled_for_viewer_and_in_live(tmp_path):
 
 def test_simulate_cards_close_once_the_replay_ended(tmp_path):
     _run_dom(tmp_path, "true", SIM_ENDED_BODY)
+
+
+def _css_blocks(css: str):
+    """(prelude, depth, body) for every brace block, after a balanced-brace parse."""
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    stack, out, depth, last = [], [], 0, 0
+    for i, ch in enumerate(css):
+        if ch == "{":
+            prelude = css[last:i].split(";")[-1].split("}")[-1].strip()
+            stack.append((prelude, depth, i))
+            depth += 1
+            last = i + 1
+        elif ch == "}":
+            assert stack, f"unbalanced closing brace at {i}"
+            prelude, d, start = stack.pop()
+            out.append((prelude, d, css[start + 1 : i], [p for p, _, _ in stack]))
+            depth -= 1
+            last = i + 1
+    assert not stack, f"unclosed block: {stack[-1][0]}"
+    return out
+
+
+def test_styles_css_blocks_are_balanced_and_motion_is_top_level():
+    blocks = _css_blocks(text("styles.css"))
+    keyframes = [b for b in blocks if b[0].startswith("@keyframes")]
+    assert keyframes
+    for prelude, depth, _, parents in keyframes:
+        assert depth == 0 and not parents, (prelude, parents)  # never inside an @media
+    reduced = [b for b in blocks if "prefers-reduced-motion: reduce" in b[0]]
+    assert reduced and all(depth == 0 for _, depth, _, _ in reduced)
+
+
+SIM_ERROR_BODY = r"""
+const err = (status, message) => Object.assign(new Error(message), { status });
+const t = m.simErrorText;
+assert.strictEqual(t(err(409, "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่")), m.SIM_REASON.ended);
+assert.strictEqual(t(err(422, "สถานการณ์จำลองจะจบหลังข้อมูลสุดท้าย ลดค่า offset_s")),
+  "เหตุการณ์จะเลยข้อมูลสุดท้าย ลองลดเวลาเริ่มในตั้งค่าขั้นสูง");
+assert.strictEqual(t(err(422, "ต้องระบุ symbol ที่รู้จัก")), "ไม่รู้จักเหรียญนี้");
+assert.strictEqual(t(err(403, "Red-Team ปิดอยู่ในโหมด LIVE เพราะระบบไม่แก้ไขข้อมูลตลาดจริง")),
+  m.SIM_REASON.live);
+assert.strictEqual(t(err(403, "สิทธิ์ไม่พอ (ต้องเป็น analyst)")), m.SIM_REASON.viewer);
+for (const e of [err(422, "Input should be less than or equal to 3600"), err(500, "boom"),
+  err(409, "ไม่มีตัวเล่นย้อนหลังสำหรับฉีดข้อมูลจำลอง"), new Error("Failed to fetch"), null]) {
+  const out = t(e);
+  assert.strictEqual(out, "เริ่มการทดลองไม่สำเร็จ ลองใหม่อีกครั้ง");
+  assert.ok(!/[A-Za-z]/.test(out));
+}
+"""
+
+
+def test_simulate_errors_are_plain_thai(tmp_path):
+    _run_motion(tmp_path, "false", SIM_ERROR_BODY)
+
+
+SIM_REOPEN_BODY = r"""
+(async () => {
+  const cards = m.SIM_CARDS.map((c) => document.getElementById(`sim-${c.family}`));
+  const status = document.getElementById("rt-status");
+  let mode = "ended";
+  globalThis.fetch = async (path) => {
+    if (path === "/api/replay/control") return { ok: true, status: 200, json: async () => ({}) };
+    if (mode === "ended") return { ok: false, status: 409,
+      json: async () => ({ detail: "การเล่นย้อนหลังนี้จบแล้ว ต้องเริ่มใหม่" }) };
+    return { ok: false, status: 422,
+      json: async () => ({ detail: [{ msg: "Input should be valid" }] }) };
+  };
+  const warns = [];
+  console.warn = (...a) => warns.push(a.join(" "));
+  m.bindSimulate();
+  m.setMe({ username: "a", role: "analyst", auth_enabled: true, prefs: {} });
+  m.setMode("replay");
+  const end = async () => {
+    cards[0].click();
+    for (let i = 0; i < 5; i += 1) await tick();
+    for (const c of cards) assert.strictEqual(c.disabled, true, "ended");
+  };
+  // a successful seek or play reopens the cards; a pause does not
+  for (const action of ["seek", "play"]) {
+    await end();
+    assert.strictEqual(await m.control("pause"), true);
+    for (const c of cards) assert.strictEqual(c.disabled, true, "pause keeps it closed");
+    assert.strictEqual(await m.control(action, action === "seek" ? 1 : undefined), true);
+    for (const c of cards) assert.strictEqual(c.disabled, false, action);
+  }
+  // a mode change is a new round too
+  await end();
+  m.setMode("live");
+  m.setMode("replay");
+  for (const c of cards) assert.strictEqual(c.disabled, false, "mode");
+  // any other refusal: plain Thai on screen, the raw text only in the console
+  mode = "other";
+  cards[0].click();
+  for (let i = 0; i < 5; i += 1) await tick();
+  assert.strictEqual(status.textContent, "เริ่มการทดลองไม่สำเร็จ ลองใหม่อีกครั้ง");
+  assert.ok(warns.some((w) => w.includes("Input should be valid")), warns.join("|"));
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_simulate_cards_reopen_after_seek_play_or_mode_change(tmp_path):
+    _run_dom(tmp_path, "true", SIM_REOPEN_BODY)

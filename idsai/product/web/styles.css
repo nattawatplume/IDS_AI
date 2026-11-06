@@ -913,6 +913,7 @@ td.when { white-space: nowrap; }
     background: var(--line);
     transition: background-color 0.3s;
   }
+}
 
 /* ------------------------------------------------------------------ motion */
 @keyframes drift {
