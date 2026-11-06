@@ -102,7 +102,6 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 /* ------------------------------------------------------------------ glass surfaces */
 .glass,
 .card,
-.target,
 .user-menu {
   background: var(--glass);
   -webkit-backdrop-filter: var(--glass-blur);
@@ -112,7 +111,7 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   box-shadow: var(--shadow);
 }
 @supports not (backdrop-filter: blur(1px)) {
-  .glass, .card, .target, .user-menu, .topbar { background: var(--glass-solid); }
+  .glass, .card, .user-menu, .topbar { background: var(--glass-solid); }
 }
 
 /* ------------------------------------------------------------------ top bar */
@@ -495,7 +494,7 @@ a.toast-text:hover { text-decoration: underline; }
 .kv dt { color: var(--dim); }
 .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
-/* ------------------------------------------------------------------ eval */
+/* ------------------------------------------------------------------ eval: the committee's charts */
 .decision { font-size: 15px; font-weight: 600; }
 .decision.accept { color: var(--green); }
 .decision.reject { color: var(--text); }
@@ -504,18 +503,6 @@ a.toast-text:hover { text-decoration: underline; }
 .whiskers .axis { stroke: var(--line); }
 .whiskers .bar { fill: var(--line-f); opacity: 0.85; }
 .whiskers .ci { stroke: var(--text); stroke-width: 1.5; }
-.section-label { font-size: 13px; font-weight: 600; color: var(--dim); margin: 16px 0 8px; }
-.targets { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 8px; margin-bottom: 12px; }
-.target { border-left-width: 3px; padding: 12px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
-.target .label { font-size: 13px; color: var(--dim); }
-.target .big { font-size: 28px; font-variant-numeric: tabular-nums; }
-.target.pass { border-left-color: var(--green); }
-.target.miss { border-left-color: var(--red); }
-.target.reference { border-left-color: var(--dim); }
-.verdict { font-size: 13px; }
-.verdict.pass { color: var(--green); }
-.verdict.miss { color: var(--red); }
-.verdict.unmeasured, .verdict.reference { color: var(--dim); }
 .forest { width: 100%; max-width: 520px; height: auto; display: block; margin-bottom: 8px; }
 .forest text { fill: var(--text); font-size: 12px; font-family: var(--font); }
 .forest text.tick { fill: var(--dim); }
@@ -526,6 +513,67 @@ a.toast-text:hover { text-decoration: underline; }
 .forest .flat { stroke: var(--dim); fill: var(--dim); }
 td.notes { max-width: 260px; white-space: normal; overflow-wrap: anywhere; }
 details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim); }
+
+/* ---- results: budget chips, plain cards sized by their content, the committee details folded */
+.budget-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 8px; }
+.budget-label, .budget-unit { font-size: 14px; color: var(--dim); }
+.budget-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.budget-chip {
+  min-width: 48px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  background: var(--chip);
+  color: var(--dim);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.budget-chip:hover:not(:disabled) { color: var(--text); background: var(--glass-strong); border-color: transparent; }
+.budget-chip[aria-pressed="true"] { color: var(--text); background: rgba(139, 92, 246, 0.24); border-color: rgba(167, 139, 250, 0.6); }
+.budget-note { margin: 0 0 8px; }
+.result-group { margin-top: 24px; }
+.result-group h2 { margin: 0; font-size: 15px; color: var(--text); }
+.result-lead { margin: 4px 0 12px; }
+.result-cards { display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px; }
+.result-card { flex: 1 1 220px; display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 16px 20px; }
+/* the cards are read, not clicked: they stay put under the pointer */
+.result-card:hover, .committee:hover { transform: none; border-color: var(--glass-border); }
+.result-wide { flex: 2 1 420px; gap: 12px; padding: 24px; }
+.result-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 8px 12px; }
+.result-title { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.result-badge, .result-ref {
+  flex: none;
+  padding: 0 12px;
+  border-radius: var(--r-pill);
+  font-size: 13px;
+  line-height: 24px;
+  white-space: nowrap;
+  background: var(--chip);
+  color: var(--dim);
+}
+.result-badge[data-state="pass"] { background: var(--ok-bg); color: var(--green); }
+.result-badge[data-state="fail"] { background: var(--fail-bg); color: #ff98a8; }
+.result-sentence { margin: 0; font-size: 15px; line-height: 1.6; }
+.result-wide .result-sentence { font-size: 17px; }
+.result-goal { margin: auto 0 0; }
+.result-ref-card .result-title { color: var(--dim); }
+.result-value { display: flex; align-items: baseline; gap: 4px; font-size: 40px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.result-value-unit { font-size: 20px; font-weight: 400; color: var(--dim); }
+/* recall against the 80 % goal: the fill, and a tick where the goal sits */
+.result-bar { position: relative; height: 6px; max-width: 520px; border-radius: var(--r-pill); background: var(--line); }
+.result-fill { display: block; height: 100%; border-radius: inherit; background: #a78bfa; transition: width 0.3s ease-out; }
+.result-wide[data-state="pass"] .result-fill { background: var(--green); }
+.result-mark { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text); }
+.committee { margin-top: 32px; padding: 12px 24px; }
+.committee > summary { cursor: pointer; font-size: 14px; color: var(--dim); padding: 4px 0; }
+.committee > summary:hover { color: var(--text); }
+.committee-body { padding-top: 8px; }
+.committee-body > p { margin: 4px 0; }
+.committee-sec { min-width: 0; padding: 16px 0; border-top: 1px solid var(--line); }
+.committee-sec:first-of-type { margin-top: 8px; }
+.committee-sec h3 { margin: 0 0 8px; }
+/* ---- /results */
 
 /* ------------------------------------------------------------------ taxonomy, about (moved into help in a later task) */
 #taxonomy-body.cards { display: block; }
@@ -897,6 +945,10 @@ td.when { white-space: nowrap; }
   .login-tagline { margin-top: 12px; font-size: 18px; }
   .login-line { display: none; }
   .login-card { padding: 24px; }
+  /* results */
+  .result-wide { padding: 16px; }
+  .result-value { font-size: 32px; }
+  .committee { padding: 12px 16px; }
   /* simulate */
   .sim-run { padding: 16px; }
   /* the steps go down the card: the track runs between the dots */

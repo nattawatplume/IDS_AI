@@ -82,20 +82,30 @@ const PROVENANCES = ["REAL", "SEMI-SYN", "SYN"];
 // Eval targets: docs/superpowers/plans/2026-10-27-market-ids-mvp.md Task 20 Step 6 (spec section 6).
 // "pair" cards need the AE-minus-baseline CI lower bound above 0; "reference" pairs show the
 // diff and CI only (the MVP spec asks the AE to beat iforest / robust_z / kk, not random / pca).
+// `label` (metric ids) is for the committee table; `title` is the plain Thai card title.
+// The false-alarm target is "≤ the budget": its cap follows the chosen budget (`capIsBudget`).
+const SEMISYN_TH = { pump_burst: "ปั่นเร็ว", pump_stealth: "ปั่นแบบเนียน", wash_pingpong: "ซื้อขายวนหลอก" };
+const BASELINE_TH = {
+  "baseline.iforest": "วิธีแยกจุดผิดปกติด้วยต้นไม้สุ่ม",
+  "stat.robust_z": "วิธีวัดระยะห่างจากค่าปกติ",
+  "baseline.kk": "กฎตรวจการปั่นจากงานวิจัยเดิม",
+  "baseline.random": "การเตือนแบบสุ่ม",
+  "baseline.pca": "วิธีลดมิติข้อมูล",
+};
 const EVAL_TARGETS = [
-  { id: "real_recall", label: "recall_any ≥ 0.8 · REAL (real_t001)", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true },
+  { id: "real_recall", label: "recall_any ≥ 0.8 · REAL (real_t001)", title: "จับเหตุการณ์ในข้อมูลจริง", experiment: "real_t001", variant: "full", metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true },
+  { id: "real_fa", label: "เตือนผิด ≤ งบ · REAL", title: "การเตือนผิดโดยเฉลี่ย", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2, capIsBudget: true },
+  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · REAL", title: "การเตือนผิดในวันปกติ", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
+  { id: "latency_p99", label: "compute latency p99 < 2 s", title: "ความเร็วในการเตือน", cmp: "none", threshold: 2 },
   ...["pump_burst", "pump_stealth", "wash_pingpong"].map((v) => ({
-    id: `semisyn_${v}`, label: `recall_any ≥ 0.8 · SEMI-SYN ${v}`, experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true,
+    id: `semisyn_${v}`, label: `recall_any ≥ 0.8 · SEMI-SYN ${v}`, title: SEMISYN_TH[v], experiment: "semisyn", variant: v, metric: "recall_any", budget: 2, cmp: ">=", threshold: 0.8, correct: true,
   })),
-  { id: "real_fa", label: "เตือนผิด ≤ งบ · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day", budget: 2, cmp: "<=", threshold: 2 },
-  { id: "real_fa_hard", label: "เตือนผิด (hard) ≤ 0 · REAL", experiment: "real_t001", variant: "full", metric: "fa_per_symbol_day_hard", budget: 2, cmp: "<=", threshold: 0 },
   ...["baseline.iforest", "stat.robust_z", "baseline.kk"].map((b) => ({
-    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
+    id: `ae_vs_${b}`, label: `AE เหนือ ${b}`, title: BASELINE_TH[b], experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0,
   })),
   ...["baseline.random", "baseline.pca"].map((b) => ({
-    id: `ae_vs_${b}`, label: `AE เทียบ ${b}`, experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0, reference: true,
+    id: `ae_vs_${b}`, label: `AE เทียบ ${b}`, title: BASELINE_TH[b], experiment: null, variant: b, metric: "recall_any", budget: 2, cmp: "pair", threshold: 0, reference: true,
   })),
-  { id: "latency_p99", label: "compute latency p99 < 2 s", cmp: "none", threshold: 2 },
 ];
 
 const state = {
@@ -2102,31 +2112,34 @@ function tickInjections() {
   }
 }
 
-// ------------------------------------------------------------------ eval
+// ------------------------------------------------------------------ results (eval)
 
 function evalEmpty(report) {
   return !report || !report.runs || !report.experiments;
 }
 
-// pass / miss / unmeasured: absent data is never a pass
-function targetVerdict(report, target) {
+// pass / miss / unmeasured: absent data is never a pass. `budget` (alerts per symbol-day) picks the
+// report cell; it defaults to the target's own, and a false-alarm cap of "≤ budget" follows it.
+function targetVerdict(report, target, budget) {
   const none = { state: "unmeasured", value: null, ci: null, n: null };
   if (evalEmpty(report) || target.cmp === "none") return none; // the report has no latency metric
+  const b = budget === null || budget === undefined || !Number.isFinite(Number(budget)) ? target.budget : Number(budget);
   if (target.cmp === "pair") {
     const paired = report.paired_bootstrap;
-    if (!paired || Number(paired.budget) !== Number(target.budget)) return none;
+    if (!paired || Number(paired.budget) !== b) return none;
     const found = (paired.rows || []).find((r) => r.baseline === target.variant);
     if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
     const st = target.reference ? "reference" : found.ci[0] > target.threshold ? "pass" : "miss";
     return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events };
   }
   const variants = report.experiments[target.experiment] || {};
-  const cell = (variants[target.variant] || {})[String(target.budget)];
+  const cell = (variants[target.variant] || {})[String(b)];
   const value = cell && cell.mean ? cell.mean[target.metric] : null;
   if (!isNum(value)) return none;
   const ci = cell.ci && Array.isArray(cell.ci[target.metric]) ? cell.ci[target.metric] : null;
-  const ok = target.cmp === ">=" ? value >= target.threshold : value <= target.threshold;
-  const out = { state: ok ? "pass" : "miss", value, ci, n: cell.n_events };
+  const cap = target.capIsBudget ? b : target.threshold;
+  const ok = target.cmp === ">=" ? value >= cap : value <= cap;
+  const out = { state: ok ? "pass" : "miss", value, ci, n: cell.n_events, unit: cell.ci_unit || null, seeds: cell.n_seeds };
   if (target.correct && isNum(cell.mean.recall_correct)) {
     const cc = cell.ci && cell.ci.recall_correct;
     out.correct = { value: cell.mean.recall_correct, ci: Array.isArray(cc) ? cc : null };
@@ -2135,12 +2148,157 @@ function targetVerdict(report, target) {
 }
 
 const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด", reference: "อ้างอิง" };
+// the plain badge: a glyph and a word, never colour alone
+const RESULT_BADGE = { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" };
+const RESULT_GLYPH = { pass: "✓", fail: "✗", none: "—" };
+const RESULT_STATE = { pass: "pass", miss: "fail", unmeasured: "none" }; // a reference card has no badge
+const PER_DAY_TH = "ครั้งต่อเหรียญต่อวัน";
+const MAIN_BUDGET = "2"; // the budget the project's targets are set at
 
-function fmtSigned(x) {
-  return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
+// 1.6498 -> "1.65", 11.17 -> "11.17", 2 -> "2"
+function fmtPlain(x) {
+  return String(Number(x.toFixed(2)));
 }
 
-function targetCard(target, verdict, index) {
+// one plain Thai sentence per card (spec 4.8); `extra` = { budget, k, n, ci }
+function resultSentence(target, value, extra) {
+  const x = extra || {};
+  const b = isNum(x.budget) ? x.budget : target.budget;
+  if (target.cmp === "none") return "ความเร็วในการเตือน: ยังไม่วัด";
+  if (target.cmp === "pair") {
+    const ci = x.ci;
+    if (!Array.isArray(ci) || !isNum(ci[0]) || !isNum(ci[1])) return "เทียบกับวิธีพื้นฐาน: ยังไม่วัดที่งบเตือนนี้";
+    // the 95% CI of the difference: wholly above 0, wholly below 0, or across it
+    return `เทียบกับวิธีพื้นฐาน: ${ci[0] > 0 ? "ดีกว่า" : ci[1] < 0 ? "แย่กว่า" : "ไม่ต่างอย่างมีนัยสำคัญ"}`;
+  }
+  if (target.metric === "recall_any") {
+    const at = `(เมื่อเตือนไม่เกิน ${fmtPlain(b)} ${PER_DAY_TH})`;
+    if (!isNum(value)) return `จับเหตุการณ์ที่มีบันทึกได้: ยังไม่มีผล ${at}`;
+    const got = isNum(x.k) && isNum(x.n) ? `${x.k} จาก ${x.n} ครั้ง` : `${Math.round(value * 100)}%`;
+    return `จับเหตุการณ์ที่มีบันทึกได้ ${got} ${at}`;
+  }
+  if (target.metric === "fa_per_symbol_day") {
+    return isNum(value) ? `เตือนผิดเฉลี่ย ${fmtPlain(value)} ${PER_DAY_TH}` : "เตือนผิดเฉลี่ย: ยังไม่มีผล";
+  }
+  if (target.metric === "fa_per_symbol_day_hard") {
+    return isNum(value) ? `เตือนผิดในวันที่ไม่มีเหตุการณ์ ${fmtPlain(value)} ครั้ง` : "เตือนผิดในวันที่ไม่มีเหตุการณ์: ยังไม่มีผล";
+  }
+  return "ยังไม่มีผล";
+}
+
+function resultGoal(target, budget) {
+  if (target.reference) return "ใช้เป็นจุดเทียบ ไม่มีเป้า";
+  if (target.cmp === "none") return `เป้า: ไม่เกิน ${target.threshold} วินาที`;
+  if (target.cmp === "pair") return "เป้า: ดีกว่าอย่างมีนัยสำคัญ";
+  if (target.metric === "recall_any") return `เป้า: อย่างน้อย ${Math.round(target.threshold * 100)}%`;
+  if (target.capIsBudget) return `เป้า: ไม่เกิน ${fmtPlain(budget)} ${PER_DAY_TH}`;
+  return `เป้า: ${fmtPlain(target.threshold)} ครั้ง`;
+}
+
+function resultBadge(st) {
+  return el(
+    "span",
+    { class: "result-badge", "data-state": st },
+    el("span", { "aria-hidden": "true" }, RESULT_GLYPH[st]),
+    ` ${RESULT_BADGE[st]}`,
+  );
+}
+
+// the last big number shown per card, so a budget change counts from it
+const resultShown = {};
+
+function resultCard(target, verdict, budget) {
+  const wide = target.id === "real_recall";
+  const st = RESULT_STATE[verdict.state] || null;
+  const extra = { budget, ci: verdict.ci };
+  // a count of events only where the unit is the event (a symbol-day ratio is no count)
+  if (verdict.unit === "event" && isNum(verdict.value) && isNum(verdict.n) && verdict.n > 0) {
+    extra.k = Math.round(verdict.value * verdict.n);
+    extra.n = verdict.n;
+  }
+  const card = el(
+    "div",
+    {
+      class: `card result-card${wide ? " result-wide" : ""}${target.reference ? " result-ref-card" : ""}`,
+      "data-target": target.id,
+      "data-state": st || "reference",
+    },
+    el(
+      "div",
+      { class: "result-head" },
+      el("h3", { class: "result-title" }, target.title),
+      st ? resultBadge(st) : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
+    ),
+  );
+  if (wide && isNum(verdict.value)) {
+    const pct = Math.round(verdict.value * 100);
+    const num = el("span", {}, String(isNum(resultShown[target.id]) ? resultShown[target.id] : pct));
+    card.appendChild(el("div", { class: "result-value" }, num, el("span", { class: "result-value-unit" }, "%")));
+    tweenNumber(num, pct, 0);
+    resultShown[target.id] = pct;
+    card.appendChild(
+      el(
+        "div",
+        { class: "result-bar", "aria-hidden": "true" },
+        el("span", { class: "result-fill", style: `width: ${Math.max(0, Math.min(100, pct))}%` }),
+        el("span", { class: "result-mark", style: `left: ${Math.round(target.threshold * 100)}%` }),
+      ),
+    );
+  }
+  card.appendChild(el("p", { class: "result-sentence" }, resultSentence(target, verdict.value, extra)));
+  const seeds = wide && isNum(verdict.seeds) && verdict.seeds > 1 ? ` · ค่าเฉลี่ยจากการทดสอบ ${verdict.seeds} รอบ` : "";
+  card.appendChild(el("p", { class: "result-goal small muted" }, resultGoal(target, budget) + seeds));
+  return card;
+}
+
+const RESULT_GROUPS = [
+  {
+    title: "ข้อมูลการซื้อขายจริงย้อนหลัง",
+    lead: "เทียบกับเหตุการณ์ที่มีบันทึกไว้แล้ว",
+    pick: (tg) => tg.experiment === "real_t001" || tg.cmp === "none",
+  },
+  {
+    title: "เหตุการณ์ปั่นจำลองที่ใส่ลงในข้อมูลจริง",
+    lead: "ใส่เหตุการณ์ที่รู้คำตอบอยู่แล้วลงไป แล้วดูว่าระบบจับได้เท่าไร",
+    pick: (tg) => tg.experiment === "semisyn",
+  },
+  {
+    title: "เทียบกับวิธีอื่น",
+    lead: "ตัวตรวจที่เรียนรู้รูปแบบการซื้อขายปกติ เทียบกับวิธีอื่นที่งบเตือนเดียวกัน",
+    pick: (tg) => tg.cmp === "pair",
+  },
+];
+
+function renderResultCards(box, report, budget) {
+  clear(box);
+  for (const g of RESULT_GROUPS) {
+    box.appendChild(
+      el(
+        "section",
+        { class: "result-group" },
+        el("h2", {}, g.title),
+        el("p", { class: "small muted result-lead" }, g.lead),
+        el(
+          "div",
+          { class: "result-cards" },
+          EVAL_TARGETS.filter(g.pick).map((t) => resultCard(t, targetVerdict(report, t, budget), budget)),
+        ),
+      ),
+    );
+  }
+}
+
+function committeeBox(...children) {
+  return el(
+    "details",
+    { class: "card committee" },
+    el("summary", {}, "รายละเอียดสำหรับกรรมการ"),
+    el("div", { class: "committee-body" }, children),
+  );
+}
+
+// the committee's view of the targets: ids, value, CI, n and the goal as the MVP spec states it
+function targetRow(target, verdict) {
   const paired = target.cmp === "pair";
   const goal =
     target.cmp === "none"
@@ -2149,23 +2307,40 @@ function targetCard(target, verdict, index) {
         ? "ไม่มีเป้า (อ้างอิง)"
         : paired
           ? "CI ขอบล่าง > 0"
-          : `${target.cmp === ">=" ? "≥" : "≤"} ${target.threshold}`;
+          : `${target.cmp === ">=" ? "≥" : "≤"} ${target.capIsBudget ? "งบ" : target.threshold}`;
   const none = verdict.state === "unmeasured";
   return el(
-    "div",
-    { class: `target ${verdict.state} rise`, style: `animation-delay: ${index * 50}ms` },
-    el("span", { class: "label" }, target.label),
-    el("strong", { class: `verdict ${verdict.state}` }, TARGET_STATE_TH[verdict.state]),
-    el("span", { class: "mono big" }, none ? "–" : paired ? fmtSigned(verdict.value) : fmtNum(verdict.value, 3)),
-    el(
-      "span",
-      { class: "small mono muted" },
-      none ? `เป้า ${goal}` : `${verdict.ci ? ciText(verdict.value, verdict.ci) : "ไม่มี CI"} · n ${verdict.n ?? "–"} · เป้า ${goal}`,
-    ),
-    verdict.correct
-      ? el("span", { class: "small mono muted" }, `recall_correct ${ciText(verdict.correct.value, verdict.correct.ci)}`)
-      : null,
+    "tr",
+    {},
+    el("td", { class: "mono" }, target.label),
+    el("td", {}, TARGET_STATE_TH[verdict.state]),
+    el("td", { class: "num mono" }, none ? "–" : paired ? `${fmtSigned(verdict.value)} [${fmtSigned(verdict.ci[0])}, ${fmtSigned(verdict.ci[1])}]` : ciText(verdict.value, verdict.ci)),
+    el("td", { class: "num" }, verdict.n ?? "–"),
+    el("td", { class: "mono" }, goal),
+    el("td", { class: "small mono muted" }, verdict.correct ? `recall_correct ${ciText(verdict.correct.value, verdict.correct.ci)}` : ""),
   );
+}
+
+function targetTable(report, budget) {
+  return el(
+    "div",
+    { class: "committee-sec" },
+    el("h3", {}, `เป้าหมายตามแผน (งบ ${budget} ครั้ง/สัญลักษณ์-วัน)`),
+    el(
+      "div",
+      { class: "table-wrap" },
+      el(
+        "table",
+        { class: "table" },
+        el("thead", {}, el("tr", {}, ["เป้า", "ผล", "ค่า [95% CI]", "n", "เกณฑ์", "หมายเหตุ"].map((h) => el("th", {}, h)))),
+        el("tbody", {}, EVAL_TARGETS.map((t) => targetRow(t, targetVerdict(report, t, budget)))),
+      ),
+    ),
+  );
+}
+
+function fmtSigned(x) {
+  return isNum(x) ? `${x >= 0 ? "+" : ""}${x.toFixed(3)}` : "–";
 }
 
 async function showEval() {
@@ -2180,70 +2355,94 @@ async function showEval() {
   }
   clear(box);
   if (evalEmpty(report)) {
-    box.appendChild(el("p", { class: "empty" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่"));
+    box.appendChild(
+      el("div", { class: "card empty-state" }, el("p", { class: "empty-text" }, "ยังไม่มีผลวัดระบบ เมื่อสร้างรายงานผลแล้วให้เปิดหน้านี้ใหม่")),
+    );
+    box.appendChild(committeeBox(el("p", { class: "small" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่")));
     return;
   }
-  box.appendChild(
-    el(
-      "p",
-      { class: "small muted" },
-      `ทั้งหมด ${report.runs} run · git ${(report.git_sha || []).join(", ") || "–"} · config ${(report.config_hash || []).join(", ") || "–"} · signatures ${(report.signatures_sha || []).join(", ") || "–"}`,
-    ),
-  );
-  box.appendChild(
-    el(
-      "p",
-      { class: "small muted" },
-      "ตัวเลขหลักคือ recall ต่อเหตุการณ์ (พร้อม 95% CI) และจำนวนการเตือนผิดต่อสัญลักษณ์-วัน precision แสดงคู่กับ prevalence เสมอ ทุกแถวมีป้ายที่มา",
-    ),
-  );
 
-  box.appendChild(el("h2", { class: "section-label" }, "เป้าหมาย (งบ 2 ครั้ง/สัญลักษณ์-วัน)"));
-  box.appendChild(el("div", { class: "targets" }, EVAL_TARGETS.map((t, i) => targetCard(t, targetVerdict(report, t), i))));
-
-  if (report.paired_bootstrap) box.appendChild(pairedCard(report.paired_bootstrap));
-  if (report.retrain_decision) {
-    box.appendChild(retrainCard("Champion / challenger (full stack)", report.retrain_decision));
-    if (report.retrain_decision.ai_only) box.appendChild(retrainCard("AE alone (diagnostic)", report.retrain_decision.ai_only));
-  }
-
-  const budgets = new Set();
+  const found = new Set();
   for (const variants of Object.values(report.experiments)) {
-    for (const cells of Object.values(variants)) Object.keys(cells).forEach((b) => budgets.add(b));
+    for (const cells of Object.values(variants)) Object.keys(cells).forEach((b) => found.add(b));
   }
-  const sorted = [...budgets].sort((a, b) => Number(a) - Number(b));
-  const select = el(
-    "select",
-    { "aria-label": "งบการแจ้งเตือน" },
-    sorted.map((b) => el("option", { value: b }, `${b} ครั้ง/สัญลักษณ์-วัน`)),
-  );
+  const budgets = [...found].sort((a, b) => Number(a) - Number(b));
   const saved = state.evalBudget;
-  select.value = sorted.includes(saved) ? saved : sorted.includes("2") ? "2" : sorted[0] || "";
-  const tables = el("div");
-  box.appendChild(el("div", { class: "toolbar" }, el("label", { class: "field" }, el("span", {}, "งบการแจ้งเตือน"), select)));
-  box.appendChild(tables);
-  const draw = () => {
-    clear(tables);
-    for (const [exp, variants] of Object.entries(report.experiments)) {
-      tables.appendChild(experimentTable(exp, variants, select.value));
-    }
-  };
-  select.addEventListener("change", () => {
-    draw();
-    const b = Number(select.value);
-    if (Number.isFinite(b)) {
-      state.evalBudget = String(b);
-      savePrefs({ eval_budget: b });
-    }
-  });
-  draw();
+  let budget = budgets.includes(saved) ? saved : budgets.includes(MAIN_BUDGET) ? MAIN_BUDGET : budgets[0] || MAIN_BUDGET;
 
-  const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
-  if (notes.length) {
-    box.appendChild(
-      el("details", { class: "card notes-box" }, el("summary", {}, "หมายเหตุวิธีวัด"), el("ul", { class: "small" }, notes.map((n) => el("li", {}, n)))),
+  // the chips: flat pills, one pressed; the plain cards and the committee tables follow them
+  const chips = el("div", { class: "budget-chips", role: "group", "aria-label": "งบเตือน ครั้งต่อวัน" });
+  const note = el("p", { class: "small muted budget-note" });
+  const plain = el("div", { class: "results-plain" });
+  const targets = el("div");
+  const tables = el("div");
+  const draw = () => {
+    for (const c of chips.children) c.setAttribute("aria-pressed", String(c.getAttribute("data-budget") === budget));
+    note.textContent = budget === MAIN_BUDGET ? "" : `เป้าหมายของโครงการตั้งไว้ที่งบเตือน ${MAIN_BUDGET} ครั้งต่อวัน`;
+    note.hidden = budget === MAIN_BUDGET;
+    renderResultCards(plain, report, Number(budget));
+    clear(targets).appendChild(targetTable(report, Number(budget)));
+    clear(tables);
+    for (const [exp, variants] of Object.entries(report.experiments)) tables.appendChild(experimentTable(exp, variants, budget));
+  };
+  for (const b of budgets) {
+    chips.appendChild(
+      el(
+        "button",
+        {
+          type: "button",
+          class: "budget-chip",
+          "data-budget": b,
+          "aria-pressed": "false",
+          onclick: () => {
+            if (budget === b) return;
+            budget = b;
+            state.evalBudget = b;
+            savePrefs({ eval_budget: Number(b) });
+            draw();
+          },
+        },
+        b,
+      ),
     );
   }
+  box.appendChild(
+    el(
+      "div",
+      { class: "budget-row" },
+      el("span", { class: "budget-label" }, "งบเตือน"),
+      chips,
+      el("span", { class: "budget-unit" }, "ครั้งต่อวัน"),
+    ),
+  );
+  box.appendChild(note);
+  box.appendChild(plain);
+
+  const notes = [...(report.notes || []), ...((report.paired_bootstrap || {}).notes || [])];
+  const retrain = report.retrain_decision;
+  box.appendChild(
+    committeeBox(
+      el(
+        "p",
+        { class: "small muted" },
+        `ทั้งหมด ${report.runs} run · git ${(report.git_sha || []).join(", ") || "–"} · config ${(report.config_hash || []).join(", ") || "–"} · signatures ${(report.signatures_sha || []).join(", ") || "–"}`,
+      ),
+      el(
+        "p",
+        { class: "small muted" },
+        "ตัวเลขหลักคือ recall ต่อเหตุการณ์ (พร้อม 95% CI) และจำนวนการเตือนผิดต่อสัญลักษณ์-วัน precision แสดงคู่กับ prevalence เสมอ ทุกแถวมีป้ายที่มา",
+      ),
+      targets,
+      report.paired_bootstrap ? pairedCard(report.paired_bootstrap) : null,
+      retrain ? retrainCard("Champion / challenger (full stack)", retrain) : null,
+      retrain && retrain.ai_only ? retrainCard("AE alone (diagnostic)", retrain.ai_only) : null,
+      tables,
+      notes.length
+        ? el("details", { class: "notes-box" }, el("summary", {}, "หมายเหตุวิธีวัด"), el("ul", { class: "small" }, notes.map((n) => el("li", {}, n))))
+        : null,
+    ),
+  );
+  draw();
 }
 
 function ciText(mean, ci) {
@@ -2293,7 +2492,7 @@ function experimentTable(exp, variants, budget) {
       ),
     );
   }
-  const card = el("div", { class: "card" }, el("h3", {}, exp));
+  const card = el("div", { class: "committee-sec" }, el("h3", {}, exp));
   if (!rows.length) {
     card.appendChild(el("p", { class: "muted small" }, "ไม่มีผลที่งบนี้"));
     return card;
@@ -2324,7 +2523,7 @@ function experimentTable(exp, variants, budget) {
 }
 
 function pairedCard(paired) {
-  const card = el("div", { class: "card" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
+  const card = el("div", { class: "committee-sec" }, el("h3", {}, `เทียบแบบจับคู่ (paired bootstrap) ที่งบ ${paired.budget} · ${paired.metric}`));
   if ((paired.rows || []).length) card.appendChild(forestPlot(paired));
   const rows = (paired.rows || []).map((row) =>
     el(
@@ -2425,7 +2624,7 @@ function whiskerChart(series, order) {
 function retrainCard(title, block) {
   const card = el(
     "div",
-    { class: "card" },
+    { class: "committee-sec" },
     el("div", { class: "detail-head" }, el("h3", {}, title), provenanceBadges(block.provenance)),
     el(
       "p",
@@ -2971,6 +3170,9 @@ if (typeof document !== "undefined") {
     reducedMotion,
     EVAL_TARGETS,
     targetVerdict,
+    resultSentence,
+    RESULT_BADGE,
+    showEval,
     evalEmpty,
     forestPlot,
     tweenNumber,

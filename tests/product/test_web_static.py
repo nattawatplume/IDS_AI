@@ -861,7 +861,58 @@ assert.strictEqual(m.targetVerdict(null, T("real_recall")).state, "unmeasured");
 assert.strictEqual(m.evalEmpty({ runs: 0 }), true);
 assert.strictEqual(m.evalEmpty(null), true);
 assert.strictEqual(m.evalEmpty({ runs: 3, experiments: {} }), false);
+// the chosen budget: the cell at that budget, and the false-alarm cap follows it
+const at = (recall, fa) => ({
+  mean: { recall_any: recall, fa_per_symbol_day: fa, fa_per_symbol_day_hard: 40 },
+  ci: {}, n_events: 200, ci_unit: "event" });
+const multi = { runs: 5,
+  experiments: { real_t001: { full: {
+    "2": cell(0.739, null, 200), "10": at(0.808, 6.1), "0.5": at(0.6, 0.9) } } },
+  paired_bootstrap: { budget: 2, metric: "recall_any", rows } };
+assert.strictEqual(m.targetVerdict(multi, T("real_recall"), 10).state, "pass");
+assert.strictEqual(m.targetVerdict(multi, T("real_recall"), 10).value, 0.808);
+assert.strictEqual(m.targetVerdict(multi, T("real_recall"), 10).unit, "event");
+// no budget: the target's own
+assert.strictEqual(m.targetVerdict(multi, T("real_recall")).value, 0.739);
+assert.strictEqual(m.targetVerdict(multi, T("real_fa"), 10).state, "pass"); // 6.1 <= 10
+assert.strictEqual(m.targetVerdict(multi, T("real_fa"), 0.5).state, "miss"); // 0.9 > 0.5
+assert.strictEqual(m.targetVerdict(multi, T("real_recall"), 0.1).state, "unmeasured");
+assert.strictEqual(m.targetVerdict(multi, T("ae_vs_baseline.iforest"), 2).state, "pass");
+assert.strictEqual(m.targetVerdict(multi, T("ae_vs_baseline.iforest"), 10).state, "unmeasured");
 """
+
+RESULT_SENTENCE_BODY = r"""
+const T = (id) => m.EVAL_TARGETS.find((t) => t.id === id);
+const s = m.resultSentence;
+assert.strictEqual(s(T("real_recall"), 0.739, { k: 148, n: 200, budget: 2 }),
+  "จับเหตุการณ์ที่มีบันทึกได้ 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+assert.strictEqual(s(T("semisyn_pump_burst"), 0.2955, { budget: 0.5 }),
+  "จับเหตุการณ์ที่มีบันทึกได้ 30% (เมื่อเตือนไม่เกิน 0.5 ครั้งต่อเหรียญต่อวัน)");
+assert.strictEqual(s(T("real_recall"), 0.739, {}),
+  "จับเหตุการณ์ที่มีบันทึกได้ 74% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+assert.strictEqual(s(T("real_fa"), 1.6498753, {}), "เตือนผิดเฉลี่ย 1.65 ครั้งต่อเหรียญต่อวัน");
+assert.strictEqual(s(T("real_fa_hard"), 11.169999, {}), "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
+assert.strictEqual(s(T("real_fa_hard"), 0, {}), "เตือนผิดในวันที่ไม่มีเหตุการณ์ 0 ครั้ง");
+const pair = T("ae_vs_baseline.iforest");
+assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3] }), "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+assert.strictEqual(s(pair, 0.05, { ci: [-0.1, 0.2] }), "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
+assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121] }), "เทียบกับวิธีพื้นฐาน: แย่กว่า");
+assert.strictEqual(s(T("ae_vs_baseline.pca"), 0.075, { ci: [0.035, 0.122] }),
+  "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+assert.strictEqual(s(T("latency_p99"), null, {}), "ความเร็วในการเตือน: ยังไม่วัด");
+assert.deepStrictEqual(m.RESULT_BADGE, { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" });
+// nothing measured is never a number in the sentence
+for (const t of m.EVAL_TARGETS) {
+  const said = s(t, null, { budget: 2 });
+  assert.ok(!/\d+(\.\d+)?%|\d+ จาก/.test(said.replace(/ไม่เกิน [\d.]+ ครั้ง/, "")), t.id + " " + said);
+  assert.ok(!/[A-Za-z]/.test(said), said);
+  assert.ok(!/[A-Za-z]/.test(t.title || ""), t.id);
+}
+"""
+
+
+def test_result_sentences(tmp_path):
+    _run_motion(tmp_path, "false", RESULT_SENTENCE_BODY)
 
 
 def test_target_verdicts(tmp_path):
@@ -2198,3 +2249,138 @@ SIM_REOPEN_BODY = r"""
 
 def test_simulate_cards_reopen_after_seek_play_or_mode_change(tmp_path):
     _run_dom(tmp_path, "true", SIM_REOPEN_BODY)
+
+
+# ---- results: plain cards, budget chips, committee details folded ----
+
+RESULTS_BODY = r"""
+(async () => {
+  const cell = (recall, fa, hard, unit, prov) => ({
+    provenance: prov, n_runs: 5, n_seeds: 5, n_events: 200, ci_unit: unit,
+    mean: { recall_any: recall, recall_correct: 0.4, fa_per_symbol_day: fa,
+      fa_per_symbol_day_hard: hard, precision: 0.11, prevalence: 0.0017, ttd_median_s: 5.8 },
+    ci: { recall_any: [recall - 0.05, recall + 0.05], recall_correct: [0.3, 0.5] },
+    rule_of_three: { recall_any: null, recall_correct: null } });
+  const every = (c) => ({ "0.1": c, "0.5": c, "2": c, "10": c });
+  const row = (baseline, diff, ci) => ({ baseline, diff_mean: diff, ci, n_events: 200, n_seeds: 5,
+    provenance: "REAL", significant: ci[0] > 0, reason_th: null });
+  const rep = {
+    runs: 500, git_sha: ["abc1234"], config_hash: ["53e3b662ab96"], signatures_sha: ["sig99"],
+    notes: ["หมายเหตุหนึ่ง"],
+    experiments: {
+      real_t001: { full: { "0.1": cell(0.54, 0.1, 1, "event", "REAL"),
+        "0.5": cell(0.638, 0.5, 3, "event", "REAL"),
+        "2": cell(0.739, 1.6498, 11.17, "event", "REAL"),
+        "10": cell(0.808, 6.1, 40, "event", "REAL") } },
+      semisyn: { pump_burst: every(cell(0.2955, 0.3, 1, "symbol-day", "SEMI-SYN")),
+        pump_stealth: every(cell(0.351, 0.3, 1, "symbol-day", "SEMI-SYN")),
+        wash_pingpong: every(cell(1, 0.3, 1, "symbol-day", "SEMI-SYN")) } },
+    paired_bootstrap: { budget: 2, metric: "recall_any", notes: [], rows: [
+      row("baseline.random", 0.639, [0.57, 0.7]), row("baseline.kk", -0.17, [-0.222, -0.121]),
+      row("baseline.iforest", -0.158, [-0.208, -0.111]), row("baseline.pca", 0.075, [0.035, 0.122]),
+      row("stat.robust_z", 0.005, [-0.033, 0.043])] },
+  };
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => rep });
+  const saved = [];
+  window.localStorage.setItem = (k, v) => saved.push([k, v]);
+  await m.showEval();
+  const box = document.getElementById("eval-body");
+  const isCommittee = (n) => n.tagName === "DETAILS" && n.children[0]
+    && n.children[0].tagName === "SUMMARY"
+    && n.children[0].textContent === "รายละเอียดสำหรับกรรมการ";
+  const committee = walk(box, isCommittee);
+  assert.strictEqual(committee.length, 1);
+  const det = committee[0];
+  assert.ok(!det.hasAttribute("open"), "closed by default");
+  // the visible text outside a folded subtree
+  const textOutside = (skip) => {
+    const go = (n) => (n === skip ? ""
+      : n.tagName === "#TEXT" ? n._text : n.children.map(go).join(" "));
+    return go;
+  };
+  const outside = textOutside(det);
+  const plain = outside(box);
+  assert.ok(!/[A-Za-z]/.test(plain), plain);
+  for (const no of ["τ", "53e3b662ab96", "_"]) assert.ok(!plain.includes(no), no);
+  // the forest plot, metric ids, config hash, run counts and provenance badges: inside only
+  const inside = det.textContent;
+  for (const s of ["recall_any", "53e3b662ab96", "500 run", "real_t001", "baseline.iforest",
+    "prevalence",     "REAL", "SEMI-SYN", "หมายเหตุวิธีวัด"]) {
+    assert.ok(inside.includes(s), s);
+  }
+  const forest = (n) => n.tagName === "SVG" && /\bforest\b/.test(n.attrs.class || "");
+  assert.strictEqual(walk(det, forest).length, 1);
+  assert.strictEqual(walk(box, forest).length, 1);
+  const prov = (n) => /\bbadge\b/.test(n.className)
+    && ["REAL", "SEMI-SYN", "SYN"].includes(n.textContent);
+  assert.ok(walk(det, prov).length > 0);
+  assert.strictEqual(walk(box, prov).length, walk(det, prov).length);
+
+  // plain cards: one per target, the recall card wide, the rest compact
+  const cards = () => walk(box, (n) => n.classList.contains("result-card"));
+  const card = (id) => cards().find((c) => c.getAttribute("data-target") === id);
+  assert.strictEqual(cards().length, m.EVAL_TARGETS.length);
+  const wide = cards().filter((c) => c.classList.contains("result-wide"));
+  assert.deepStrictEqual(wide.map((c) => c.getAttribute("data-target")), ["real_recall"]);
+  const badge = (id) => walk(card(id), (n) => n.classList.contains("result-badge"))[0];
+  const has = (id, s) => assert.ok(card(id).textContent.includes(s),
+    id + ": " + card(id).textContent);
+  has("real_recall", "จับเหตุการณ์ที่มีบันทึกได้ 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  assert.strictEqual(badge("real_recall").getAttribute("data-state"), "fail");
+  assert.strictEqual(badge("real_recall").textContent, "✗ ยังไม่ถึงเป้า");
+  has("real_fa", "เตือนผิดเฉลี่ย 1.65 ครั้งต่อเหรียญต่อวัน");
+  assert.strictEqual(badge("real_fa").textContent, "✓ ผ่านเป้า");
+  has("real_fa_hard", "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
+  has("semisyn_pump_burst", "จับเหตุการณ์ที่มีบันทึกได้ 30% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  has("ae_vs_baseline.iforest", "เทียบกับวิธีพื้นฐาน: แย่กว่า");
+  has("ae_vs_stat.robust_z", "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
+  for (const id of ["ae_vs_baseline.random", "ae_vs_baseline.pca"]) {
+    has(id, "วิธีเปรียบเทียบ");
+    has(id, "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+    assert.strictEqual(badge(id), undefined, id + " has no pass / fail");
+  }
+  has("latency_p99", "ความเร็วในการเตือน: ยังไม่วัด");
+  assert.strictEqual(badge("latency_p99").textContent, "— ยังไม่วัด");
+  assert.strictEqual(badge("latency_p99").getAttribute("data-state"), "none");
+
+  // budget chips: flat, the saved / default one pressed; a click redraws and is remembered
+  const chips = () => walk(box, (n) => n.classList.contains("budget-chip"));
+  assert.deepStrictEqual(chips().map((c) => c.textContent), ["0.1", "0.5", "2", "10"]);
+  const rowText = chips()[0].parentNode.parentNode.textContent;
+  assert.ok(rowText.startsWith("งบเตือน") && rowText.endsWith("ครั้งต่อวัน"), rowText);
+  const pressed = () => chips().map((c) => c.getAttribute("aria-pressed"));
+  assert.deepStrictEqual(pressed(), ["false", "false", "true", "false"]);
+  chips()[3].click();
+  assert.deepStrictEqual(pressed(), ["false", "false", "false", "true"]);
+  has("real_recall", "(เมื่อเตือนไม่เกิน 10 ครั้งต่อเหรียญต่อวัน)");
+  assert.strictEqual(badge("real_recall").textContent, "✓ ผ่านเป้า");
+  has("ae_vs_baseline.iforest", "ยังไม่วัด");
+  assert.deepStrictEqual(saved, [["idsai.eval_budget", "10"]]);
+  assert.strictEqual(walk(box, isCommittee).length, 1);
+  // the committee details survive a budget change
+  assert.strictEqual(walk(box, isCommittee)[0], det);
+  assert.ok(!/[A-Za-z]/.test(outside(box)), outside(box));
+
+  // no report yet: one plain line, the command folded into the committee details
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({ runs: 0 }) });
+  await m.showEval();
+  const emptyDet = walk(box, isCommittee);
+  assert.strictEqual(emptyDet.length, 1);
+  assert.ok(emptyDet[0].textContent.includes("uv run idsai report"));
+  const emptyPlain = textOutside(emptyDet[0]);
+  assert.ok(!/[A-Za-z]/.test(emptyPlain(box)), emptyPlain(box));
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_results_markup(tmp_path):
+    _run_dom(tmp_path, "true", RESULTS_BODY)
+    html, css = text("index.html"), text("styles.css")
+    page = re.search(r'<section id="page-results".*?</section>', html, re.S).group(0)
+    plain = re.sub(r"<!--.*?-->|<[^>]+>", " ", page, flags=re.S)
+    assert not re.search(r"[A-Za-z]", plain), plain
+    res = css[css.index("/* ---- results") : css.index("/* ---- /results")]
+    # chips are flat; the cards are glass; no gradient and nothing loops on this page
+    assert ".budget-chip" in res and "linear-gradient" not in res and "infinite" not in res
+    assert re.search(r"\.result-wide\s*\{[^}]*flex:\s*2", res)
