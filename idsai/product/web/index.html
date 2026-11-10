@@ -275,13 +275,6 @@
       <div id="eval-body"></div>
     </section>
 
-    <!-- Taxonomy: not routed; a later task moves it into the help drawer -->
-    <section id="page-taxonomy" class="page" hidden>
-      <h1>ATT&amp;CK for Markets</h1>
-      <p class="muted small">กรอบเทคนิคที่ทีมสร้างขึ้นเพื่อการศึกษา (ไม่ใช่มาตรฐานทางการ)</p>
-      <div id="taxonomy-body" class="cards"></div>
-    </section>
-
     <!-- Activity (admin) -->
     <section id="page-activity" class="page" hidden>
       <h1>กิจกรรม</h1>
@@ -308,60 +301,96 @@
       <p id="audit-empty" class="empty" hidden>ยังไม่มีบันทึก</p>
       <p><button id="audit-more" type="button">โหลดเก่ากว่านี้</button></p>
     </section>
-
-    <!-- About: not routed; a later task moves it into the help drawer -->
-    <section id="page-about" class="page prose" hidden>
-      <h1>เกี่ยวกับ Market IDS</h1>
-      <p>Market IDS เป็นต้นแบบเพื่อการศึกษาในวิชา CPE102 ใช้แนวคิดของระบบตรวจจับการบุกรุก (IDS) กับข้อมูลการซื้อขายคริปโตสาธารณะ
-        ระบบหาช่วงเวลาที่ตลาดผิดปกติทางสถิติเมื่อเทียบกับ 24 ชั่วโมงก่อนหน้า แล้วให้คนตรวจต่อ</p>
-
-      <h2>ระบบไม่ได้ทำอะไร</h2>
-      <ul>
-        <li>ไม่ซื้อขาย ไม่มีโค้ดส่งคำสั่ง ไม่มีที่ใส่ API key และไม่ใช่คำแนะนำการลงทุน</li>
-        <li>การแจ้งเตือนทุกครั้งคือ "พบความผิดปกติทางสถิติ" ไม่ได้บอกว่ามีการปั่นราคา และไม่ได้บอกว่าใครทำ ข้อมูลสาธารณะไม่มีตัวตนของผู้ซื้อขาย</li>
-        <li>ค่า p รวม (F) คือความหายากเทียบตลาดปกติ บอกแค่ว่าช่วงนั้นหายากแค่ไหน ไม่ได้บอกว่าเกิดการปั่นราคาขึ้นจริง</li>
-        <li>Red-Team ใช้ได้เฉพาะโหมด replay และ sim ในโหมด LIVE ระบบปฏิเสธเสมอ</li>
-      </ul>
-
-      <h2>ข้อจำกัดของข้อมูล</h2>
-      <ul>
-        <li>คลังข้อมูลย้อนหลังของ Binance spot มีแค่การซื้อขาย ไม่มีสมุดคำสั่ง (order book) จึงตรวจ spoofing / layering จากข้อมูลจริงไม่ได้</li>
-        <li>ป้ายเหตุการณ์จริงมาจากประกาศใน Telegram เป็นคู่เหรียญกับ BTC ช่วงปี 2018–2022 เท่านั้น และไม่ครบทุกเหตุการณ์</li>
-        <li>ผล SEMI-SYN มาจากเหตุการณ์จำลองที่ใส่ลงในวันปกติจริง บอกได้แค่ว่าจับรูปแบบที่จำลองได้แค่ไหน</li>
-        <li>precision แสดงคู่กับ prevalence เสมอ และทุกตัวเลขมีป้ายที่มา REAL / SEMI-SYN / SYN</li>
-        <li>ชุดเดโมมีแค่ไม่กี่วัน ใช้สาธิตการทำงาน ไม่ใช้วัดผล</li>
-      </ul>
-      <p class="muted small">รายละเอียดอยู่ใน docs/ETHICS.md และ docs/DATA_LIMITATIONS.md ของโปรเจกต์</p>
-
-      <h2>วิธีอ่านกราฟและคะแนน</h2>
-      <ul>
-        <li>กราฟบนคือราคาปิด ลูกศรคือจุดที่พบความผิดปกติทางสถิติ กราฟล่างคือ F (ค่า p รวม) แสดงเป็น −log10 p ยิ่งสูงยิ่งหายากเทียบตลาดปกติ เส้นประ τ คือเกณฑ์แจ้งเตือน</li>
-        <li>L1 กฎ (rule), L2 สถิติ (stat), L3 AI แสดง −log10 p ของแต่ละชั้นแยกกัน</li>
-      </ul>
-
-      <h2>ข้อควรระวังในการอ่านผลประเมิน</h2>
-      <ul>
-        <li>หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้</li>
-        <li>τ saturated: งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้ τ จึงถูกตั้งที่ค่า F บวกที่เล็กที่สุด
-          หรือเหนือค่า F ทั้งหมดเมื่อไม่มีค่า F บวกเลย (เช่น กฎที่ไม่เคยทำงานในช่วงสอบเทียบ) งบจึงไม่ได้ถูกทดสอบกับข้อมูลจริง</li>
-      </ul>
-
-      <h2>ที่มาของข้อมูลและซอฟต์แวร์</h2>
-      <ul>
-        <li>ข้อมูลการซื้อขาย: <a href="https://data.binance.vision/" rel="noopener noreferrer" target="_blank">Binance Vision</a>
-          (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" rel="noopener noreferrer" target="_blank">CC BY-NC-SA 4.0</a>) ใช้แบบไม่แสวงหากำไร</li>
-        <li>กราฟ: <a href="https://www.tradingview.com/" rel="noopener noreferrer" target="_blank">TradingView</a> Lightweight Charts™ 5.2.1
-          (<a href="https://github.com/tradingview/lightweight-charts" rel="noopener noreferrer" target="_blank">ซอร์สโค้ด</a>,
-          <a href="https://www.apache.org/licenses/LICENSE-2.0" rel="noopener noreferrer" target="_blank">Apache License 2.0</a>)
-          Copyright TradingView, Inc. ไฟล์ NOTICE อยู่ที่ <a href="vendor/NOTICE-lightweight-charts">vendor/NOTICE-lightweight-charts</a></li>
-        <li>บันทึกเหตุการณ์ปั่นราคา: SystemsLab-Sapienza (MIT) และ Hu et al. (ผู้ใช้ดาวน์โหลดเอง ไม่แจกจ่ายต่อ)</li>
-      </ul>
-    </section>
   </main>
+
+  <!-- Help: opened by "?", the footer link and the old #/about, #/taxonomy links -->
+  <div id="help-backdrop" class="overlay-backdrop" hidden></div>
+  <aside id="help-drawer" class="help-drawer" role="dialog" aria-modal="true" aria-labelledby="help-title" tabindex="-1" hidden>
+    <header class="help-head">
+      <h2 id="help-title">วิธีใช้</h2>
+      <button id="help-close" class="icon-btn" type="button" aria-label="ปิดวิธีใช้">×</button>
+    </header>
+    <div class="help-body">
+      <section id="help-about" aria-labelledby="help-about-h">
+        <h3 id="help-about-h">ระบบนี้ทำอะไร</h3>
+        <p>Market IDS ดูข้อมูลการซื้อขายคริปโตสาธารณะอย่างต่อเนื่อง แล้วหาช่วงเวลาที่ผิดไปจากปกติทางสถิติเมื่อเทียบกับ 24 ชั่วโมงก่อนหน้า
+          เมื่อพบ ระบบจะแจ้งเตือนและบอกว่าคล้ายรูปแบบใด เพื่อให้คนตรวจต่อ</p>
+        <p>ทุกการแจ้งเตือนคือความผิดปกติทางสถิติ ไม่ได้บอกว่ามีการปั่นราคา และไม่ได้บอกว่าใครเป็นคนทำ เพราะข้อมูลสาธารณะไม่มีตัวตนของผู้ซื้อขาย</p>
+        <p><strong>ระบบนี้ไม่ทำอะไร:</strong> ไม่ซื้อขาย ไม่ให้คำแนะนำการลงทุน และไม่กล่าวหาใคร</p>
+        <p>ต้นแบบนี้ทำเพื่อการศึกษา ใช้สาธิตวิธีตรวจ ไม่ใช่เครื่องมือตัดสินใจ</p>
+        <details class="help-more">
+          <summary>ข้อจำกัดและที่มาของข้อมูล</summary>
+          <h4>ข้อจำกัดของข้อมูล</h4>
+          <ul>
+            <li>คลังข้อมูลย้อนหลังของ Binance spot มีแค่การซื้อขาย ไม่มีสมุดคำสั่ง (order book) จึงตรวจ spoofing / layering จากข้อมูลจริงไม่ได้</li>
+            <li>ป้ายเหตุการณ์จริงมาจากประกาศใน Telegram เป็นคู่เหรียญกับ BTC ช่วงปี 2018–2022 เท่านั้น และไม่ครบทุกเหตุการณ์</li>
+            <li>ผล SEMI-SYN มาจากเหตุการณ์จำลองที่ใส่ลงในวันปกติจริง บอกได้แค่ว่าจับรูปแบบที่จำลองได้แค่ไหน</li>
+            <li>precision แสดงคู่กับ prevalence เสมอ และทุกตัวเลขมีป้ายที่มา REAL / SEMI-SYN / SYN</li>
+            <li>ชุดเดโมมีแค่ไม่กี่วัน ใช้สาธิตการทำงาน ไม่ใช้วัดผล</li>
+            <li>ค่า p รวม (F) คือความหายากเทียบตลาดปกติ บอกแค่ว่าช่วงนั้นหายากแค่ไหน ไม่ได้บอกว่าเกิดการปั่นราคาขึ้นจริง</li>
+          </ul>
+          <p class="muted small">รายละเอียดอยู่ใน docs/ETHICS.md และ docs/DATA_LIMITATIONS.md ของโปรเจกต์</p>
+          <h4>ข้อควรระวังในการอ่านผลประเมิน</h4>
+          <ul>
+            <li>หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้</li>
+            <li>τ saturated: งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้ τ จึงถูกตั้งที่ค่า F บวกที่เล็กที่สุด
+              หรือเหนือค่า F ทั้งหมดเมื่อไม่มีค่า F บวกเลย (เช่น กฎที่ไม่เคยทำงานในช่วงสอบเทียบ) งบจึงไม่ได้ถูกทดสอบกับข้อมูลจริง</li>
+          </ul>
+          <h4>ที่มาของข้อมูลและซอฟต์แวร์</h4>
+          <ul>
+            <li>ข้อมูลการซื้อขาย: <a href="https://data.binance.vision/" rel="noopener noreferrer" target="_blank">Binance Vision</a>
+              (<a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" rel="noopener noreferrer" target="_blank">CC BY-NC-SA 4.0</a>) ใช้แบบไม่แสวงหากำไร</li>
+            <li>กราฟ: <a href="https://www.tradingview.com/" rel="noopener noreferrer" target="_blank">TradingView</a> Lightweight Charts™ 5.2.1
+              (<a href="https://github.com/tradingview/lightweight-charts" rel="noopener noreferrer" target="_blank">ซอร์สโค้ด</a>,
+              <a href="https://www.apache.org/licenses/LICENSE-2.0" rel="noopener noreferrer" target="_blank">Apache License 2.0</a>)
+              Copyright TradingView, Inc. ไฟล์ NOTICE อยู่ที่ <a href="vendor/NOTICE-lightweight-charts">vendor/NOTICE-lightweight-charts</a></li>
+            <li>บันทึกเหตุการณ์ปั่นราคา: SystemsLab-Sapienza (MIT) และ Hu et al. (ผู้ใช้ดาวน์โหลดเอง ไม่แจกจ่ายต่อ)</li>
+          </ul>
+        </details>
+      </section>
+
+      <section id="help-patterns" aria-labelledby="help-patterns-h">
+        <h3 id="help-patterns-h">รูปแบบที่ระบบมองหา</h3>
+        <p class="muted small">กรอบที่ทีมสร้างขึ้นเพื่อการศึกษา ไม่ใช่มาตรฐานทางการ</p>
+        <div id="help-taxonomy" class="help-patterns"></div>
+      </section>
+
+      <section id="help-terms" aria-labelledby="help-terms-h">
+        <h3 id="help-terms-h">คำศัพท์</h3>
+        <dl class="help-terms">
+          <dt>ระดับความผิดปกติ</dt>
+          <dd>เส้นสีม่วงบนกราฟ ยิ่งสูงแปลว่าช่วงนั้นหายากเมื่อเทียบกับตลาดปกติ ไม่ได้บอกว่าเกิดการปั่นราคาจริง</dd>
+          <dt>เส้นเตือน</dt>
+          <dd>เส้นประสีส้ม เมื่อระดับความผิดปกติข้ามเส้นนี้ ระบบจะแจ้งเตือน</dd>
+          <dt>ย้อนดู</dt>
+          <dd>เล่นข้อมูลในอดีตซ้ำเหมือนเกิดขึ้นตอนนี้ ใช้สาธิตและทดลองได้</dd>
+          <dt>ทดลองจำลอง</dt>
+          <dd>ใส่เหตุการณ์ปั่นราคาจำลองลงในข้อมูลที่ย้อนดู เพื่อดูว่าระบบจับได้เร็วแค่ไหน ทำได้เฉพาะตอนย้อนดู</dd>
+          <dt>ผิดปกติจริง / เตือนผิด</dt>
+          <dd>ผลที่ผู้ตรวจบันทึกหลังอ่านแจ้งเตือน ผิดปกติจริงคือเห็นด้วยว่าช่วงนั้นผิดปกติ เตือนผิดคือตลาดปกติดี ระบบเตือนเกินไป</dd>
+        </dl>
+        <p><button id="help-tour" type="button">เริ่มทัวร์</button></p>
+      </section>
+    </div>
+  </aside>
+
+  <!-- First-time tour: a spotlight and one bubble -->
+  <div id="tour" class="tour" hidden>
+    <div id="tour-spot" class="tour-spot"></div>
+    <div id="tour-bubble" class="tour-bubble glass" role="dialog" aria-modal="true" aria-labelledby="tour-text" tabindex="-1">
+      <p id="tour-count" class="tour-count small muted"></p>
+      <p id="tour-text" class="tour-text"></p>
+      <div class="tour-actions">
+        <button id="tour-skip" type="button">ข้าม</button>
+        <button id="tour-next" class="primary" type="button">ถัดไป</button>
+        <button id="tour-done" class="primary" type="button" hidden>เสร็จ</button>
+      </div>
+    </div>
+  </div>
 
   <footer id="site-footer" class="footer small muted" hidden>
     ข้อมูล: Binance Vision (CC BY-NC-SA 4.0) · กราฟ: TradingView Lightweight Charts™ ·
-    เพื่อการศึกษาเท่านั้น ไม่ใช่คำแนะนำการลงทุน · <a href="#/about">ที่มาและข้อจำกัด</a>
+    เพื่อการศึกษาเท่านั้น ไม่ใช่คำแนะนำการลงทุน · <a id="footer-about" href="#/about">ที่มาและข้อจำกัด</a>
   </footer>
 
   <script src="vendor/lightweight-charts.standalone.production.js"></script>

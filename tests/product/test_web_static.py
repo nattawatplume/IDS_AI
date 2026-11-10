@@ -978,7 +978,7 @@ def test_long_explanations_live_on_about():
         if 'id="chart-info-body"' in m.group(1):
             continue
         assert len(" ".join(m.group(2).split())) <= 120, m.group(2)[:60]
-    about = re.search(r'<section id="page-about".*?</section>', html, re.S).group(0)
+    about = re.search(r'<aside id="help-drawer".*?</aside>', html, re.S).group(0)
     assert "τ saturated" in about or "τ-saturated" in about
     assert "งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้" in about
     assert "autocorrelation" in about
@@ -1300,7 +1300,7 @@ def test_boot_view(tmp_path):
 def test_boot_shows_only_loader_until_me_resolves():
     html = text("index.html")
     pages = re.findall(r'<section\b[^>]*\bclass="[^"]*\bpage\b[^"]*"[^>]*>', html)
-    assert len(pages) >= 8, pages
+    assert len(pages) >= 7, pages
     for tag in pages:
         assert re.search(r"\shidden\b", tag), tag
     for tag in ("header", "footer"):  # nothing but the background and the loader at first
@@ -2412,3 +2412,123 @@ def test_results_markup(tmp_path):
     # chips are flat; the cards are glass; no gradient and nothing loops on this page
     assert ".budget-chip" in res and "linear-gradient" not in res and "infinite" not in res
     assert re.search(r"\.result-wide\s*\{[^}]*flex:\s*2", res)
+
+
+# ---- help drawer, first-time tour, tour_done ----
+
+TOUR_BODY = r"""
+assert.strictEqual(m.tourShouldShow({}, true, null), true);
+assert.strictEqual(m.tourShouldShow({ tour_done: true }, true, null), false);
+assert.strictEqual(m.tourShouldShow({}, false, "1"), false);
+assert.strictEqual(m.tourShouldShow({}, false, null), true);
+// auth off reads only this browser
+assert.strictEqual(m.tourShouldShow({ tour_done: true }, false, null), true);
+assert.deepStrictEqual(m.TOUR_STEPS.map((s) => s.target),
+  ["#hero-title", "#chart-card", '[data-route="alerts"]', '[data-route="simulate"]']);
+assert.strictEqual(m.TOUR_STEPS[1].text,
+  "เส้นม่วงคือระดับความผิดปกติ ถ้าข้ามเส้นเตือนสีส้ม ระบบจะแจ้งเตือน");
+const view = { w: 375, h: 812 };
+const mid = m.placeBubble(null, view);
+assert.strictEqual(mid.centred, true);
+assert.ok(mid.left >= 0 && mid.top >= 0);
+const low = m.placeBubble({ top: 760, left: 100, width: 100, height: 40 }, view);
+assert.strictEqual(low.centred, false);
+assert.ok(low.top + 190 <= 760 && low.top >= 0, "above the target, inside the screen");
+const high = m.placeBubble({ top: 20, left: 300, width: 70, height: 30 }, view);
+assert.ok(high.top >= 50, "below the target");
+const edges = [
+  { top: 0, left: 0, width: 10, height: 10 },
+  { top: 800, left: 370, width: 40, height: 40 },
+  { top: 400, left: 350, width: 120, height: 40 }];
+for (const r of edges) {
+  const p = m.placeBubble(r, view);
+  const inside = p.left >= 0 && p.left + 320 <= 375 && p.top >= 0 && p.top + 190 <= 812;
+  assert.ok(inside, JSON.stringify(p));
+}
+"""
+
+
+def test_tour_pref_rule_and_bubble_placement(tmp_path):
+    _run_motion(tmp_path, "false", TOUR_BODY)
+
+
+TOUR_MISSING_BODY = r"""
+document.querySelector = () => null; // a narrow screen: no target is on the page
+m.setRoute("home");
+m.startTour();
+const bubble = document.getElementById("tour-bubble");
+assert.strictEqual(document.getElementById("tour").hidden, false);
+assert.ok(bubble.classList.contains("centred"), "a missing target centres the bubble");
+m.endTour();
+assert.strictEqual(document.getElementById("tour").hidden, true);
+assert.strictEqual(globalThis.window.localStorage.getItem("idsai.tour_done"), "1");
+console.log("ok");
+"""
+
+
+def test_tour_step_with_missing_target_centres(tmp_path):
+    body = (
+        'const keep = {}; globalThis.window = { localStorage: { getItem: (k) => keep[k] ?? null,'
+        " setItem: (k, v) => { keep[k] = String(v); } } };\n"
+        'm.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });\n'
+        + TOUR_MISSING_BODY
+    )
+    _run_dom(tmp_path, "false", body)
+
+
+HELP_TAX_BODY = r"""
+const tax = {
+  "MM-T001": { name_th: "การปั่นราคาแบบพุ่งเร็ว (Pump)", definition_th: "ราคาและปริมาณพุ่งในเวลาสั้น. ต่อ",
+    observability_th: "ดูได้", reference: "Kamps 2018",
+    sub_techniques: [{ id: "MM-T001.1", name_th: "ย่อย", definition_th: "x" }] },
+  "MM-T000": { name_th: "ไม่จัดประเภท", definition_th: "d" },
+};
+const box = document.getElementById("help-taxonomy");
+m.renderHelpTaxonomy(box, tax);
+const walk2 = (n, f) => { f(n); n.children.forEach((c) => walk2(c, f)); };
+let outside = "";
+let inside = "";
+walk2(box, (n) => { if (n.tagName === "DETAILS") inside += n.textContent; });
+const strip = (n) => {
+  if (n.tagName === "DETAILS") return "";
+  return n.tagName === "#TEXT" ? n._text : n.children.map(strip).join("");
+};
+outside = strip(box);
+assert.ok(!outside.includes("MT-") && !outside.includes("MM-"), outside);
+assert.ok(outside.includes("การปั่นราคาแบบพุ่งเร็ว"), outside);
+assert.ok(!/[A-Za-z]/.test(outside), outside); // no English in the plain view
+assert.ok(inside.includes("Kamps 2018"), inside);
+const summaries = walk(box, (n) => n.tagName === "SUMMARY").map((n) => n.textContent);
+assert.deepStrictEqual(summaries, ["แหล่งอ้างอิง"]);
+m.renderHelpTaxonomy(box, null);
+assert.ok(box.textContent.length > 0);
+console.log("ok");
+"""
+
+
+def test_help_drawer_taxonomy_has_no_ids(tmp_path):
+    _run_dom(tmp_path, "false", HELP_TAX_BODY)
+
+
+def test_help_and_tour_markup():
+    html = text("index.html")
+    drawer = re.search(r'<aside id="help-drawer".*?</aside>', html, re.S).group(0)
+    for heading in ("ระบบนี้ทำอะไร", "รูปแบบที่ระบบมองหา", "คำศัพท์"):
+        assert re.search(rf"<h3[^>]*>{heading}</h3>", drawer), heading
+    assert "ระบบนี้ไม่ทำอะไร" in drawer
+    for term in ("ระดับความผิดปกติ", "เส้นเตือน", "ย้อนดู", "ทดลองจำลอง", "ผิดปกติจริง"):
+        assert term in drawer, term
+    assert "เริ่มทัวร์" in drawer and 'id="help-taxonomy"' in drawer
+    tour = re.search(r'<div id="tour".*?\n  </div>\n', html, re.S).group(0)
+    for label in ("ถัดไป", "ข้าม", "เสร็จ"):
+        assert f">{label}</button>" in tour, label
+    js = text("app.js")
+    assert js.count('"Escape"') >= 1 and "keydown" in js
+    esc = js[js.index("function onOverlayKey(") :]
+    esc = esc[: esc.index("\n}\n")]
+    assert "Escape" in esc and "closeHelp()" in esc and "endTour()" in esc and "Tab" in esc
+    # the leftovers are gone: About and Taxonomy only live in the drawer now
+    assert 'id="page-about"' not in html and 'id="page-taxonomy"' not in html
+    assert "function showTaxonomy" not in js and 'href: "#/taxonomy"' not in js
+    css = text("styles.css")
+    assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 4, 20, 0.6)" in css

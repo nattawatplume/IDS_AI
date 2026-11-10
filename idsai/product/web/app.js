@@ -424,11 +424,236 @@ function parentTechnique(id) {
 
 // ------------------------------------------------------------------ top bar
 
-// the help drawer: a later task fills it; until then "?" and the old #/about, #/taxonomy links do nothing
-function openHelp() {}
+// ------------------------------------------------------------------ help drawer + tour
 
-// the first-time tour: a later task fills it
-function startTour() {}
+const TOUR_KEY = "idsai.tour_done";
+const TOUR_STEPS = [
+  { target: "#hero-title", text: "ดูตรงนี้ก่อน บอกว่าตอนนี้ตลาดปกติหรือไม่" },
+  { target: "#chart-card", text: "เส้นม่วงคือระดับความผิดปกติ ถ้าข้ามเส้นเตือนสีส้ม ระบบจะแจ้งเตือน" },
+  { target: '[data-route="alerts"]', text: "รายการแจ้งเตือนทั้งหมด กดเข้าไปเพื่ออ่านคำอธิบายและบันทึกผลตรวจ" },
+  { target: '[data-route="simulate"]', text: "ลองใส่การปั่นจำลองแล้วดูว่าระบบจับได้เร็วแค่ไหน" },
+];
+const BUBBLE_W = 320;
+const BUBBLE_H = 190; // the guess used until the real height can be measured
+const BUBBLE_GAP = 12;
+const BUBBLE_MARGIN = 16;
+const SPOT_PAD = 6;
+const FOCUSABLE = 'button:not([disabled]), a[href], summary, input, select, [tabindex]:not([tabindex="-1"])';
+
+const helpState = { open: false, returnTo: null };
+const tourState = { open: false, i: 0, returnTo: null };
+
+// the tour shows once per user: the account's pref when auth is on, this browser's otherwise
+function tourShouldShow(prefs, auth, stored) {
+  return auth ? !(prefs && prefs.tour_done) : stored !== "1";
+}
+
+function markTourDone() {
+  if (authOn()) {
+    state.me.prefs = { ...(state.me.prefs || {}), tour_done: true }; // no second tour this session
+    savePrefs({ tour_done: true });
+  } else {
+    storageSet(TOUR_KEY, "1");
+  }
+}
+
+// where the bubble goes: below the target, above it when there is no room, centred without a target;
+// always fully inside the viewport. `size` is the measured bubble, when known
+function placeBubble(rect, viewport, size) {
+  const vw = viewport.w;
+  const vh = viewport.h;
+  const bw = Math.min((size && size.w) || BUBBLE_W, vw - 2 * BUBBLE_MARGIN);
+  const bh = (size && size.h) || BUBBLE_H;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+  const left = (x) => Math.round(clamp(x, BUBBLE_MARGIN, vw - bw - BUBBLE_MARGIN));
+  const top = (y) => Math.round(clamp(y, BUBBLE_MARGIN, vh - bh - BUBBLE_MARGIN));
+  if (!rect) return { top: top((vh - bh) / 2), left: left((vw - bw) / 2), centred: true };
+  const below = rect.top + rect.height + BUBBLE_GAP;
+  const above = rect.top - BUBBLE_GAP - bh;
+  let y = below;
+  if (below + bh > vh - BUBBLE_MARGIN) y = above >= BUBBLE_MARGIN ? above : vh - bh - BUBBLE_MARGIN;
+  return { top: top(y), left: left(rect.left + rect.width / 2 - bw / 2), centred: false };
+}
+
+function focusables(root) {
+  return Array.from(root.querySelectorAll(FOCUSABLE)).filter(
+    (n) => !n.hidden && (typeof n.getClientRects !== "function" || n.getClientRects().length > 0),
+  );
+}
+
+// Tab stays inside `root`
+function trapTab(ev, root) {
+  const items = focusables(root);
+  if (!items.length) {
+    ev.preventDefault();
+    root.focus();
+    return;
+  }
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  if (!root.contains(active) || (ev.shiftKey && active === first)) {
+    ev.preventDefault();
+    (ev.shiftKey ? last : first).focus();
+  } else if (!ev.shiftKey && active === last) {
+    ev.preventDefault();
+    first.focus();
+  }
+}
+
+function restoreFocus(node) {
+  if (node && typeof node.focus === "function" && node.isConnected !== false) node.focus();
+}
+
+// Escape closes the tour or the drawer, Tab stays inside it; true while one is open (no other key acts)
+function onOverlayKey(ev) {
+  if (!tourState.open && !helpState.open) return false;
+  if (ev.key === "Escape") {
+    ev.preventDefault();
+    if (tourState.open) endTour();
+    else closeHelp();
+  } else if (ev.key === "Tab") {
+    trapTab(ev, tourState.open ? $("tour-bubble") : $("help-drawer"));
+  }
+  return true;
+}
+
+// the taxonomy as plain cards: the Thai name and one line; the citation sits in a closed "แหล่งอ้างอิง"
+function renderHelpTaxonomy(box, tax) {
+  clear(box);
+  for (const [id, t] of Object.entries(tax || {})) {
+    const name = thaiTechniqueName(tax, id);
+    if (!name) continue;
+    box.appendChild(
+      el(
+        "div",
+        { class: "help-card" },
+        el("h4", {}, name),
+        el("p", { class: "small" }, firstSentence(t.definition_th)),
+        t.reference ? el("details", { class: "help-more" }, el("summary", {}, "แหล่งอ้างอิง"), el("p", { class: "small muted" }, t.reference)) : null,
+      ),
+    );
+  }
+  if (!box.firstChild) box.appendChild(el("p", { class: "empty" }, "ยังโหลดรายการรูปแบบไม่ได้"));
+}
+
+// `where`: the id of a drawer section to scroll to
+function openHelp(where) {
+  const drawer = $("help-drawer");
+  if (!drawer || tourState.open) return;
+  if (!helpState.open) {
+    helpState.returnTo = document.activeElement || null;
+    helpState.open = true;
+    $("help-backdrop").hidden = false;
+    drawer.hidden = false;
+    flash(drawer, "enter");
+    loadTaxonomy().then((tax) => renderHelpTaxonomy($("help-taxonomy"), tax));
+  }
+  const section = typeof where === "string" ? $(where) : null;
+  if (section && typeof section.scrollIntoView === "function") section.scrollIntoView({ block: "start" });
+  $("help-close").focus();
+}
+
+function closeHelp() {
+  if (!helpState.open) return;
+  helpState.open = false;
+  $("help-drawer").hidden = true;
+  $("help-backdrop").hidden = true;
+  restoreFocus(helpState.returnTo);
+  helpState.returnTo = null;
+}
+
+function showTourStep(i) {
+  const step = TOUR_STEPS[i];
+  if (!step) return;
+  tourState.i = i;
+  let target = null;
+  try {
+    target = document.querySelector(step.target);
+  } catch (e) {
+    /* a missing or odd target means a centred bubble */
+  }
+  const vw = (typeof window !== "undefined" && window.innerWidth) || 360;
+  const vh = (typeof window !== "undefined" && window.innerHeight) || 640;
+  let rect = null;
+  if (target && typeof target.getBoundingClientRect === "function") {
+    if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "nearest" });
+    const b = target.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0) {
+      const top = Math.max(0, b.top - SPOT_PAD);
+      const left = Math.max(0, b.left - SPOT_PAD);
+      rect = {
+        top,
+        left,
+        width: Math.min(vw, b.right + SPOT_PAD) - left,
+        height: Math.min(vh, b.bottom + SPOT_PAD) - top,
+      };
+    }
+  }
+  const spot = $("tour-spot");
+  spot.classList.toggle("none", !rect);
+  for (const k of ["top", "left", "width", "height"]) spot.style[k] = rect ? `${Math.round(rect[k])}px` : "";
+  $("tour-text").textContent = step.text;
+  $("tour-count").textContent = `ขั้นที่ ${i + 1} จาก ${TOUR_STEPS.length}`;
+  const last = i === TOUR_STEPS.length - 1;
+  $("tour-next").hidden = last;
+  $("tour-done").hidden = !last;
+  const bubble = $("tour-bubble");
+  const measured = bubble.offsetHeight > 0 ? { w: bubble.offsetWidth, h: bubble.offsetHeight } : null;
+  const at = placeBubble(rect, { w: vw, h: vh }, measured);
+  bubble.classList.toggle("centred", at.centred);
+  bubble.style.top = `${at.top}px`;
+  bubble.style.left = `${at.left}px`;
+  (last ? $("tour-done") : $("tour-next")).focus();
+}
+
+function startTour() {
+  if (tourState.open) return;
+  if (helpState.open) closeHelp();
+  tourState.open = true;
+  tourState.returnTo = document.activeElement || null;
+  $("tour").hidden = false;
+  showTourStep(0);
+  if (state.route !== "home") {
+    location.hash = DEFAULT_ROUTE; // the first two targets live on Home: look again once it shows
+    setTimeout(() => {
+      if (tourState.open && tourState.i === 0) showTourStep(0);
+    }, 200);
+  }
+}
+
+// any way out counts as seen: finished, skipped or Escape
+function endTour() {
+  if (!tourState.open) return;
+  tourState.open = false;
+  $("tour").hidden = true;
+  markTourDone();
+  restoreFocus(tourState.returnTo);
+  tourState.returnTo = null;
+}
+
+function maybeStartTour() {
+  if (state.route === "home" && !helpState.open && tourShouldShow(loadedPrefs(), authOn(), storageGet(TOUR_KEY))) {
+    startTour();
+  }
+}
+
+function bindHelp() {
+  $("help-btn").addEventListener("click", () => openHelp());
+  $("help-close").addEventListener("click", closeHelp);
+  $("help-backdrop").addEventListener("click", closeHelp);
+  $("help-tour").addEventListener("click", startTour);
+  $("tour-next").addEventListener("click", () => showTourStep(tourState.i + 1));
+  $("tour-skip").addEventListener("click", endTour);
+  $("tour-done").addEventListener("click", endTour);
+  $("footer-about").addEventListener("click", (ev) => {
+    ev.preventDefault();
+    openHelp();
+  });
+  window.addEventListener("resize", () => {
+    if (tourState.open) showTourStep(tourState.i);
+  });
+}
 
 // ------------------------------------------------------------------ motion + presenter keys
 
@@ -511,6 +736,7 @@ function noteReplayAction(action) {
 }
 
 function onPresenterKey(ev) {
+  if (onOverlayKey(ev)) return; // the drawer or the tour owns the keys while it is open
   if (state.view !== "app" || state.route === "login") return; // nothing to present before sign-in
   const act = presenterKey(ev);
   if (!act) return;
@@ -1644,7 +1870,7 @@ function techniqueCard(tax, techniqueId) {
     el("p", { class: "small" }, t.definition_th || ""),
     sub ? el("p", { class: "small" }, el("strong", { class: "mono" }, sub.id), ` ${sub.name_th || ""}: ${sub.definition_th || ""}`) : null,
     el("p", { class: "small muted" }, t.observability_th || ""),
-    el("p", { class: "small" }, el("a", { href: "#/taxonomy" }, "ดู taxonomy ทั้งหมด")),
+    el("p", { class: "small" }, el("button", { type: "button", class: "link-btn", onclick: () => openHelp("help-patterns") }, "ดูรูปแบบทั้งหมดที่ระบบมองหา")),
   ]);
   return card;
 }
@@ -2664,37 +2890,6 @@ function retrainCard(title, block) {
   return card;
 }
 
-// ------------------------------------------------------------------ taxonomy
-
-async function showTaxonomy() {
-  const box = $("taxonomy-body");
-  const tax = await loadTaxonomy();
-  clear(box);
-  if (!tax) {
-    box.appendChild(el("p", { class: "empty" }, "โหลด taxonomy ไม่สำเร็จ"));
-    return;
-  }
-  for (const [id, t] of Object.entries(tax)) {
-    box.appendChild(
-      el(
-        "div",
-        { class: "tax-row" },
-        el("h3", {}, el("span", { class: "mono" }, id), ` ${t.name_th || ""}`),
-        el("p", { class: "small" }, t.definition_th || ""),
-        el("p", { class: "small muted" }, t.observability_th || ""),
-        (t.sub_techniques || []).length
-          ? el(
-              "ul",
-              { class: "small tax-subs" },
-              t.sub_techniques.map((s) => el("li", {}, el("span", { class: "mono" }, s.id), ` ${s.name_th || ""}: ${s.definition_th || ""}`)),
-            )
-          : null,
-        t.reference ? el("p", { class: "small muted" }, `อ้างอิง: ${t.reference}`) : null,
-      ),
-    );
-  }
-}
-
 // ------------------------------------------------------------------ router
 
 const PAGES = {
@@ -3115,11 +3310,12 @@ async function enterApp() {
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
+  maybeStartTour();
 }
 
 async function boot() {
   window.addEventListener("hashchange", safely(route));
-  $("help-btn").addEventListener("click", openHelp);
+  bindHelp();
   $("menu-tour").addEventListener("click", () => {
     $("user-chip").open = false;
     startTour();
@@ -3216,6 +3412,15 @@ if (typeof document !== "undefined") {
     onAlert,
     showToast,
     showAlert,
+    TOUR_STEPS,
+    tourShouldShow,
+    markTourDone,
+    placeBubble,
+    renderHelpTaxonomy,
+    startTour,
+    endTour,
+    openHelp,
+    closeHelp,
     setRoute: (r) => {
       state.route = r;
     },
