@@ -361,3 +361,49 @@ def test_registry_gives_up_on_a_permanent_rename_lock(tmp_path, small_fit, monke
     with pytest.raises(RuntimeError, match="could not claim"):
         ModelRegistry(tmp_path).save(det, meta(seed=1))
     assert ModelRegistry(tmp_path).versions(det.name) == []
+
+
+def test_plan_constant_matches_torch_net():
+    from idsai.ai import autoencoder as ae
+
+    assert ae._PLAN == [("0", True), ("2", False), ("3", True), ("5", False)]
+    assert ae._PLAN == ae._layer_plan()
+
+
+def test_serve_path_works_without_torch():
+    import subprocess
+    import sys
+
+    code = """
+import sys
+class _Block:
+    # acts like torch is not installed; a None sentinel breaks scipy.stats probing
+    def find_spec(self, name, path=None, target=None):
+        if name == "torch" or name.startswith("torch."):
+            raise ModuleNotFoundError("No module named torch (blocked)", name="torch")
+sys.meta_path.insert(0, _Block())
+import idsai.cli, idsai.product.api
+from idsai.ai.autoencoder import AutoencoderDetector
+from idsai.config import AECfg
+import numpy as np, polars as pl
+rng = np.random.default_rng(0)
+f32 = lambda *s: rng.standard_normal(s).astype(np.float32)
+net = {
+    "0.weight": f32(4, 2), "0.bias": f32(4),
+    "2.weight": f32(2, 4), "2.bias": f32(2),
+    "3.weight": f32(4, 2), "3.bias": f32(4),
+    "5.weight": f32(2, 4), "5.bias": f32(2),
+}
+det = AutoencoderDetector(["a", "b"], AECfg(hidden=4, bottleneck=2))
+det.load_state_dict({
+    "features": ["a", "b"], "cfg": AECfg(hidden=4, bottleneck=2).model_dump(), "seed": 0,
+    "center": np.zeros(2), "scale": np.ones(2), "net": net,
+})
+s = det.score(pl.DataFrame({"a": [0.1, 1.0, -2.0], "b": [0.3, 0.0, 5.0]}))
+assert s.shape == (3,) and np.isfinite(s).all()
+assert "torch" not in sys.modules
+print("ok")
+"""
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "ok" in r.stdout

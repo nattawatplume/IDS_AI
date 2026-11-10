@@ -10,7 +10,8 @@ rows with any non-finite feature, sort by `(t_end_us, symbol)`, hold out the las
 order) for early stopping and restore the best-validation weights. A `RobustScaler` is fit on
 the training part only; scaled inputs are clipped to `±clip` at fit and score time.
 
-Torch is used for training only. `fit` runs single-threaded with deterministic algorithms and a
+Torch is used for training only and is imported lazily inside `fit` (the serve path never
+loads it). `fit` runs single-threaded with deterministic algorithms and a
 seeded RNG (same seed and data give the same weights); torch's global thread count,
 deterministic flag and CPU RNG state are saved and restored under a module lock. The trained
 weights are exported to float64 NumPy and scoring is a pure-NumPy forward pass that uses only
@@ -29,9 +30,7 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-import torch
 from sklearn.preprocessing import RobustScaler
-from torch import nn
 
 from idsai.config import AECfg
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
@@ -45,6 +44,8 @@ _TORCH_STATE_LOCK = threading.Lock()  # concurrent fits must not interleave torc
 @contextlib.contextmanager
 def _torch_determinism(seed: int) -> Iterator[None]:
     """Single thread + deterministic algorithms + seeded CPU RNG; restores global state."""
+    import torch
+
     with _TORCH_STATE_LOCK:
         threads = torch.get_num_threads()
         det = torch.are_deterministic_algorithms_enabled()
@@ -60,7 +61,9 @@ def _torch_determinism(seed: int) -> Iterator[None]:
             torch.set_num_threads(threads)
 
 
-def _build_net(d: int, hidden: int, bottleneck: int) -> nn.Sequential:
+def _build_net(d: int, hidden: int, bottleneck: int) -> Any:
+    from torch import nn
+
     return nn.Sequential(
         nn.Linear(d, hidden),
         nn.ReLU(),
@@ -73,6 +76,8 @@ def _build_net(d: int, hidden: int, bottleneck: int) -> nn.Sequential:
 
 def _layer_plan() -> list[tuple[str, bool]]:
     """`(state-dict key prefix, ReLU follows)` for each Linear of `_build_net`, in order."""
+    from torch import nn
+
     plan: list[tuple[str, bool]] = []
     for i, m in enumerate(_build_net(1, 1, 1)):
         if isinstance(m, nn.Linear):
@@ -82,7 +87,7 @@ def _layer_plan() -> list[tuple[str, bool]]:
     return plan
 
 
-_PLAN = _layer_plan()
+_PLAN: list[tuple[str, bool]] = [("0", True), ("2", False), ("3", True), ("5", False)]
 
 Layer = tuple[np.ndarray, np.ndarray, bool]  # (W^T as (in, out) float64, bias float64, relu)
 
@@ -157,6 +162,9 @@ class AutoencoderDetector(Detector):
         return x[np.isfinite(x).all(axis=1)]
 
     def fit(self, normal: pl.DataFrame) -> None:
+        import torch
+        from torch import nn
+
         x = self._training_rows(normal)
         n = x.shape[0]
         if n == 0:
@@ -169,7 +177,7 @@ class AutoencoderDetector(Detector):
         scaler = RobustScaler().fit(x_train)
         center, scale = scaler.center_.copy(), scaler.scale_.copy()
 
-        def prep(a: np.ndarray) -> torch.Tensor:
+        def prep(a: np.ndarray) -> Any:
             z = np.clip((a - center) / scale, -self.cfg.clip, self.cfg.clip)
             return torch.from_numpy(z.astype(np.float32))
 

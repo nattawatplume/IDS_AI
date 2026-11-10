@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: market-ids
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: IDSAI_USERS
+        sync: false
