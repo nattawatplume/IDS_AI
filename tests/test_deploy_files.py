@@ -115,6 +115,10 @@ def test_dockerfile_two_stages():
         assert stage.index("chown user:user /home/user/app") < stage.index("USER user")
         assert "uv sync --frozen --no-dev" in stage
     assert "EXPOSE 7860" in runtime
+    assert (
+        "ENV POLARS_MAX_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1"
+        in runtime
+    )
     assert "deploy/start.sh" in runtime
 
 
@@ -175,6 +179,14 @@ def test_readme_hosting_section():
         "main",
         "รีสตาร์ต",
         "60 วัน",
+        "ในหน้าเดียวกันเปลี่ยน Branch เป็น `feat/mvp`",
+        "ชื่อ:admin:รหัสผ่าน",
+        "/api/health",
+        "คัดลอกชื่อโฮสต์จริง",
+        "After CI checks pass",
+        "Clear build cache & deploy",
+        "1–3 นาที",
+        "5–20 นาที",
         "ใช้ร่วมกัน",
     ):
         assert want in section

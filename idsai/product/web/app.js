@@ -3059,7 +3059,7 @@ function route() {
 
 let loginFails = 0;
 
-// inside someone else's frame (e.g. the huggingface.co Space page) the browser drops the
+// inside someone else's frame (e.g. a reverse proxy or an embedding page) the browser drops the
 // SameSite=Strict cookie, so sign-in cannot stick: say so and link to the site itself
 function isFramed(win) {
   try {

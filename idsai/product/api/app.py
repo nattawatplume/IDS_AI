@@ -238,8 +238,8 @@ def _health_probe(scope: Scope) -> bool:
 class HostAllowlist:
     """ASGI middleware: HTTP and WebSocket requests whose `Host` (port ignored, IPv6 in brackets)
     is not in `allowed` get 400 with a Thai hint; a WebSocket is refused before it is accepted.
-    `GET`/`HEAD /api/health` skips the check: a host's own probes (e.g. Hugging Face) call it by
-    an internal IP, and it returns nothing private."""
+    `GET`/`HEAD /api/health` skips the check: a host's own probes (a platform health check) call it
+    by an internal IP, and it returns nothing private."""
 
     def __init__(self, app: ASGIApp, allowed: list[str]):
         self.app = app

@@ -40,6 +40,8 @@ COPY --from=build --chown=user /home/user/app/data /home/user/app/data
 RUN test -w data && test -w data/app.duckdb
 
 ENV PATH=/home/user/app/.venv/bin:$PATH
+# 0.1 CPU box: one thread per pool avoids throttling; results unchanged.
+ENV POLARS_MAX_THREADS=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 EXPOSE 7860
 CMD ["sh", "deploy/start.sh"]
