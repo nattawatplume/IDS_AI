@@ -223,3 +223,125 @@ ____
 - ระบบล็อกอินปิดอยู่โดยปริยาย ถ้าจะเปิดให้เครื่องอื่นเข้า ต้องเปิดระบบล็อกอินก่อน (ดูหัวข้อ "ระบบล็อกอิน")
 - `--speed` ต้องมากกว่า 0 ความเร็ว 0 (เร็วสุด) ตั้งได้ผ่าน API ควบคุมการเล่นซ้ำ แต่ API จะตอบช้าลง (ราว 140 มิลลิวินาที)
 - ผลการตรวจจับต้องให้คนตรวจต่อเสมอ ดู `docs/DATA_LIMITATIONS.md` และ `docs/ETHICS.md`
+  
+---
+
+## Future Development & Applications
+
+### Overview
+
+Market IDS is designed with an extensible architecture that can be further developed beyond cryptocurrency market surveillance. Its core concepts — anomaly detection, statistical analysis, machine learning, and real-time monitoring — can be adapted to other markets and data-driven environments.
+
+The long-term vision is to evolve Market IDS from a cryptocurrency anomaly detection system into a multi-market intelligence platform capable of monitoring, analyzing, and identifying unusual market behaviors across different financial markets.
+
+### 1. Cross-Market Applications
+
+The anomaly detection framework can potentially be adapted to support different types of financial markets, including:
+
+| Market | Potential Applications |
+|---|---|
+| Cryptocurrency | Detect unusual trading volume, abnormal price movements, and potential pump-and-dump patterns. |
+| Stock Market | Identify unusual trading activity, abnormal price movements, and sudden changes in market behavior. |
+| Forex Market | Monitor unusual exchange rate movements and abnormal currency market volatility. |
+| Commodity Market | Detect unusual price and trading activity in gold, oil, and other commodities. |
+| Energy Market | Monitor abnormal changes in energy prices, supply, and market activity. |
+
+Each market has different characteristics, data structures, trading sessions, and liquidity conditions. Therefore, adapting Market IDS to a new market requires appropriate data integration, feature engineering, model training, and detection threshold calibration.
+
+### 2. Multi-Market Architecture
+
+A major direction for future development is transforming Market IDS into a multi-market detection platform that can monitor multiple markets within a unified system.
+
+Potential architectural improvements include:
+
+- **Multi-Source Data Integration:** Support multiple data providers and market data sources through independent data connectors.
+- **Market-Specific Processing:** Process and normalize incoming data according to the characteristics of each market.
+- **Adaptive Detection Models:** Develop detection models that learn the normal behavior of individual markets and assets.
+- **Unified Detection Engine:** Combine rule-based, statistical, and AI-based detection methods within a common framework.
+- **Cross-Market Monitoring:** Monitor multiple markets simultaneously and identify unusual activities across different assets.
+- **Centralized Dashboard:** Provide a unified interface for monitoring alerts, market conditions, and detection results.
+
+This architecture would allow new markets to be integrated without requiring a complete redesign of the existing detection system.
+
+### 3. AI & Machine Learning Enhancements
+
+Market IDS can be extended with additional AI and machine learning capabilities to improve anomaly detection and market analysis.
+
+Potential enhancements include:
+
+- **Adaptive Learning:** Allow models to adapt to changing market behavior and evolving market conditions.
+- **Advanced Anomaly Detection:** Experiment with additional machine learning algorithms to identify complex and previously unseen patterns.
+- **Anomaly Classification:** Classify detected anomalies into different categories to help users understand the nature of each event.
+- **Explainable AI (XAI):** Provide more detailed explanations of which features and factors contributed to an anomaly score.
+- **Model Comparison:** Evaluate different machine learning models against the existing detection system to determine their effectiveness.
+- **Continuous Model Evaluation:** Monitor model performance over time and identify model degradation or changes in data patterns.
+
+All new models and detection methods should be evaluated using historical data and controlled experiments before being considered for production use.
+
+### 4. Cross-Market Intelligence
+
+Beyond detecting individual anomalies, Market IDS could be extended to analyze relationships between unusual events occurring across different markets.
+
+Potential capabilities include:
+
+- **Cross-Market Anomaly Correlation:** Identify unusual activities occurring in multiple markets within similar time periods.
+- **Event Relationship Analysis:** Analyze possible relationships between abnormal movements in different assets and markets.
+- **Market Behavior Analysis:** Study how unusual market conditions develop and change over time.
+- **Historical Event Comparison:** Compare newly detected anomalies with previously recorded events to identify similar patterns.
+- **Market-Wide Alerting:** Generate alerts when multiple related anomalies are detected across different markets.
+
+These capabilities could help analysts understand broader market conditions and investigate events that may not be visible when monitoring a single market independently.
+
+Detected correlations should not automatically be interpreted as causal relationships. Further investigation is required to understand the underlying causes of each event.
+
+### 5. Platform Expansion & Integration
+
+In the long term, Market IDS could evolve into a broader market surveillance and intelligence platform through additional integrations and services.
+
+Possible extensions include:
+
+- **Web-Based Monitoring:** Expand the dashboard to support multiple markets, assets, and monitoring configurations.
+- **Notification Integration:** Support external notification channels such as Email, Telegram, or other messaging platforms.
+- **Historical Analytics:** Provide advanced historical analysis, event comparison, and anomaly statistics.
+- **Automated Reporting:** Generate reports summarizing detected anomalies, market conditions, and model performance.
+- **External API Integration:** Provide standardized APIs for other applications and analytical systems to consume detection results.
+- **Research Tools:** Support researchers and developers in experimenting with different anomaly detection techniques and market datasets.
+
+### 6. Future Development Roadmap
+
+The following roadmap describes a possible development direction for Market IDS.
+
+| Phase | Development Focus |
+|---|---|
+| Phase 1 | Improve the existing cryptocurrency anomaly detection system, model performance, and evaluation framework. |
+| Phase 2 | Expand cryptocurrency coverage to support additional assets and data sources. |
+| Phase 3 | Introduce additional market integrations, including stocks, forex, and commodities. |
+| Phase 4 | Develop multi-market monitoring, cross-market anomaly analysis, and relationship detection. |
+| Phase 5 | Evolve the platform into a comprehensive Market Intelligence system supporting multiple financial markets. |
+
+The roadmap represents potential future development directions rather than currently implemented features.
+
+### 7. Limitations & Considerations for Expansion
+
+Although the core anomaly detection concepts can be applied to different markets, each market has unique characteristics that must be considered before deployment.
+
+Important considerations include:
+
+- **Data Availability:** Different markets may have different data providers, access restrictions, and data quality.
+- **Market Characteristics:** Trading hours, liquidity, volatility, and market structures vary between markets.
+- **Feature Engineering:** Detection features must be designed according to the characteristics of each market.
+- **Model Adaptation:** Models trained on one market should not be assumed to perform effectively on another market without additional training and evaluation.
+- **Detection Calibration:** Thresholds and alert sensitivity must be adjusted to reduce false positives and false negatives.
+- **Scalability:** Monitoring multiple markets requires efficient data processing, storage, and system resource management.
+- **Security & Compliance:** External integrations and deployments must consider data security, access control, and applicable regulations.
+
+Market IDS is intended to support market monitoring, anomaly detection, and analytical research. Its alerts indicate statistically unusual behavior and do not establish market manipulation, illegal activity, or investment opportunities. All detected events require further investigation and human review.
+
+---
+
+## Long-Term Vision
+
+The long-term goal of Market IDS is to become an extensible Market Intelligence platform that combines artificial intelligence, statistical analysis, and multi-market data integration to identify unusual market behaviors across different financial environments.
+
+By expanding beyond cryptocurrency and introducing cross-market analysis, the platform aims to provide a foundation for more comprehensive market surveillance, anomaly research, and data-driven decision support.
+
