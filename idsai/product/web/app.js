@@ -181,6 +181,8 @@ function safeNext(raw) {
 // the session is gone (expired, signed out elsewhere): forget the user, or route() would send
 // the sign-in page straight back to `next`, and every page that fetches would 401 in a loop
 function sessionLost() {
+  closeTour(false); // the tour and the drawer belong to the app, not the sign-in page
+  closeHelp();
   setMe(null);
   const chip = typeof document !== "undefined" ? $("user-chip") : null;
   if (chip) chip.hidden = true;
@@ -501,8 +503,25 @@ function trapTab(ev, root) {
   }
 }
 
+// false when the node or an ancestor is hidden, or it sits inside a closed <details> (not as its summary)
+function isShown(node) {
+  for (let n = node, child = null; n; child = n, n = n.parentNode) {
+    if (n.hidden === true) return false;
+    if (n.tagName === "DETAILS" && !n.open && !(child && child.tagName === "SUMMARY")) return false;
+  }
+  return true;
+}
+
+// back to where the user was; when that is hidden now (the tour button inside a closed menu),
+// the user chip's summary, else the help button
 function restoreFocus(node) {
-  if (node && typeof node.focus === "function" && node.isConnected !== false) node.focus();
+  let to = node && typeof node.focus === "function" && node.isConnected !== false && isShown(node) ? node : null;
+  if (!to) {
+    const chip = $("user-chip");
+    const summary = chip && !chip.hidden && typeof chip.querySelector === "function" ? chip.querySelector("summary") : null;
+    to = summary || $("help-btn");
+  }
+  if (to && typeof to.focus === "function") to.focus();
 }
 
 // Escape closes the tour or the drawer, Tab stays inside it; true while one is open (no other key acts)
@@ -622,14 +641,18 @@ function startTour() {
   }
 }
 
-// any way out counts as seen: finished, skipped or Escape
-function endTour() {
+// any way out counts as seen: finished, skipped or Escape; a lost session is not "seen"
+function closeTour(seen) {
   if (!tourState.open) return;
   tourState.open = false;
   $("tour").hidden = true;
-  markTourDone();
+  if (seen) markTourDone();
   restoreFocus(tourState.returnTo);
   tourState.returnTo = null;
+}
+
+function endTour() {
+  closeTour(true);
 }
 
 function maybeStartTour() {
@@ -648,7 +671,8 @@ function bindHelp() {
   $("tour-done").addEventListener("click", endTour);
   $("footer-about").addEventListener("click", (ev) => {
     ev.preventDefault();
-    openHelp();
+    if (state.view === "app") openHelp();
+    else state.pendingHelp = true; // no help over the loader or the sign-in page
   });
   window.addEventListener("resize", () => {
     if (tourState.open) showTourStep(tourState.i);
@@ -3419,6 +3443,42 @@ if (typeof document !== "undefined") {
     renderHelpTaxonomy,
     startTour,
     endTour,
+    // every Thai UI string table: the copy guard in the tests reads these
+    copyTables: () => ({
+      SEVERITY_TH,
+      STATUS_TH,
+      CHECK_TH,
+      CHECK_NAME_TH,
+      VIEWER_REPLAY_TH,
+      VIEWER_VERDICT_TH,
+      VERDICT_TH,
+      SIM_WAIT_TH,
+      SIM_OFFSET_TH,
+      SIM_PAST_END_TH,
+      SIM_SYMBOL_TH,
+      SIM_FAILED_TH,
+      REPLAY_ENDED_TH,
+      SEMISYN_TH,
+      BASELINE_TH,
+      NEED_ANALYST_TH,
+      ROLE_TH,
+      MODE_TH,
+      TARGET_STATE_TH,
+      NO_TARGET_TH,
+      PER_DAY_TH,
+      SIM_REASON,
+      RESULT_BADGE,
+      SIM_CARDS: SIM_CARDS.map((c) => ({ title: c.title, line: c.line })),
+      TOUR_STEPS,
+      ALERT_FILTERS,
+      SPEED_CHIPS,
+    }),
+    sessionLost,
+    bindHelp,
+    helpIsOpen: () => helpState.open,
+    setView: (v) => {
+      state.view = v;
+    },
     openHelp,
     closeHelp,
     setRoute: (r) => {

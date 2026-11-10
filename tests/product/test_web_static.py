@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 
 import numpy as np
@@ -2532,3 +2533,176 @@ def test_help_and_tour_markup():
     assert "function showTaxonomy" not in js and 'href: "#/taxonomy"' not in js
     css = text("styles.css")
     assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 4, 20, 0.6)" in css
+
+
+# ---- copy guard and session-loss polish ----
+
+CODE_WORDS = (
+    "MT-T", "recall_any", "config_hash", "pump_burst", "pump_stealth", "wash_pingpong",
+    "region", "τ", "L1/L2/L3", "ยินดีต้อนรับ", "อัจฉริยะ", "ล้ำสมัย", "ทรงพลัง",
+)  # fmt: skip
+
+
+class _PlainText(HTMLParser):
+    """The text a user sees by default: nothing inside <details>, <script> or <style>."""
+
+    def __init__(self):
+        super().__init__()
+        self.skip = 0
+        self.out: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("details", "script", "style"):
+            self.skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in ("details", "script", "style") and self.skip:
+            self.skip -= 1
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+
+COPY_DUMP = r"""
+const m = require(process.argv[2]);
+console.log(JSON.stringify(m.copyTables()));
+"""
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def test_default_view_has_no_code_words(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    parser = _PlainText()
+    parser.feed(text("index.html"))
+    script = tmp_path / "copy.js"
+    script.write_text("globalThis.matchMedia = () => ({ matches: false });" + COPY_DUMP, "utf-8")
+    cmd = [node, str(script), str(WEB_DIR / "app.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    tables = json.loads(r.stdout)
+    # a new *_TH table must be added to copyTables(), or this guard would not see it
+    declared = set(re.findall(r"^const (\w+_TH)\b", text("app.js"), re.M))
+    assert declared <= set(tables), declared - set(tables)
+    pool = {"index.html": " ".join(parser.out)}
+    for name, value in tables.items():
+        pool[name] = " ".join(_strings(value))
+    for where, body in pool.items():
+        for word in CODE_WORDS:
+            assert word not in body, f"{word!r} in {where}"
+
+
+LOST_BODY = r"""
+const keep = {};
+globalThis.window = { localStorage: {
+  getItem: (k) => keep[k] ?? null, setItem: (k, v) => { keep[k] = String(v); } } };
+document.querySelector = () => null;
+location.hash = "#/home";
+m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
+m.setRoute("home");
+const tour = document.getElementById("tour");
+const drawer = document.getElementById("help-drawer");
+// the session dies in the middle of the tour: the tour closes and is not marked seen
+m.startTour();
+assert.strictEqual(tour.hidden, false);
+m.sessionLost();
+assert.strictEqual(tour.hidden, true);
+assert.strictEqual(keep["idsai.tour_done"], undefined, "a lost session is not a finished tour");
+// ... and in the middle of the drawer
+m.openHelp();
+assert.strictEqual(drawer.hidden, false);
+m.sessionLost();
+assert.strictEqual(drawer.hidden, true);
+assert.strictEqual(document.getElementById("help-backdrop").hidden, true);
+assert.ok(location.hash.startsWith("#/login"));
+console.log("ok");
+"""
+
+
+def test_session_lost_closes_the_tour_and_the_drawer(tmp_path):
+    _run_dom(tmp_path, "false", LOST_BODY)
+
+
+FOCUS_BODY = r"""
+document.querySelector = () => null;
+m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
+m.setRoute("home");
+const chip = document.getElementById("user-chip");
+chip.tagName = "DETAILS";
+chip.open = false;
+const summary = new Node("summary");
+chip.appendChild(summary);
+chip.querySelector = (q) => (q === "summary" ? summary : null);
+const menuTour = new Node("button");
+chip.appendChild(menuTour);
+const helpBtn = document.getElementById("help-btn");
+let focused = null;
+for (const n of [summary, menuTour, helpBtn]) n.focus = () => { focused = n; };
+// the tour was started from a menu that is closed now: focus goes to the chip's summary
+document.activeElement = menuTour;
+m.startTour();
+focused = null;
+m.endTour();
+assert.strictEqual(focused, summary);
+// the chip itself is hidden (no account): the help button
+chip.hidden = true;
+document.activeElement = menuTour;
+m.startTour();
+focused = null;
+m.endTour();
+assert.strictEqual(focused, helpBtn);
+// the drawer opened from a visible control gives focus back to it
+chip.hidden = false;
+const visible = new Node("button");
+visible.focus = () => { focused = visible; };
+document.activeElement = visible;
+m.openHelp();
+m.closeHelp();
+assert.strictEqual(focused, visible);
+// ... but not to one that went into a closed menu meanwhile
+document.activeElement = menuTour;
+m.openHelp();
+focused = null;
+m.closeHelp();
+assert.strictEqual(focused, summary);
+console.log("ok");
+"""
+
+
+def test_focus_falls_back_when_the_origin_is_hidden(tmp_path):
+    _run_dom(tmp_path, "false", FOCUS_BODY)
+
+
+ABOUT_BODY = r"""
+globalThis.window.addEventListener = () => {};
+m.bindHelp();
+const link = document.getElementById("footer-about");
+globalThis.window.addEventListener = () => {};
+const prevented = [];
+const ev = { preventDefault: () => prevented.push(1) };
+const click = () => { for (const f of link.listeners.click) f(ev); };
+m.setView("login");
+click();
+assert.strictEqual(m.helpIsOpen(), false, "no drawer over the sign-in page");
+m.setView("app");
+click();
+assert.strictEqual(m.helpIsOpen(), true);
+assert.strictEqual(prevented.length, 2);
+console.log("ok");
+"""
+
+
+def test_footer_about_opens_the_drawer_only_in_the_app(tmp_path):
+    _run_dom(tmp_path, "false", ABOUT_BODY)
