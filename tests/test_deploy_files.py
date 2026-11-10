@@ -50,23 +50,39 @@ def test_dockerignore_excludes():
         assert want in lines
 
 
-def test_start_script():
+def test_torch_is_training_only():
+    import tomllib
+
+    cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert not any(d.lower().startswith("torch") for d in cfg["project"]["dependencies"])
+    assert any(d.lower().startswith("torch") for d in cfg["dependency-groups"]["train"])
+    assert "train" in cfg["tool"]["uv"]["default-groups"]
+    assert "dev" in cfg["tool"]["uv"]["default-groups"]
+
+
+def test_start_script_render():
     raw = (ROOT / "deploy" / "start.sh").read_bytes()
     assert b"\r" not in raw
     text = raw.decode("utf-8")
     for want in (
         "idsai user seed-env",
-        "--port 7860",
+        "RENDER_EXTERNAL_HOSTNAME",
+        "${PORT:-7860}",
+        "${IDSAI_SPEED:-20}",
+        '--speed "$SPEED"',
+        '--port "$PORT"',
         "--auth",
         "--secure-cookies",
         "--loop",
-        '--public-host "$SPACE_HOST"',
+        '--public-host "$PUBLIC_HOST"',
     ):
         assert want in text
     sh = shutil.which("sh")
     if sh is None:
         pytest.skip("no POSIX sh available")
-    env = {k: v for k, v in os.environ.items() if k != "SPACE_HOST"}
+    env = {
+        k: v for k, v in os.environ.items() if k not in ("SPACE_HOST", "RENDER_EXTERNAL_HOSTNAME")
+    }
     r = subprocess.run(
         [sh, str(ROOT / "deploy" / "start.sh")],
         env=env,
@@ -76,25 +92,30 @@ def test_start_script():
         timeout=30,
     )
     assert r.returncode == 1
-    assert "SPACE_HOST" in r.stderr
-    assert any("\u0e00" <= c <= "\u0e7f" for c in r.stderr)
+    assert "RENDER_EXTERNAL_HOSTNAME" in r.stderr
+    assert any("฀" <= c <= "๿" for c in r.stderr)
 
 
-def test_dockerfile():
+def test_dockerfile_two_stages():
     text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    for want in (
-        "EXPOSE 7860",
-        "USER user",
-        "useradd -m -u 1000 user",
-        "mkdir -p /home/user/app && chown user:user /home/user/app",
-        "uv sync --frozen --no-dev",
-        "idsai demo-pack",
-        "deploy/check_no_hu.py",
-        "deploy/start.sh",
-    ):
-        assert want in text
-    # the app dir exists and belongs to uid 1000 before the image switches to that user
-    assert text.index("chown user:user /home/user/app") < text.index("USER user")
+    lines = text.splitlines()
+    froms = [i for i, ln in enumerate(lines) if ln.startswith("FROM ")]
+    assert len(froms) == 2
+    assert " AS build" in lines[froms[0]]
+    build, runtime = "\n".join(lines[: froms[1]]), "\n".join(lines[froms[1] :])
+    assert "deploy/check_no_hu.py" in build
+    assert "idsai demo-pack" in build
+    assert "--no-group train" not in build
+    assert "--no-group train" in runtime
+    assert "COPY --from=build --chown=user /home/user/app/data" in runtime
+    assert "torch" not in runtime
+    for stage in (build, runtime):
+        assert "useradd -m -u 1000 user" in stage
+        assert "mkdir -p /home/user/app && chown user:user /home/user/app" in stage
+        assert stage.index("chown user:user /home/user/app") < stage.index("USER user")
+        assert "uv sync --frozen --no-dev" in stage
+    assert "EXPOSE 7860" in runtime
+    assert "deploy/start.sh" in runtime
 
 
 def _workflow(name: str) -> tuple[dict, str]:
