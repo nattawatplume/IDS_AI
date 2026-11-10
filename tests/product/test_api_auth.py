@@ -588,3 +588,13 @@ def test_ws_stays_open_while_signed_in(aenv, auth_client, monkeypatch):
     with c.websocket_connect("/ws/stream") as ws:
         for _ in range(3):  # several re-checks pass in between
             assert ws.receive_json()["type"] == "health"
+
+
+def test_tour_done_pref_is_a_strict_bool(aenv, auth_client):
+    c = auth_client("analyst")
+    r = send(c, "PUT", "/api/me/prefs", {"tour_done": True})
+    assert r.status_code == 200 and r.json() == {"tour_done": True}
+    assert c.get("/api/me").json()["prefs"]["tour_done"] is True
+    for bad in ("yes", 1, "true"):
+        assert send(c, "PUT", "/api/me/prefs", {"tour_done": bad}).status_code == 422, bad
+    assert send(c, "PUT", "/api/me/prefs", {"tour_done": None}).json() == {}  # null removes it

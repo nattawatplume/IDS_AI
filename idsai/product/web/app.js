@@ -1,7 +1,7 @@
 /* Market IDS dashboard: one plain script, no build step, same-origin fetch and WebSocket only.
  *
  * Every server string reaches the DOM through textContent (`el`); nothing is parsed as HTML.
- * API times are µs UTC; the chart uses whole seconds (UTCTimestamp) and every shown time is UTC.
+ * API times are µs UTC; the chart uses whole seconds (UTCTimestamp) and the plain view shows Thai time (UTC+7); UTC only appears in the folded details.
  * The chart library throws on an update older than the last point, so a bar or score whose time
  * is not after the last plotted one is dropped (one can arrive after a seek's alerts_reset).
  */
@@ -131,6 +131,7 @@ const state = {
   railIds: null, // alert ids already on the rail; null until the first render
   alertCount: 0,
   alertCountKnown: false, // the count has been shown once: only a later rise flashes the card
+  alertsFailed: false, // the first /api/alerts failed: the hero says the status could not be read
   alertsLoaded: false, // the first /api/alerts answered: before it, a count is not yet the real one
   hero: null, // the last heroStatus shown: the DOM is touched only when it changes
   speed: null, // the speed chip the server last accepted
@@ -152,7 +153,9 @@ const AUDIT_ACTIONS = [
   "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
 ];
-const NEED_ANALYST_TH = "ต้องเป็น analyst";
+// parent techniques whose taxonomy name_th holds Latin words ("wash trading"): the plain view names them here
+const TECHNIQUE_TH = { "MM-T005": "การซื้อขายวนหลอก" };
+const NEED_ANALYST_TH = "ต้องเป็นผู้วิเคราะห์ขึ้นไป";
 const DEFAULT_ROUTE = "#/home";
 const ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" };
 const MODE_TH = { replay: "ย้อนดู", live: "สด", sim: "จำลอง" };
@@ -181,6 +184,8 @@ function safeNext(raw) {
 // the session is gone (expired, signed out elsewhere): forget the user, or route() would send
 // the sign-in page straight back to `next`, and every page that fetches would 401 in a loop
 function sessionLost() {
+  closeTour(false); // the tour and the drawer belong to the app, not the sign-in page
+  closeHelp();
   setMe(null);
   const chip = typeof document !== "undefined" ? $("user-chip") : null;
   if (chip) chip.hidden = true;
@@ -424,11 +429,257 @@ function parentTechnique(id) {
 
 // ------------------------------------------------------------------ top bar
 
-// the help drawer: a later task fills it; until then "?" and the old #/about, #/taxonomy links do nothing
-function openHelp() {}
+// ------------------------------------------------------------------ help drawer + tour
 
-// the first-time tour: a later task fills it
-function startTour() {}
+const TOUR_KEY = "idsai.tour_done";
+const TOUR_STEPS = [
+  { target: "#hero-title", text: "ดูตรงนี้ก่อน บอกว่าตอนนี้ตลาดปกติหรือไม่" },
+  { target: "#chart-card", text: "เส้นม่วงคือระดับความผิดปกติ ถ้าข้ามเส้นเตือนสีส้ม ระบบจะแจ้งเตือน" },
+  { target: '[data-route="alerts"]', text: "รายการแจ้งเตือนทั้งหมด กดเข้าไปเพื่ออ่านคำอธิบายและบันทึกผลตรวจ" },
+  { target: '[data-route="simulate"]', text: "ลองใส่การปั่นจำลองแล้วดูว่าระบบจับได้เร็วแค่ไหน" },
+];
+const BUBBLE_W = 320;
+const BUBBLE_H = 190; // the guess used until the real height can be measured
+const BUBBLE_GAP = 12;
+const BUBBLE_MARGIN = 16;
+const SPOT_PAD = 6;
+const FOCUSABLE = 'button:not([disabled]), a[href], summary, input, select, [tabindex]:not([tabindex="-1"])';
+
+const helpState = { open: false, returnTo: null };
+const tourState = { open: false, i: 0, returnTo: null };
+
+// the tour shows once per user: the account's pref when auth is on, this browser's otherwise
+function tourShouldShow(prefs, auth, stored) {
+  return auth ? !(prefs && prefs.tour_done) : stored !== "1";
+}
+
+function markTourDone() {
+  if (authOn()) {
+    state.me.prefs = { ...(state.me.prefs || {}), tour_done: true }; // no second tour this session
+    savePrefs({ tour_done: true });
+  } else {
+    storageSet(TOUR_KEY, "1");
+  }
+}
+
+// where the bubble goes: below the target, above it when there is no room, centred without a target;
+// always fully inside the viewport. `size` is the measured bubble, when known
+function placeBubble(rect, viewport, size) {
+  const vw = viewport.w;
+  const vh = viewport.h;
+  const bw = Math.min((size && size.w) || BUBBLE_W, vw - 2 * BUBBLE_MARGIN);
+  const bh = (size && size.h) || BUBBLE_H;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+  const left = (x) => Math.round(clamp(x, BUBBLE_MARGIN, vw - bw - BUBBLE_MARGIN));
+  const top = (y) => Math.round(clamp(y, BUBBLE_MARGIN, vh - bh - BUBBLE_MARGIN));
+  if (!rect) return { top: top((vh - bh) / 2), left: left((vw - bw) / 2), centred: true };
+  const below = rect.top + rect.height + BUBBLE_GAP;
+  const above = rect.top - BUBBLE_GAP - bh;
+  let y = below;
+  if (below + bh > vh - BUBBLE_MARGIN) y = above >= BUBBLE_MARGIN ? above : vh - bh - BUBBLE_MARGIN;
+  return { top: top(y), left: left(rect.left + rect.width / 2 - bw / 2), centred: false };
+}
+
+function focusables(root) {
+  return Array.from(root.querySelectorAll(FOCUSABLE)).filter(
+    (n) => !n.hidden && (typeof n.getClientRects !== "function" || n.getClientRects().length > 0),
+  );
+}
+
+// Tab stays inside `root`
+function trapTab(ev, root) {
+  const items = focusables(root);
+  if (!items.length) {
+    ev.preventDefault();
+    root.focus();
+    return;
+  }
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  if (!root.contains(active) || active === root || (ev.shiftKey && active === first)) {
+    ev.preventDefault();
+    (ev.shiftKey ? last : first).focus();
+  } else if (!ev.shiftKey && active === last) {
+    ev.preventDefault();
+    first.focus();
+  }
+}
+
+// false when the node or an ancestor is hidden, or it sits inside a closed <details> (not as its summary)
+function isShown(node) {
+  for (let n = node, child = null; n; child = n, n = n.parentNode) {
+    if (n.hidden === true) return false;
+    if (n.tagName === "DETAILS" && !n.open && !(child && child.tagName === "SUMMARY")) return false;
+  }
+  return true;
+}
+
+// back to where the user was; when that is hidden now (the tour button inside a closed menu),
+// the user chip's summary, else the help button
+function restoreFocus(node) {
+  let to = node && typeof node.focus === "function" && node.isConnected !== false && isShown(node) ? node : null;
+  if (!to) {
+    const chip = $("user-chip");
+    const summary = chip && !chip.hidden && typeof chip.querySelector === "function" ? chip.querySelector("summary") : null;
+    to = summary || $("help-btn");
+  }
+  if (to && typeof to.focus === "function") to.focus();
+}
+
+// Escape closes the tour or the drawer, Tab stays inside it; true while one is open (no other key acts)
+function onOverlayKey(ev) {
+  if (!tourState.open && !helpState.open) return false;
+  if (ev.key === "Escape") {
+    ev.preventDefault();
+    if (tourState.open) endTour();
+    else closeHelp();
+  } else if (ev.key === "Tab") {
+    trapTab(ev, tourState.open ? $("tour-bubble") : $("help-drawer"));
+  }
+  return true;
+}
+
+// the taxonomy as plain cards: the Thai name and one line; the citation sits in a closed "แหล่งอ้างอิง"
+function renderHelpTaxonomy(box, tax) {
+  clear(box);
+  for (const [id, t] of Object.entries(tax || {})) {
+    const name = thaiTechniqueName(tax, id);
+    if (!name) continue;
+    box.appendChild(
+      el(
+        "div",
+        { class: "help-card" },
+        el("h4", {}, name),
+        el("p", { class: "small" }, firstSentence(t.definition_th)),
+        t.reference ? el("details", { class: "help-more" }, el("summary", {}, "แหล่งอ้างอิง"), el("p", { class: "small muted" }, t.reference)) : null,
+      ),
+    );
+  }
+  if (!box.firstChild) box.appendChild(el("p", { class: "empty" }, "ยังโหลดรายการรูปแบบไม่ได้"));
+}
+
+// `where`: the id of a drawer section to scroll to
+function openHelp(where) {
+  const drawer = $("help-drawer");
+  if (!drawer || tourState.open) return;
+  if (!helpState.open) {
+    helpState.returnTo = document.activeElement || null;
+    helpState.open = true;
+    $("help-backdrop").hidden = false;
+    drawer.hidden = false;
+    flash(drawer, "enter");
+    loadTaxonomy().then((tax) => renderHelpTaxonomy($("help-taxonomy"), tax));
+  }
+  const section = typeof where === "string" ? $(where) : null;
+  if (section && typeof section.scrollIntoView === "function") section.scrollIntoView({ block: "start" });
+  $("help-close").focus();
+}
+
+function closeHelp() {
+  if (!helpState.open) return;
+  helpState.open = false;
+  $("help-drawer").hidden = true;
+  $("help-backdrop").hidden = true;
+  restoreFocus(helpState.returnTo);
+  helpState.returnTo = null;
+}
+
+function showTourStep(i) {
+  const step = TOUR_STEPS[i];
+  if (!step) return;
+  tourState.i = i;
+  let target = null;
+  try {
+    target = document.querySelector(step.target);
+  } catch (e) {
+    /* a missing or odd target means a centred bubble */
+  }
+  const vw = (typeof window !== "undefined" && window.innerWidth) || 360;
+  const vh = (typeof window !== "undefined" && window.innerHeight) || 640;
+  let rect = null;
+  if (target && typeof target.getBoundingClientRect === "function") {
+    if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "nearest" });
+    const b = target.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0) {
+      const top = Math.max(0, b.top - SPOT_PAD);
+      const left = Math.max(0, b.left - SPOT_PAD);
+      rect = {
+        top,
+        left,
+        width: Math.min(vw, b.right + SPOT_PAD) - left,
+        height: Math.min(vh, b.bottom + SPOT_PAD) - top,
+      };
+    }
+  }
+  const spot = $("tour-spot");
+  spot.classList.toggle("none", !rect);
+  for (const k of ["top", "left", "width", "height"]) spot.style[k] = rect ? `${Math.round(rect[k])}px` : "";
+  $("tour-text").textContent = step.text;
+  $("tour-count").textContent = `ขั้นที่ ${i + 1} จาก ${TOUR_STEPS.length}`;
+  const last = i === TOUR_STEPS.length - 1;
+  $("tour-next").hidden = last;
+  $("tour-done").hidden = !last;
+  const bubble = $("tour-bubble");
+  const measured = bubble.offsetHeight > 0 ? { w: bubble.offsetWidth, h: bubble.offsetHeight } : null;
+  const at = placeBubble(rect, { w: vw, h: vh }, measured);
+  bubble.classList.toggle("centred", at.centred);
+  bubble.style.top = `${at.top}px`;
+  bubble.style.left = `${at.left}px`;
+  (last ? $("tour-done") : $("tour-next")).focus();
+}
+
+function startTour() {
+  if (tourState.open) return;
+  if (helpState.open) closeHelp();
+  tourState.open = true;
+  tourState.returnTo = document.activeElement || null;
+  $("tour").hidden = false;
+  showTourStep(0);
+  if (state.route !== "home") {
+    location.hash = DEFAULT_ROUTE; // the first two targets live on Home: look again once it shows
+    setTimeout(() => {
+      if (tourState.open && tourState.i === 0) showTourStep(0);
+    }, 200);
+  }
+}
+
+// any way out counts as seen: finished, skipped or Escape; a lost session is not "seen"
+function closeTour(seen) {
+  if (!tourState.open) return;
+  tourState.open = false;
+  $("tour").hidden = true;
+  if (seen) markTourDone();
+  restoreFocus(tourState.returnTo);
+  tourState.returnTo = null;
+}
+
+function endTour() {
+  closeTour(true);
+}
+
+function maybeStartTour() {
+  if (state.route === "home" && !helpState.open && tourShouldShow(loadedPrefs(), authOn(), storageGet(TOUR_KEY))) {
+    startTour();
+  }
+}
+
+function bindHelp() {
+  $("help-btn").addEventListener("click", () => openHelp());
+  $("help-close").addEventListener("click", closeHelp);
+  $("help-backdrop").addEventListener("click", closeHelp);
+  $("help-tour").addEventListener("click", startTour);
+  $("tour-next").addEventListener("click", () => showTourStep(tourState.i + 1));
+  $("tour-skip").addEventListener("click", endTour);
+  $("tour-done").addEventListener("click", endTour);
+  $("footer-about").addEventListener("click", (ev) => {
+    ev.preventDefault();
+    if (state.view === "app") openHelp(); // the link is only shown in the app; nothing is queued from elsewhere
+  });
+  window.addEventListener("resize", () => {
+    if (tourState.open) showTourStep(tourState.i);
+  });
+}
 
 // ------------------------------------------------------------------ motion + presenter keys
 
@@ -511,6 +762,7 @@ function noteReplayAction(action) {
 }
 
 function onPresenterKey(ev) {
+  if (onOverlayKey(ev)) return; // the drawer or the tour owns the keys while it is open
   if (state.view !== "app" || state.route === "login") return; // nothing to present before sign-in
   const act = presenterKey(ev);
   if (!act) return;
@@ -645,7 +897,7 @@ function applyRoleGates() {
     gate(node);
   }
   $("menu-activity").hidden = !can("admin");
-  renderPlayButton(); // the gate above cleared every title; the play button gets its "(กด Space)" back
+  renderPlayButton(); // the gate above cleared every title; the play button gets its "(กดแป้นเว้นวรรค)" back
 }
 
 function eventNowUs() {
@@ -677,7 +929,7 @@ function renderBudget() {
 // the card counts the selected symbol's alerts of the last 24 h (the unit of the budget); null without a clock
 function renderAlertsKpi(now = eventNowUs()) {
   const box = $("alerts-count");
-  if (!state.symbol || !isNum(now)) {
+  if (!state.symbol || !isNum(now) || !state.alertsLoaded) {
     box.textContent = "–";
     state.alertCount = 0;
     state.alertCountKnown = false;
@@ -728,10 +980,20 @@ function heroStatus({ nowUs, alerts, f, tau, auditor, symbol } = {}) {
   return { level: "normal", title: "ตลาดปกติ", line: "ไม่มีแจ้งเตือนใน 30 นาทีล่าสุด", alertId: null };
 }
 
+// before the first alerts answer, "no alert" is not yet known: never claim a calm market
+function heroPending(failed) {
+  return {
+    level: "wait",
+    title: failed ? "ยังอ่านสถานะไม่ได้" : "กำลังอ่านสถานะ",
+    line: failed ? "อ่านรายการแจ้งเตือนไม่ได้ จึงยังบอกสถานะตลาดไม่ได้ ระบบจะลองใหม่เมื่อเชื่อมต่อได้" : "",
+    alertId: null,
+  };
+}
+
 // runs on every health, score and alert update; writes the DOM only when the sentence changes
 function renderHero() {
-  if (!state.health && !isNum(state.lastBarUs)) return; // no clock yet: keep "กำลังอ่านสถานะ"
-  const next = heroStatus({
+  if (!state.health && !isNum(state.lastBarUs) && !state.alertsFailed) return; // no clock yet: keep "กำลังอ่านสถานะ"
+  const next = !state.alertsLoaded ? heroPending(state.alertsFailed) : heroStatus({
     nowUs: eventNowUs(),
     alerts: state.alerts.values(),
     f: chart.now.f,
@@ -755,7 +1017,7 @@ function renderHero() {
   }
 }
 
-// the replay bar's clock: the event time, and how far through its UTC day it is
+// the replay bar's clock: the event time, and how far through its Thai day it is
 function renderReplayClock(now) {
   const clock = $("replay-clock");
   const fill = $("replay-fill");
@@ -1134,7 +1396,8 @@ async function control(action, value) {
     status.textContent = action === "seek" ? `ไปที่ ${fmtThaiTime(r.cursor_us, true)} แล้ว` : "";
     return true;
   } catch (e) {
-    status.textContent = e.message;
+    console.warn("replay control:", e && e.message);
+    status.textContent = e && e.status === 409 && e.message === REPLAY_ENDED_TH ? REPLAY_ENDED_TH : plainErrorText(e);
     return false;
   }
 }
@@ -1146,13 +1409,21 @@ function renderPlayButton() {
   btn.textContent = playing ? "❚❚" : "▶";
   const label = playing ? "หยุดชั่วคราว" : "เล่นต่อ";
   btn.setAttribute("aria-label", label);
-  if (can("analyst")) btn.title = `${label} (กด Space)`;
+  if (can("analyst")) btn.title = `${label} (กดแป้นเว้นวรรค)`;
 }
 
 function renderSpeedChips() {
   for (const chip of $("replay-bar").querySelectorAll(".chip")) {
     chip.setAttribute("aria-pressed", String(Number(chip.dataset.speed) === state.speed));
   }
+}
+
+// the "go to time" box takes Thai time (UTC+7, the time shown everywhere): the server wants UTC microseconds
+function seekInputToUs(raw) {
+  const text = String(raw ?? "");
+  if (!text) return null;
+  const ms = Date.parse(text.length === 16 ? `${text}:00Z` : `${text}Z`); // read as if UTC, then take the 7 h back
+  return Number.isNaN(ms) ? null : Math.round(ms) * 1000 - TH_OFFSET_US;
 }
 
 function bindReplay() {
@@ -1174,12 +1445,12 @@ function bindReplay() {
   });
   $("btn-seek").addEventListener("click", () => {
     const raw = $("seek-input").value;
-    const ms = Date.parse(raw.length === 16 ? `${raw}:00Z` : `${raw}Z`); // the input is UTC
-    if (!raw || Number.isNaN(ms)) {
-      $("replay-status").textContent = "ใส่วันและเวลา (UTC) ก่อน";
+    const us = seekInputToUs(raw);
+    if (us === null) {
+      $("replay-status").textContent = "ใส่วันและเวลา (เวลาไทย) ก่อน";
       return;
     }
-    control("seek", Math.round(ms) * 1000);
+    control("seek", us);
   });
 }
 
@@ -1199,13 +1470,17 @@ async function loadAlerts() {
     ]);
   } catch (e) {
     console.warn("alerts:", e.message);
-    err.textContent = `อ่านรายการแจ้งเตือนไม่ได้ (${e.message}) จะลองใหม่เมื่อเชื่อมต่อได้`;
+    err.textContent = `อ่านรายการแจ้งเตือนไม่ได้ (${plainErrorText(e)}) จะลองใหม่เมื่อเชื่อมต่อได้`;
     err.hidden = false;
+    state.alertsFailed = true;
+    renderAlertsKpi();
+    renderHero();
     return;
   }
   state.alerts = new Map(items.map((a) => [a.alert_id, a]));
   if (rows) state.feedback = groupFeedback(rows);
   state.alertsLoaded = true;
+  state.alertsFailed = false;
   err.textContent = rows ? "" : "อ่านผลการตรวจไม่ได้ ตัวกรองตามผลตรวจอาจยังไม่ครบ";
   err.hidden = !!rows;
   alertsChanged();
@@ -1383,6 +1658,7 @@ function thaiTechniqueName(tax, techniqueId) {
   const parent = parentTechnique(techniqueId);
   const t = tax && tax[parent];
   if (!t || typeof t.name_th !== "string" || /-T000$/.test(parent)) return null;
+  if (TECHNIQUE_TH[parent]) return TECHNIQUE_TH[parent]; // a name whose taxonomy text keeps Latin words
   const name = t.name_th.replace(/\s*\([^)]*\)/g, "").trim();
   return name && !/[A-Za-z]/.test(name) ? name : null;
 }
@@ -1644,7 +1920,7 @@ function techniqueCard(tax, techniqueId) {
     el("p", { class: "small" }, t.definition_th || ""),
     sub ? el("p", { class: "small" }, el("strong", { class: "mono" }, sub.id), ` ${sub.name_th || ""}: ${sub.definition_th || ""}`) : null,
     el("p", { class: "small muted" }, t.observability_th || ""),
-    el("p", { class: "small" }, el("a", { href: "#/taxonomy" }, "ดู taxonomy ทั้งหมด")),
+    el("p", { class: "small" }, el("button", { type: "button", class: "link-btn", onclick: () => openHelp("help-patterns") }, "ดูรูปแบบทั้งหมดที่ระบบมองหา")),
   ]);
   return card;
 }
@@ -1702,7 +1978,8 @@ function feedbackCard(a, onSaved) {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
     } catch (e) {
       status.classList.add("inline-error");
-      status.textContent = `บันทึกไม่สำเร็จ (${e.message})`;
+      console.warn("feedback:", e && e.message);
+      status.textContent = `บันทึกไม่สำเร็จ (${plainErrorText(e)})`;
       setBusy(false);
       return;
     }
@@ -1818,6 +2095,21 @@ function simErrorText(err) {
   if (status === 422 && /offset|ข้อมูลสุดท้าย/.test(msg)) return SIM_PAST_END_TH;
   if (status === 422 && /symbol/.test(msg)) return SIM_SYMBOL_TH;
   return SIM_FAILED_TH;
+}
+
+// any other refused or failed request, in plain Thai: the server's own text can be English or carry field names
+const NET_FAILED_TH = "ติดต่อเซิร์ฟเวอร์ไม่ได้";
+const ACT_FAILED_TH = "ทำรายการไม่สำเร็จ ลองใหม่อีกครั้ง";
+const ACT_FORBIDDEN_TH = "สิทธิ์ไม่พอสำหรับการทำรายการนี้";
+const ACT_CONFLICT_TH = "ตอนนี้ทำรายการนี้ไม่ได้ เพราะสถานะเปลี่ยนไปแล้ว";
+const ACT_INVALID_TH = "ข้อมูลที่ส่งไม่ถูกต้อง";
+function plainErrorText(err) {
+  const status = err && err.status;
+  if (!isNum(status)) return NET_FAILED_TH; // fetch itself failed: no HTTP answer at all
+  if (status === 403) return ACT_FORBIDDEN_TH;
+  if (status === 409) return ACT_CONFLICT_TH;
+  if (status === 422) return ACT_INVALID_TH;
+  return ACT_FAILED_TH; // 401 is handled by sessionLost; 5xx and the rest
 }
 
 // the advanced fields; null when the start offset is out of range
@@ -2129,8 +2421,10 @@ function targetVerdict(report, target, budget) {
     if (!paired || Number(paired.budget) !== b) return none;
     const found = (paired.rows || []).find((r) => r.baseline === target.variant);
     if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
-    const st = target.reference ? "reference" : found.ci[0] > target.threshold ? "pass" : "miss";
-    return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events };
+    // the report's own gate (CI, minimum effect, minimum events) decides; older reports fall back to the CI
+    const gated = typeof found.significant === "boolean" ? found.significant : found.ci[0] > target.threshold;
+    const st = target.reference ? "reference" : gated ? "pass" : "miss";
+    return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events, significant: gated, reason: found.reason_th || null };
   }
   const variants = report.experiments[target.experiment] || {};
   const cell = (variants[target.variant] || {})[String(b)];
@@ -2150,6 +2444,7 @@ function targetVerdict(report, target, budget) {
 const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด", reference: "อ้างอิง" };
 // the plain badge: a glyph and a word, never colour alone
 const RESULT_BADGE = { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" };
+const NO_TARGET_TH = "ไม่ได้ตั้งเป้าที่งบนี้"; // the badge off the project budget: numbers only, no verdict
 const RESULT_GLYPH = { pass: "✓", fail: "✗", none: "—" };
 const RESULT_STATE = { pass: "pass", miss: "fail", unmeasured: "none" }; // a reference card has no badge
 const PER_DAY_TH = "ครั้งต่อเหรียญต่อวัน";
@@ -2168,14 +2463,18 @@ function resultSentence(target, value, extra) {
   if (target.cmp === "pair") {
     const ci = x.ci;
     if (!Array.isArray(ci) || !isNum(ci[0]) || !isNum(ci[1])) return "เทียบกับวิธีพื้นฐาน: ยังไม่วัดที่งบเตือนนี้";
-    // the 95% CI of the difference: wholly above 0, wholly below 0, or across it
-    return `เทียบกับวิธีพื้นฐาน: ${ci[0] > 0 ? "ดีกว่า" : ci[1] < 0 ? "แย่กว่า" : "ไม่ต่างอย่างมีนัยสำคัญ"}`;
+    if (x.reason) return `เทียบกับวิธีพื้นฐาน: ${x.reason}`;
+    // the report's own gate says "better"; otherwise the 95% CI of the difference: wholly below 0 is worse
+    const better = typeof x.significant === "boolean" ? x.significant : ci[0] > 0;
+    return `เทียบกับวิธีพื้นฐาน: ${better ? "ระบบนี้ดีกว่าวิธีนี้" : ci[1] < 0 ? "ระบบนี้แย่กว่าวิธีนี้" : "ไม่ต่างกันอย่างมีนัยสำคัญ"}`;
   }
   if (target.metric === "recall_any") {
     const at = `(เมื่อเตือนไม่เกิน ${fmtPlain(b)} ${PER_DAY_TH})`;
-    if (!isNum(value)) return `จับเหตุการณ์ที่มีบันทึกได้: ยังไม่มีผล ${at}`;
-    const got = isNum(x.k) && isNum(x.n) ? `${x.k} จาก ${x.n} ครั้ง` : `${Math.round(value * 100)}%`;
-    return `จับเหตุการณ์ที่มีบันทึกได้ ${got} ${at}`;
+    const what = target.experiment === "semisyn" ? "จับเหตุการณ์จำลองได้" : "จับเหตุการณ์ที่มีบันทึกได้";
+    if (!isNum(value)) return `${what}: ยังไม่มีผล ${at}`;
+    // a count is a mean over the test rounds
+    const got = isNum(x.k) && isNum(x.n) ? `เฉลี่ย ${x.k} จาก ${x.n} ครั้ง` : ` ${Math.round(value * 100)}%`;
+    return `${what}${got} ${at}`;
   }
   if (target.metric === "fa_per_symbol_day") {
     return isNum(value) ? `เตือนผิดเฉลี่ย ${fmtPlain(value)} ${PER_DAY_TH}` : "เตือนผิดเฉลี่ย: ยังไม่มีผล";
@@ -2209,8 +2508,11 @@ const resultShown = {};
 
 function resultCard(target, verdict, budget) {
   const wide = target.id === "real_recall";
-  const st = RESULT_STATE[verdict.state] || null;
-  const extra = { budget, ci: verdict.ci };
+  let st = RESULT_STATE[verdict.state] || null;
+  // pass / fail is judged at the project budget only; elsewhere the numbers stand without a verdict
+  const judged = String(budget) === MAIN_BUDGET;
+  if (!judged && (st === "pass" || st === "fail")) st = "neutral";
+  const extra = { budget, ci: verdict.ci, significant: verdict.significant, reason: verdict.reason };
   // a count of events only where the unit is the event (a symbol-day ratio is no count)
   if (verdict.unit === "event" && isNum(verdict.value) && isNum(verdict.n) && verdict.n > 0) {
     extra.k = Math.round(verdict.value * verdict.n);
@@ -2227,7 +2529,11 @@ function resultCard(target, verdict, budget) {
       "div",
       { class: "result-head" },
       el("h3", { class: "result-title" }, target.title),
-      st ? resultBadge(st) : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
+      st === "neutral"
+        ? el("span", { class: "result-badge", "data-state": "neutral" }, NO_TARGET_TH)
+        : st
+          ? resultBadge(st)
+          : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
     ),
   );
   if (wide && isNum(verdict.value)) {
@@ -2241,13 +2547,15 @@ function resultCard(target, verdict, budget) {
         "div",
         { class: "result-bar", "aria-hidden": "true" },
         el("span", { class: "result-fill", style: `width: ${Math.max(0, Math.min(100, pct))}%` }),
-        el("span", { class: "result-mark", style: `left: ${Math.round(target.threshold * 100)}%` }),
+        st === "neutral" ? null : el("span", { class: "result-mark", style: `left: ${Math.round(target.threshold * 100)}%` }),
       ),
     );
   }
   card.appendChild(el("p", { class: "result-sentence" }, resultSentence(target, verdict.value, extra)));
-  const seeds = wide && isNum(verdict.seeds) && verdict.seeds > 1 ? ` · ค่าเฉลี่ยจากการทดสอบ ${verdict.seeds} รอบ` : "";
-  card.appendChild(el("p", { class: "result-goal small muted" }, resultGoal(target, budget) + seeds));
+  const seeds = wide && isNum(verdict.seeds) && verdict.seeds > 1 ? `ค่าเฉลี่ยจากการทดสอบ ${verdict.seeds} รอบ` : "";
+  const goal = st === "neutral" ? "" : resultGoal(target, budget);
+  const goalLine = [goal, seeds].filter(Boolean).join(" · ");
+  if (goalLine) card.appendChild(el("p", { class: "result-goal small muted" }, goalLine));
   return card;
 }
 
@@ -2350,7 +2658,8 @@ async function showEval() {
   try {
     report = await api("/api/experiments");
   } catch (e) {
-    clear(box).appendChild(el("p", { class: "empty" }, e.message));
+    console.warn("experiments:", e && e.message);
+    clear(box).appendChild(el("p", { class: "empty" }, `อ่านผลวัดระบบไม่ได้ (${plainErrorText(e)})`));
     return;
   }
   clear(box);
@@ -2374,14 +2683,14 @@ async function showEval() {
   const chips = el("div", { class: "budget-chips", role: "group", "aria-label": "งบเตือน ครั้งต่อวัน" });
   const note = el("p", { class: "small muted budget-note" });
   const plain = el("div", { class: "results-plain" });
-  const targets = el("div");
+  const targets = el("div"); // the committee's targets: always at the project budget, not the chip
+  targets.appendChild(targetTable(report, Number(MAIN_BUDGET)));
   const tables = el("div");
   const draw = () => {
     for (const c of chips.children) c.setAttribute("aria-pressed", String(c.getAttribute("data-budget") === budget));
     note.textContent = budget === MAIN_BUDGET ? "" : `เป้าหมายของโครงการตั้งไว้ที่งบเตือน ${MAIN_BUDGET} ครั้งต่อวัน`;
     note.hidden = budget === MAIN_BUDGET;
     renderResultCards(plain, report, Number(budget));
-    clear(targets).appendChild(targetTable(report, Number(budget)));
     clear(tables);
     for (const [exp, variants] of Object.entries(report.experiments)) tables.appendChild(experimentTable(exp, variants, budget));
   };
@@ -2648,37 +2957,6 @@ function retrainCard(title, block) {
   return card;
 }
 
-// ------------------------------------------------------------------ taxonomy
-
-async function showTaxonomy() {
-  const box = $("taxonomy-body");
-  const tax = await loadTaxonomy();
-  clear(box);
-  if (!tax) {
-    box.appendChild(el("p", { class: "empty" }, "โหลด taxonomy ไม่สำเร็จ"));
-    return;
-  }
-  for (const [id, t] of Object.entries(tax)) {
-    box.appendChild(
-      el(
-        "div",
-        { class: "tax-row" },
-        el("h3", {}, el("span", { class: "mono" }, id), ` ${t.name_th || ""}`),
-        el("p", { class: "small" }, t.definition_th || ""),
-        el("p", { class: "small muted" }, t.observability_th || ""),
-        (t.sub_techniques || []).length
-          ? el(
-              "ul",
-              { class: "small tax-subs" },
-              t.sub_techniques.map((s) => el("li", {}, el("span", { class: "mono" }, s.id), ` ${s.name_th || ""}: ${s.definition_th || ""}`)),
-            )
-          : null,
-        t.reference ? el("p", { class: "small muted" }, `อ้างอิง: ${t.reference}`) : null,
-      ),
-    );
-  }
-}
-
 // ------------------------------------------------------------------ router
 
 const PAGES = {
@@ -2852,7 +3130,7 @@ async function loadMe() {
 function showView(view) {
   state.view = view;
   $("boot-loader").hidden = view !== "loading";
-  $("site-footer").hidden = view === "loading";
+  $("site-footer").hidden = view !== "app"; // the About link opens the drawer, which only exists in the app
 }
 
 function bindLogin() {
@@ -3099,11 +3377,12 @@ async function enterApp() {
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
+  maybeStartTour();
 }
 
 async function boot() {
   window.addEventListener("hashchange", safely(route));
-  $("help-btn").addEventListener("click", openHelp);
+  bindHelp();
   $("menu-tour").addEventListener("click", () => {
     $("user-chip").open = false;
     startTour();
@@ -3189,17 +3468,78 @@ if (typeof document !== "undefined") {
     PAGE_ORDER,
     DEFAULT_ROUTE,
     heroStatus,
+    heroPending,
+    renderHero,
+    renderAlertsKpi,
+    loadAlerts,
+    plainErrorText,
+    getState: () => state,
     HERO_WATCH_RATIO,
     HERO_RECENT_US,
     SPEED_CHIPS,
     firstSentence,
     applyRoleGates,
     ALERT_FILTERS,
+    thaiTechniqueName,
+    trapTab,
+    seekInputToUs,
+    showView,
     VERDICT_TH,
     filterAlerts,
     onAlert,
     showToast,
     showAlert,
+    TOUR_STEPS,
+    tourShouldShow,
+    markTourDone,
+    placeBubble,
+    renderHelpTaxonomy,
+    startTour,
+    endTour,
+    // every Thai UI string table: the copy guard in the tests reads these
+    copyTables: () => ({
+      SEVERITY_TH,
+      STATUS_TH,
+      CHECK_TH,
+      CHECK_NAME_TH,
+      VIEWER_REPLAY_TH,
+      VIEWER_VERDICT_TH,
+      VERDICT_TH,
+      SIM_WAIT_TH,
+      SIM_OFFSET_TH,
+      SIM_PAST_END_TH,
+      SIM_SYMBOL_TH,
+      SIM_FAILED_TH,
+      REPLAY_ENDED_TH,
+      SEMISYN_TH,
+      BASELINE_TH,
+      NEED_ANALYST_TH,
+      TECHNIQUE_TH,
+      NET_FAILED_TH,
+      ACT_FAILED_TH,
+      ACT_FORBIDDEN_TH,
+      ACT_CONFLICT_TH,
+      ACT_INVALID_TH,
+      ROLE_TH,
+      MODE_TH,
+      TARGET_STATE_TH,
+      NO_TARGET_TH,
+      PER_DAY_TH,
+      SIM_REASON,
+      RESULT_BADGE,
+      SIM_CARDS: SIM_CARDS.map((c) => ({ title: c.title, line: c.line })),
+      TOUR_STEPS,
+      ALERT_FILTERS,
+      SPEED_CHIPS,
+    }),
+    sessionLost,
+    bindHelp,
+    helpIsOpen: () => helpState.open,
+    setView: (v) => {
+      state.view = v;
+    },
+    openHelp,
+    closeHelp,
     setRoute: (r) => {
       state.route = r;
     },

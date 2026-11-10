@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 
 import numpy as np
@@ -546,7 +547,7 @@ def test_reduced_motion_disables_animation():
     css = text("styles.css")
     block = css.split("prefers-reduced-motion: reduce")[1]
     assert "animation" in block and "transition" in block
-    for name in ("pulse", "glow", "pop", "rise", "grow"):
+    for name in ("glow", "pop", "rise", "grow"):
         assert f"@keyframes {name}" in css, name
 
 
@@ -662,7 +663,7 @@ def test_alerts_kpi_counts_the_selected_symbol_only():
 
 def test_resting_styles_are_visible_when_animation_does_not_run():
     css = text("styles.css").replace("\r\n", "\n")
-    for sel in (r"\.rise", r"\.rail-row\.enter", r"\.forest \.ci-line", r"\.pop"):
+    for sel in (r"\.rail-row\.enter", r"\.forest \.ci-line"):
         rules = re.findall(r"(?m)^" + sel + r"\s*\{([^}]*)\}", css)
         assert rules, sel
         for body in rules:
@@ -885,20 +886,35 @@ RESULT_SENTENCE_BODY = r"""
 const T = (id) => m.EVAL_TARGETS.find((t) => t.id === id);
 const s = m.resultSentence;
 assert.strictEqual(s(T("real_recall"), 0.739, { k: 148, n: 200, budget: 2 }),
-  "จับเหตุการณ์ที่มีบันทึกได้ 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  "จับเหตุการณ์ที่มีบันทึกได้เฉลี่ย 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
 assert.strictEqual(s(T("semisyn_pump_burst"), 0.2955, { budget: 0.5 }),
-  "จับเหตุการณ์ที่มีบันทึกได้ 30% (เมื่อเตือนไม่เกิน 0.5 ครั้งต่อเหรียญต่อวัน)");
+  "จับเหตุการณ์จำลองได้ 30% (เมื่อเตือนไม่เกิน 0.5 ครั้งต่อเหรียญต่อวัน)");
 assert.strictEqual(s(T("real_recall"), 0.739, {}),
   "จับเหตุการณ์ที่มีบันทึกได้ 74% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
 assert.strictEqual(s(T("real_fa"), 1.6498753, {}), "เตือนผิดเฉลี่ย 1.65 ครั้งต่อเหรียญต่อวัน");
 assert.strictEqual(s(T("real_fa_hard"), 11.169999, {}), "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
 assert.strictEqual(s(T("real_fa_hard"), 0, {}), "เตือนผิดในวันที่ไม่มีเหตุการณ์ 0 ครั้ง");
 const pair = T("ae_vs_baseline.iforest");
-assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3] }), "เทียบกับวิธีพื้นฐาน: ดีกว่า");
-assert.strictEqual(s(pair, 0.05, { ci: [-0.1, 0.2] }), "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
-assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121] }), "เทียบกับวิธีพื้นฐาน: แย่กว่า");
+assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3] }), "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
+assert.strictEqual(s(pair, 0.05, { ci: [-0.1, 0.2] }), "เทียบกับวิธีพื้นฐาน: ไม่ต่างกันอย่างมีนัยสำคัญ");
+assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121] }), "เทียบกับวิธีพื้นฐาน: ระบบนี้แย่กว่าวิธีนี้");
 assert.strictEqual(s(T("ae_vs_baseline.pca"), 0.075, { ci: [0.035, 0.122] }),
-  "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+  "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
+// gated pairs follow the report's own significant flag and reason
+assert.strictEqual(s(pair, 0.01, { ci: [0.005, 0.02], significant: false }),
+  "เทียบกับวิธีพื้นฐาน: ไม่ต่างกันอย่างมีนัยสำคัญ"); // CI above 0 but the gate (effect size) says no
+assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3], significant: true }),
+  "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
+assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121], significant: false }),
+  "เทียบกับวิธีพื้นฐาน: ระบบนี้แย่กว่าวิธีนี้");
+const few = "ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 3 ครั้ง";
+assert.strictEqual(s(pair, 0.3, { ci: [0.1, 0.5], significant: false, reason: few }),
+  "เทียบกับวิธีพื้นฐาน: " + few);
+const gate = { runs: 5, experiments: {}, paired_bootstrap: { budget: 2, rows: [{
+  baseline: "baseline.iforest", diff_mean: 0.01, ci: [0.005, 0.02], n_events: 200,
+  significant: false, reason_th: null }] } };
+assert.strictEqual(m.targetVerdict(gate, pair).significant, false);
+assert.strictEqual(m.targetVerdict(gate, pair).state, "miss");
 assert.strictEqual(s(T("latency_p99"), null, {}), "ความเร็วในการเตือน: ยังไม่วัด");
 assert.deepStrictEqual(m.RESULT_BADGE, { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" });
 // nothing measured is never a number in the sentence
@@ -964,7 +980,7 @@ def test_long_explanations_live_on_about():
         if 'id="chart-info-body"' in m.group(1):
             continue
         assert len(" ".join(m.group(2).split())) <= 120, m.group(2)[:60]
-    about = re.search(r'<section id="page-about".*?</section>', html, re.S).group(0)
+    about = re.search(r'<aside id="help-drawer".*?</aside>', html, re.S).group(0)
     assert "τ saturated" in about or "τ-saturated" in about
     assert "งบการแจ้งเตือนสูงกว่าอัตราสูงสุดที่ข้อมูลสอบเทียบทำได้" in about
     assert "autocorrelation" in about
@@ -1018,7 +1034,7 @@ def test_mutating_buttons_check_can():
     rt = js[js.index("async function startSimulation(") : js.index("function addInjection(")]
     assert 'can("analyst")' in rt and rt.index('can("analyst")') < rt.index("postJson(")
     gates = js[js.index("function applyRoleGates(") :]
-    assert "ต้องเป็น analyst" in js and "title" in gates[:1500]
+    assert "ต้องเป็นผู้วิเคราะห์ขึ้นไป" in js and "title" in gates[:1500]
 
 
 def test_401_goes_to_login_with_next():
@@ -1286,7 +1302,7 @@ def test_boot_view(tmp_path):
 def test_boot_shows_only_loader_until_me_resolves():
     html = text("index.html")
     pages = re.findall(r'<section\b[^>]*\bclass="[^"]*\bpage\b[^"]*"[^>]*>', html)
-    assert len(pages) >= 8, pages
+    assert len(pages) >= 7, pages
     for tag in pages:
         assert re.search(r"\shidden\b", tag), tag
     for tag in ("header", "footer"):  # nothing but the background and the loader at first
@@ -1520,7 +1536,7 @@ for (const id of ["btn-play", "seek-input", "btn-seek"]) {
 }
 for (const c of chips) assert.strictEqual(c.disabled, false);
 assert.strictEqual(nodes["replay-reason"].hidden, true);
-assert.ok(nodes["btn-play"].title.includes("(กด Space)"), nodes["btn-play"].title);
+assert.ok(nodes["btn-play"].title.includes("(กดแป้นเว้นวรรค)"), nodes["btn-play"].title);
 console.log("ok");
 """
 
@@ -2178,6 +2194,16 @@ def test_styles_css_blocks_are_balanced_and_motion_is_top_level():
     assert reduced and all(depth == 0 for _, depth, _, _ in reduced)
 
 
+def test_only_the_allowed_animations_loop():
+    # spec 4.12: the background drift, the status orb and the login line; the boot spinner is a
+    # loading indicator that goes away with the loader, not decoration
+    allowed = (".blob", ".orb", ".login-line-trace", ".boot-spinner")
+    for prelude, _, body, _ in _css_blocks(text("styles.css")):
+        if re.search(r"animation[^;]*infinite", body):
+            assert all(sel.strip().startswith(allowed) for sel in prelude.split(",")), prelude
+    assert not re.search(r"\.dot[^{]*\{[^}]*animation", text("styles.css"))
+
+
 SIM_ERROR_BODY = r"""
 const err = (status, message) => Object.assign(new Error(message), { status });
 const t = m.simErrorText;
@@ -2325,18 +2351,18 @@ RESULTS_BODY = r"""
   const badge = (id) => walk(card(id), (n) => n.classList.contains("result-badge"))[0];
   const has = (id, s) => assert.ok(card(id).textContent.includes(s),
     id + ": " + card(id).textContent);
-  has("real_recall", "จับเหตุการณ์ที่มีบันทึกได้ 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  has("real_recall", "จับเหตุการณ์ที่มีบันทึกได้เฉลี่ย 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
   assert.strictEqual(badge("real_recall").getAttribute("data-state"), "fail");
   assert.strictEqual(badge("real_recall").textContent, "✗ ยังไม่ถึงเป้า");
   has("real_fa", "เตือนผิดเฉลี่ย 1.65 ครั้งต่อเหรียญต่อวัน");
   assert.strictEqual(badge("real_fa").textContent, "✓ ผ่านเป้า");
   has("real_fa_hard", "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
-  has("semisyn_pump_burst", "จับเหตุการณ์ที่มีบันทึกได้ 30% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
-  has("ae_vs_baseline.iforest", "เทียบกับวิธีพื้นฐาน: แย่กว่า");
-  has("ae_vs_stat.robust_z", "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
+  has("semisyn_pump_burst", "จับเหตุการณ์จำลองได้ 30% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  has("ae_vs_baseline.iforest", "เทียบกับวิธีพื้นฐาน: ระบบนี้แย่กว่าวิธีนี้");
+  has("ae_vs_stat.robust_z", "เทียบกับวิธีพื้นฐาน: ไม่ต่างกันอย่างมีนัยสำคัญ");
   for (const id of ["ae_vs_baseline.random", "ae_vs_baseline.pca"]) {
     has(id, "วิธีเปรียบเทียบ");
-    has(id, "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+    has(id, "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
     assert.strictEqual(badge(id), undefined, id + " has no pass / fail");
   }
   has("latency_p99", "ความเร็วในการเตือน: ยังไม่วัด");
@@ -2348,13 +2374,27 @@ RESULTS_BODY = r"""
   assert.deepStrictEqual(chips().map((c) => c.textContent), ["0.1", "0.5", "2", "10"]);
   const rowText = chips()[0].parentNode.parentNode.textContent;
   assert.ok(rowText.startsWith("งบเตือน") && rowText.endsWith("ครั้งต่อวัน"), rowText);
+  const plain10 = textOutside(det);
   const pressed = () => chips().map((c) => c.getAttribute("aria-pressed"));
   assert.deepStrictEqual(pressed(), ["false", "false", "true", "false"]);
   chips()[3].click();
   assert.deepStrictEqual(pressed(), ["false", "false", "false", "true"]);
   has("real_recall", "(เมื่อเตือนไม่เกิน 10 ครั้งต่อเหรียญต่อวัน)");
-  assert.strictEqual(badge("real_recall").textContent, "✓ ผ่านเป้า");
+  // pass / fail is judged at the project budget only: elsewhere the badge is neutral text
+  assert.strictEqual(walk(box, (n) => n.classList.contains("result-badge")
+    && ["pass", "fail"].includes(n.getAttribute("data-state"))).length, 0);
+  assert.ok(!/[✓✗]/.test(plain10(box)), "no pass / fail glyph at budget 10");
+  assert.strictEqual(badge("real_recall").textContent, "ไม่ได้ตั้งเป้าที่งบนี้");
+  assert.strictEqual(badge("real_fa").textContent, "ไม่ได้ตั้งเป้าที่งบนี้");
+  assert.strictEqual(card("real_recall").getAttribute("data-state"), "neutral");
+  assert.strictEqual(badge("latency_p99").textContent, "— ยังไม่วัด");
   has("ae_vs_baseline.iforest", "ยังไม่วัด");
+  // the committee targets table is always judged at the project budget, whatever the chip says
+  const heads = walk(box, (n) => n.tagName === "H3" && n.textContent.startsWith("เป้าหมายตามแผน"));
+  assert.deepStrictEqual(heads.map((h) => h.textContent), ["เป้าหมายตามแผน (งบ 2 ครั้ง/สัญลักษณ์-วัน)"]);
+  assert.ok(det.textContent.includes("ผ่านเป้า") && det.textContent.includes("ไม่ถึงเป้า"));
+  const row10 = walk(det, (n) => n.tagName === "TR" && n.textContent.includes("recall_any"));
+  assert.ok(row10.some((r) => r.textContent.includes("0.739")), "targets table still at budget 2");
   assert.deepStrictEqual(saved, [["idsai.eval_budget", "10"]]);
   assert.strictEqual(walk(box, isCommittee).length, 1);
   // the committee details survive a budget change
@@ -2384,3 +2424,525 @@ def test_results_markup(tmp_path):
     # chips are flat; the cards are glass; no gradient and nothing loops on this page
     assert ".budget-chip" in res and "linear-gradient" not in res and "infinite" not in res
     assert re.search(r"\.result-wide\s*\{[^}]*flex:\s*2", res)
+
+
+# ---- help drawer, first-time tour, tour_done ----
+
+TOUR_BODY = r"""
+assert.strictEqual(m.tourShouldShow({}, true, null), true);
+assert.strictEqual(m.tourShouldShow({ tour_done: true }, true, null), false);
+assert.strictEqual(m.tourShouldShow({}, false, "1"), false);
+assert.strictEqual(m.tourShouldShow({}, false, null), true);
+// auth off reads only this browser
+assert.strictEqual(m.tourShouldShow({ tour_done: true }, false, null), true);
+assert.deepStrictEqual(m.TOUR_STEPS.map((s) => s.target),
+  ["#hero-title", "#chart-card", '[data-route="alerts"]', '[data-route="simulate"]']);
+assert.strictEqual(m.TOUR_STEPS[1].text,
+  "เส้นม่วงคือระดับความผิดปกติ ถ้าข้ามเส้นเตือนสีส้ม ระบบจะแจ้งเตือน");
+const view = { w: 375, h: 812 };
+const mid = m.placeBubble(null, view);
+assert.strictEqual(mid.centred, true);
+assert.ok(mid.left >= 0 && mid.top >= 0);
+const low = m.placeBubble({ top: 760, left: 100, width: 100, height: 40 }, view);
+assert.strictEqual(low.centred, false);
+assert.ok(low.top + 190 <= 760 && low.top >= 0, "above the target, inside the screen");
+const high = m.placeBubble({ top: 20, left: 300, width: 70, height: 30 }, view);
+assert.ok(high.top >= 50, "below the target");
+const edges = [
+  { top: 0, left: 0, width: 10, height: 10 },
+  { top: 800, left: 370, width: 40, height: 40 },
+  { top: 400, left: 350, width: 120, height: 40 }];
+for (const r of edges) {
+  const p = m.placeBubble(r, view);
+  const inside = p.left >= 0 && p.left + 320 <= 375 && p.top >= 0 && p.top + 190 <= 812;
+  assert.ok(inside, JSON.stringify(p));
+}
+"""
+
+
+def test_tour_pref_rule_and_bubble_placement(tmp_path):
+    _run_motion(tmp_path, "false", TOUR_BODY)
+
+
+TOUR_MISSING_BODY = r"""
+document.querySelector = () => null; // a narrow screen: no target is on the page
+m.setRoute("home");
+m.startTour();
+const bubble = document.getElementById("tour-bubble");
+assert.strictEqual(document.getElementById("tour").hidden, false);
+assert.ok(bubble.classList.contains("centred"), "a missing target centres the bubble");
+m.endTour();
+assert.strictEqual(document.getElementById("tour").hidden, true);
+assert.strictEqual(globalThis.window.localStorage.getItem("idsai.tour_done"), "1");
+console.log("ok");
+"""
+
+
+def test_tour_step_with_missing_target_centres(tmp_path):
+    body = (
+        'const keep = {}; globalThis.window = { localStorage: { getItem: (k) => keep[k] ?? null,'
+        " setItem: (k, v) => { keep[k] = String(v); } } };\n"
+        'm.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });\n'
+        + TOUR_MISSING_BODY
+    )
+    _run_dom(tmp_path, "false", body)
+
+
+HELP_TAX_BODY = r"""
+const tax = {
+  "MM-T001": { name_th: "การปั่นราคาแบบพุ่งเร็ว (Pump)", definition_th: "ราคาและปริมาณพุ่งในเวลาสั้น. ต่อ",
+    observability_th: "ดูได้", reference: "Kamps 2018",
+    sub_techniques: [{ id: "MM-T001.1", name_th: "ย่อย", definition_th: "x" }] },
+  "MM-T000": { name_th: "ไม่จัดประเภท", definition_th: "d" },
+};
+const box = document.getElementById("help-taxonomy");
+m.renderHelpTaxonomy(box, tax);
+const walk2 = (n, f) => { f(n); n.children.forEach((c) => walk2(c, f)); };
+let outside = "";
+let inside = "";
+walk2(box, (n) => { if (n.tagName === "DETAILS") inside += n.textContent; });
+const strip = (n) => {
+  if (n.tagName === "DETAILS") return "";
+  return n.tagName === "#TEXT" ? n._text : n.children.map(strip).join("");
+};
+outside = strip(box);
+assert.ok(!outside.includes("MT-") && !outside.includes("MM-"), outside);
+assert.ok(outside.includes("การปั่นราคาแบบพุ่งเร็ว"), outside);
+assert.ok(!/[A-Za-z]/.test(outside), outside); // no English in the plain view
+assert.ok(inside.includes("Kamps 2018"), inside);
+const summaries = walk(box, (n) => n.tagName === "SUMMARY").map((n) => n.textContent);
+assert.deepStrictEqual(summaries, ["แหล่งอ้างอิง"]);
+m.renderHelpTaxonomy(box, null);
+assert.ok(box.textContent.length > 0);
+console.log("ok");
+"""
+
+
+def test_help_drawer_taxonomy_has_no_ids(tmp_path):
+    _run_dom(tmp_path, "false", HELP_TAX_BODY)
+
+
+REAL_TAX_BODY = r"""
+const tax = JSON.parse(require("fs").readFileSync(process.argv[3], "utf8"));
+const ids = Object.keys(tax).filter((id) => id !== "MM-T000");
+assert.ok(ids.length >= 5, ids.join());
+for (const id of ids) {
+  const name = m.thaiTechniqueName(tax, id);
+  assert.ok(name, `${id} has no Thai name`);
+  assert.ok(!/[A-Za-z]/.test(name), `${id}: ${name}`);
+  assert.strictEqual(m.thaiTechniqueName(tax, `${id}.001`), name, "a sub names its parent");
+}
+assert.strictEqual(m.thaiTechniqueName(tax, "MM-T005"), "การซื้อขายวนหลอก");
+assert.strictEqual(m.thaiTechniqueName(tax, "MM-T000"), null);
+const box = document.getElementById("help-taxonomy");
+m.renderHelpTaxonomy(box, tax);
+const heads = walk(box, (n) => n.tagName === "H4").map((n) => n.textContent);
+assert.deepStrictEqual(heads, ids.map((id) => m.thaiTechniqueName(tax, id)));
+console.log("ok");
+"""
+
+
+def test_every_real_technique_has_a_thai_name_and_a_drawer_card(tmp_path):
+    from idsai.detection.taxonomy import load_taxonomy
+
+    tax = load_taxonomy()
+    path = tmp_path / "tax.json"
+    path.write_text(json.dumps(tax), encoding="utf-8")
+    _run_dom(tmp_path, "false", REAL_TAX_BODY, path)
+
+
+def test_help_and_tour_markup():
+    html = text("index.html")
+    drawer = re.search(r'<aside id="help-drawer".*?</aside>', html, re.S).group(0)
+    for heading in ("ระบบนี้ทำอะไร", "รูปแบบที่ระบบมองหา", "คำศัพท์"):
+        assert re.search(rf"<h3[^>]*>{heading}</h3>", drawer), heading
+    assert "ระบบนี้ไม่ทำอะไร" in drawer
+    for term in ("ระดับความผิดปกติ", "เส้นเตือน", "ย้อนดู", "ทดลองจำลอง", "ผิดปกติจริง"):
+        assert term in drawer, term
+    assert "เริ่มทัวร์" in drawer and 'id="help-taxonomy"' in drawer
+    tour = re.search(r'<div id="tour".*?\n  </div>\n', html, re.S).group(0)
+    for label in ("ถัดไป", "ข้าม", "เสร็จ"):
+        assert f">{label}</button>" in tour, label
+    js = text("app.js")
+    assert js.count('"Escape"') >= 1 and "keydown" in js
+    esc = js[js.index("function onOverlayKey(") :]
+    esc = esc[: esc.index("\n}\n")]
+    assert "Escape" in esc and "closeHelp()" in esc and "endTour()" in esc and "Tab" in esc
+    # the leftovers are gone: About and Taxonomy only live in the drawer now
+    assert 'id="page-about"' not in html and 'id="page-taxonomy"' not in html
+    assert "function showTaxonomy" not in js and 'href: "#/taxonomy"' not in js
+    css = text("styles.css")
+    assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 4, 20, 0.6)" in css
+
+
+# ---- copy guard and session-loss polish ----
+
+CODE_WORDS = (
+    "MT-T", "recall_any", "config_hash", "pump_burst", "pump_stealth", "wash_pingpong",
+    "region", "τ", "L1/L2/L3", "ยินดีต้อนรับ", "อัจฉริยะ", "ล้ำสมัย", "ทรงพลัง",
+)  # fmt: skip
+
+
+def _latin_words(body: str) -> list[str]:
+    """Latin words left after the allow-list: the product name and coin symbols (BTC, STEEMBTC)."""
+    body = body.replace("Market IDS", " ")
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_./-]*", body)
+    return [w for w in words if not re.fullmatch(r"[A-Z]{3,12}", w)]
+
+
+class _PlainText(HTMLParser):
+    """The text a user sees by default: nothing inside <details>, <script> or <style>."""
+
+    def __init__(self):
+        super().__init__()
+        self.skip = 0
+        self.out: list[str] = []
+        self.attrs: list[str] = []  # title, aria-label and placeholder values of the plain view
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("details", "script", "style"):
+            self.skip += 1
+        elif not self.skip:
+            self.attrs += [v for k, v in attrs if k in ("title", "aria-label", "placeholder") and v]
+
+    def handle_endtag(self, tag):
+        if tag in ("details", "script", "style") and self.skip:
+            self.skip -= 1
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+
+COPY_DUMP = r"""
+const m = require(process.argv[2]);
+console.log(JSON.stringify(m.copyTables()));
+"""
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def test_default_view_has_no_code_words(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    parser = _PlainText()
+    parser.feed(text("index.html"))
+    script = tmp_path / "copy.js"
+    script.write_text("globalThis.matchMedia = () => ({ matches: false });" + COPY_DUMP, "utf-8")
+    cmd = [node, str(script), str(WEB_DIR / "app.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    tables = json.loads(r.stdout)
+    # a new *_TH table must be added to copyTables(), or this guard would not see it
+    declared = set(re.findall(r"^const (\w+_TH)\b", text("app.js"), re.M))
+    assert declared <= set(tables), declared - set(tables)
+    pool = {"index.html": " ".join(parser.out)}
+    for name, value in tables.items():
+        if name == "TOUR_STEPS":  # the selectors are not copy
+            value = [step["text"] for step in value]
+        elif name in ("ALERT_FILTERS", "SPEED_CHIPS"):  # the keys are not copy
+            value = [item["label"] for item in value]
+        pool[name] = " ".join(_strings(value))
+    for where, body in pool.items():
+        assert body.strip(), f"{where} is empty: the guard would pass on nothing"
+        for word in CODE_WORDS:
+            assert word not in body, f"{word!r} in {where}"
+    # no English in the plain view: tables and the attributes a screen reader or a tooltip shows
+    assert parser.attrs, "no title/aria-label/placeholder found in index.html"
+    attr_re = r'(?:title:|\.title =|"aria-label",|placeholder:)\s*"([^"$`]*)"'
+    js_attrs = re.findall(attr_re, text("app.js"))
+    assert js_attrs
+    checked = {k: v for k, v in pool.items() if k != "index.html"}
+    checked["index.html attributes"] = " ".join(parser.attrs)
+    checked["app.js attributes"] = " ".join(js_attrs)
+    for where, body in checked.items():
+        assert not _latin_words(body), f"Latin text in {where}: {_latin_words(body)}"
+
+
+LOST_BODY = r"""
+const keep = {};
+globalThis.window = { localStorage: {
+  getItem: (k) => keep[k] ?? null, setItem: (k, v) => { keep[k] = String(v); } } };
+document.querySelector = () => null;
+location.hash = "#/home";
+m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
+m.setRoute("home");
+const tour = document.getElementById("tour");
+const drawer = document.getElementById("help-drawer");
+// the session dies in the middle of the tour: the tour closes and is not marked seen
+m.startTour();
+assert.strictEqual(tour.hidden, false);
+m.sessionLost();
+assert.strictEqual(tour.hidden, true);
+assert.strictEqual(keep["idsai.tour_done"], undefined, "a lost session is not a finished tour");
+// ... and in the middle of the drawer
+m.openHelp();
+assert.strictEqual(drawer.hidden, false);
+m.sessionLost();
+assert.strictEqual(drawer.hidden, true);
+assert.strictEqual(document.getElementById("help-backdrop").hidden, true);
+assert.ok(location.hash.startsWith("#/login"));
+console.log("ok");
+"""
+
+
+def test_session_lost_closes_the_tour_and_the_drawer(tmp_path):
+    _run_dom(tmp_path, "false", LOST_BODY)
+
+
+FOCUS_BODY = r"""
+document.querySelector = () => null;
+m.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });
+m.setRoute("home");
+const chip = document.getElementById("user-chip");
+chip.tagName = "DETAILS";
+chip.open = false;
+const summary = new Node("summary");
+chip.appendChild(summary);
+chip.querySelector = (q) => (q === "summary" ? summary : null);
+const menuTour = new Node("button");
+chip.appendChild(menuTour);
+const helpBtn = document.getElementById("help-btn");
+let focused = null;
+for (const n of [summary, menuTour, helpBtn]) n.focus = () => { focused = n; };
+// the tour was started from a menu that is closed now: focus goes to the chip's summary
+document.activeElement = menuTour;
+m.startTour();
+focused = null;
+m.endTour();
+assert.strictEqual(focused, summary);
+// the chip itself is hidden (no account): the help button
+chip.hidden = true;
+document.activeElement = menuTour;
+m.startTour();
+focused = null;
+m.endTour();
+assert.strictEqual(focused, helpBtn);
+// the drawer opened from a visible control gives focus back to it
+chip.hidden = false;
+const visible = new Node("button");
+visible.focus = () => { focused = visible; };
+document.activeElement = visible;
+m.openHelp();
+m.closeHelp();
+assert.strictEqual(focused, visible);
+// ... but not to one that went into a closed menu meanwhile
+document.activeElement = menuTour;
+m.openHelp();
+focused = null;
+m.closeHelp();
+assert.strictEqual(focused, summary);
+console.log("ok");
+"""
+
+
+def test_focus_falls_back_when_the_origin_is_hidden(tmp_path):
+    _run_dom(tmp_path, "false", FOCUS_BODY)
+
+
+ABOUT_BODY = r"""
+globalThis.window.addEventListener = () => {};
+m.bindHelp();
+const link = document.getElementById("footer-about");
+globalThis.window.addEventListener = () => {};
+const prevented = [];
+const ev = { preventDefault: () => prevented.push(1) };
+const click = () => { for (const f of link.listeners.click) f(ev); };
+m.setView("login");
+click();
+assert.strictEqual(m.helpIsOpen(), false, "no drawer over the sign-in page");
+m.setView("app");
+click();
+assert.strictEqual(m.helpIsOpen(), true);
+assert.strictEqual(prevented.length, 2);
+console.log("ok");
+"""
+
+
+def test_footer_about_opens_the_drawer_only_in_the_app(tmp_path):
+    _run_dom(tmp_path, "false", ABOUT_BODY)
+
+
+HERO_PENDING_BODY = r"""
+(async () => {
+  const st = m.getState();
+  const title = () => document.getElementById("hero-title").textContent;
+  const line = () => document.getElementById("hero-line").textContent;
+  const count = () => document.getElementById("alerts-count").textContent;
+  st.symbol = "STEEMBTC";
+  st.health = { overall: "ok", event_us: 5e12, mode: "replay" };
+  document.getElementById("hero-title").textContent = "กำลังอ่านสถานะ";
+  // the clock is known but no alerts have answered yet: never "ตลาดปกติ", and no number in the card
+  m.renderHero();
+  m.renderAlertsKpi();
+  assert.strictEqual(title(), "กำลังอ่านสถานะ");
+  assert.strictEqual(line(), "");
+  assert.strictEqual(count(), "–");
+  // the load fails: plain Thai says the status could not be read
+  console.warn = () => {};
+  globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+  await m.loadAlerts();
+  assert.strictEqual(title(), "ยังอ่านสถานะไม่ได้");
+  assert.ok(line().includes("อ่านรายการแจ้งเตือนไม่ได้") && !/[A-Za-z]/.test(line()), line());
+  assert.ok(!/[A-Za-z]/.test(document.getElementById("alerts-error").textContent));
+  assert.strictEqual(count(), "–");
+  // the load works: only now can the hero say the market is calm
+  globalThis.fetch = async (path) => ({ ok: true, status: 200,
+    json: async () => (path.startsWith("/api/alerts") ? [] : []) });
+  await m.loadAlerts();
+  assert.strictEqual(title(), "ตลาดปกติ");
+  assert.strictEqual(st.alertsFailed, false);
+  assert.deepStrictEqual(m.heroPending(false),
+    { level: "wait", title: "กำลังอ่านสถานะ", line: "", alertId: null });
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_hero_waits_for_alerts_and_says_when_they_cannot_be_read(tmp_path):
+    _run_dom(tmp_path, "true", HERO_PENDING_BODY)
+
+
+PLAIN_ERROR_BODY = r"""
+const err = (status, message) => Object.assign(new Error(message), { status });
+const t = m.plainErrorText;
+assert.strictEqual(t(err(403, "สิทธิ์ไม่พอ (ต้องเป็น analyst)")), "สิทธิ์ไม่พอสำหรับการทำรายการนี้");
+assert.strictEqual(t(err(409, "conflict")), m.copyTables().ACT_CONFLICT_TH);
+assert.strictEqual(t(err(422, "Input should be valid")), m.copyTables().ACT_INVALID_TH);
+for (const e of [err(500, "boom"), err(502, "Bad Gateway"), err(404, "nope"), err(401, "x")]) {
+  assert.strictEqual(t(e), "ทำรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
+}
+for (const e of [new TypeError("Failed to fetch"), null, undefined]) {
+  assert.strictEqual(t(e), "ติดต่อเซิร์ฟเวอร์ไม่ได้");
+}
+for (const v of Object.values(m.copyTables())) {
+  if (typeof v === "string") assert.ok(!/analyst|HTTP|fetch/i.test(v), v);
+}
+console.log("ok");
+"""
+
+
+def test_plain_error_text_maps_status_to_thai(tmp_path):
+    _run_dom(tmp_path, "false", PLAIN_ERROR_BODY)
+
+
+SEEK_BODY = r"""
+const S = 1e6;
+// Thai time in the box, UTC microseconds out: 07:00 in Bangkok is 00:00 UTC
+assert.strictEqual(m.seekInputToUs("2025-03-01T07:00"), Date.UTC(2025, 2, 1, 0, 0) * 1000);
+assert.strictEqual(m.seekInputToUs("2025-03-01T00:30:15"),
+  Date.UTC(2025, 1, 28, 17, 30, 15) * 1000);
+// what the confirmation shows is the same clock the user typed
+assert.strictEqual(m.fmtThaiTime(m.seekInputToUs("2025-03-01T23:15"), false), "23:15 น.");
+assert.strictEqual(m.seekInputToUs(""), null);
+assert.strictEqual(m.seekInputToUs("not a time"), null);
+assert.strictEqual(m.seekInputToUs(undefined), null);
+console.log("ok");
+"""
+
+
+def test_seek_input_is_thai_time(tmp_path):
+    _run_dom(tmp_path, "false", SEEK_BODY)
+    html = text("index.html")
+    assert "ไปที่เวลา (เวลาไทย)" in html
+    seek = re.search(r'<div id="advanced-seek".*?</div>', html, re.S).group(0)
+    assert "UTC" not in seek
+
+
+TRAP_BODY = r"""
+const root = new Node("div");
+const mk = () => {
+  const b = new Node("button");
+  b.focus = () => { document.activeElement = b; };
+  root.appendChild(b);
+  return b;
+};
+const first = mk(); const mid = mk(); const last = mk();
+root.contains = (n) => n === root || root.children.includes(n);
+root.querySelectorAll = () => [first, mid, last];
+root.focus = () => { document.activeElement = root; };
+const press = (shiftKey) => {
+  let stopped = false;
+  m.trapTab({ shiftKey, preventDefault: () => { stopped = true; } }, root);
+  return stopped;
+};
+// the container itself has focus: Shift+Tab goes to the last control, Tab to the first
+document.activeElement = root;
+assert.strictEqual(press(true), true);
+assert.strictEqual(document.activeElement, last);
+document.activeElement = root;
+assert.strictEqual(press(false), true);
+assert.strictEqual(document.activeElement, first);
+// inside: the ends wrap, the middle is left alone
+document.activeElement = first;
+assert.strictEqual(press(true), true);
+assert.strictEqual(document.activeElement, last);
+document.activeElement = last;
+assert.strictEqual(press(false), true);
+assert.strictEqual(document.activeElement, first);
+document.activeElement = mid;
+assert.strictEqual(press(false), false);
+// focus outside comes in
+document.activeElement = new Node("a");
+assert.strictEqual(press(false), true);
+assert.strictEqual(document.activeElement, first);
+console.log("ok");
+"""
+
+
+def test_trap_tab_keeps_shift_tab_inside_from_the_container(tmp_path):
+    _run_dom(tmp_path, "false", TRAP_BODY)
+
+
+FOOTER_BODY = r"""
+globalThis.window.addEventListener = () => {};
+m.bindHelp();
+const footer = document.getElementById("site-footer");
+const link = document.getElementById("footer-about");
+const ev = { preventDefault() {} };
+for (const view of ["loading", "login"]) {
+  m.showView(view);
+  assert.strictEqual(footer.hidden, true, view);
+}
+m.showView("app");
+assert.strictEqual(footer.hidden, false);
+// a click that somehow lands on the sign-in view queues nothing for after sign-in
+m.showView("login");
+for (const f of link.listeners.click) f(ev);
+assert.strictEqual(m.getState().pendingHelp, false);
+console.log("ok");
+"""
+
+
+def test_footer_link_is_hidden_outside_the_app_and_queues_nothing(tmp_path):
+    _run_dom(tmp_path, "false", FOOTER_BODY)
+
+
+def test_user_menu_keeps_its_visible_name_and_utc_stays_out_of_plain_tooltips():
+    html = text("index.html")
+    summary = re.search(r'<details id="user-chip".*?</summary>', html, re.S).group(0)
+    assert "aria-label" not in summary  # WCAG 2.5.3: the visible name is the accessible name
+    assert re.search(r'class="sr-only">\s*เมนูผู้ใช้', summary)
+    assert re.search(r"\.sr-only\s*\{[^}]*clip", text("styles.css"))
+    for tip in re.findall(r'title="([^"]*)"', html):
+        assert "UTC" not in tip, tip
+
+
+def test_no_dead_css_classes_left():
+    css, html, js = text("styles.css"), text("index.html"), text("app.js")
+    dead = ("banner", "banner-warn", "banner-fail", "grid-2", "form-actions", "legend")
+    for cls in (*dead, "clickable", "menu-sep"):
+        assert not re.search(rf"\.{cls}\b", css), cls
+        assert not re.search(rf'class="[^"]*{cls}', html), cls
+        assert not re.search(rf"[\"' ]{cls}[\"' ]", js), cls
+    assert "button.selected" not in css and "@keyframes pulse" not in css

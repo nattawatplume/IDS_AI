@@ -37,6 +37,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictFloat,
     StrictInt,
     StringConstraints,
@@ -144,6 +145,7 @@ class PrefsIn(_Body):
     theme: Literal["dark", "light", "auto"] | None = None
     symbol: str | None = Field(default=None, max_length=32)
     eval_budget: StrictInt | Annotated[StrictFloat, Field(allow_inf_nan=False)] | None = None
+    tour_done: StrictBool | None = None
 
 
 class _ClientGone(Exception):
