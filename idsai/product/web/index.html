@@ -31,15 +31,15 @@
       <a href="#/results" data-route="results"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 20h16M6.5 20v-7M12 20V5.5M17.5 20v-10"/></svg><span>ผลวัดระบบ</span></a>
     </nav>
     <div class="topbar-side">
-      <span class="chip mode-chip" title="โหมดข้อมูลและเวลาเหตุการณ์ (UTC)">
+      <span class="chip mode-chip" title="โหมดข้อมูลและเวลาเหตุการณ์ (เวลาไทย)">
         <span id="live-dot" class="dot"></span>
         <span id="mode-badge" class="badge-mode">…</span>
         <span id="clock" class="clock">–</span>
       </span>
       <button id="help-btn" class="icon-btn" type="button" aria-label="วิธีใช้" title="วิธีใช้ (กด ?)">?</button>
       <details id="user-chip" class="user-chip" hidden>
-        <summary class="chip" aria-label="เมนูผู้ใช้">
-          <span id="user-name">–</span>
+        <summary class="chip">
+          <span id="user-name">–</span><span class="sr-only"> เมนูผู้ใช้</span>
           <span id="user-role" class="role">–</span>
         </summary>
         <div class="user-menu">
@@ -156,13 +156,13 @@
         <div class="home-side">
           <div id="replay-bar" class="card replay-bar" hidden>
             <div class="replay-top">
-              <button id="btn-play" type="button" class="primary play-btn" aria-label="หยุดชั่วคราว" title="หยุดชั่วคราว (กด Space)">❚❚</button>
+              <button id="btn-play" type="button" class="primary play-btn" aria-label="หยุดชั่วคราว" title="หยุดชั่วคราว (กดแป้นเว้นวรรค)">❚❚</button>
               <div class="replay-now">
                 <span class="replay-label">ย้อนดูข้อมูลจริง</span>
                 <span id="replay-clock" class="replay-clock small">–</span>
               </div>
             </div>
-            <div class="replay-track" title="ตำแหน่งของเวลาในข้อมูลภายในวันนั้น (UTC)"><span id="replay-fill" class="replay-fill"></span></div>
+            <div class="replay-track" title="ตำแหน่งของเวลาในข้อมูลภายในวันนั้น (เวลาไทย)"><span id="replay-fill" class="replay-fill"></span></div>
             <div class="speed-row">
               <span class="small muted">ความเร็ว</span>
               <div class="speed-chips" role="group" aria-label="ความเร็วในการเล่น">
@@ -178,7 +178,7 @@
               <summary class="small">ขั้นสูง</summary>
               <div id="advanced-seek" class="advanced-seek">
                 <label class="field">
-                  <span>ไปที่เวลา (UTC)</span>
+                  <span>ไปที่เวลา (เวลาไทย)</span>
                   <input id="seek-input" type="datetime-local" step="1">
                 </label>
                 <button id="btn-seek" type="button">ไป</button>

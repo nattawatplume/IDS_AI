@@ -1,7 +1,7 @@
 /* Market IDS dashboard: one plain script, no build step, same-origin fetch and WebSocket only.
  *
  * Every server string reaches the DOM through textContent (`el`); nothing is parsed as HTML.
- * API times are µs UTC; the chart uses whole seconds (UTCTimestamp) and every shown time is UTC.
+ * API times are µs UTC; the chart uses whole seconds (UTCTimestamp) and the plain view shows Thai time (UTC+7); UTC only appears in the folded details.
  * The chart library throws on an update older than the last point, so a bar or score whose time
  * is not after the last plotted one is dropped (one can arrive after a seek's alerts_reset).
  */
@@ -131,6 +131,7 @@ const state = {
   railIds: null, // alert ids already on the rail; null until the first render
   alertCount: 0,
   alertCountKnown: false, // the count has been shown once: only a later rise flashes the card
+  alertsFailed: false, // the first /api/alerts failed: the hero says the status could not be read
   alertsLoaded: false, // the first /api/alerts answered: before it, a count is not yet the real one
   hero: null, // the last heroStatus shown: the DOM is touched only when it changes
   speed: null, // the speed chip the server last accepted
@@ -152,7 +153,9 @@ const AUDIT_ACTIONS = [
   "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
 ];
-const NEED_ANALYST_TH = "ต้องเป็น analyst";
+// parent techniques whose taxonomy name_th holds Latin words ("wash trading"): the plain view names them here
+const TECHNIQUE_TH = { "MM-T005": "การซื้อขายวนหลอก" };
+const NEED_ANALYST_TH = "ต้องเป็นผู้วิเคราะห์ขึ้นไป";
 const DEFAULT_ROUTE = "#/home";
 const ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" };
 const MODE_TH = { replay: "ย้อนดู", live: "สด", sim: "จำลอง" };
@@ -494,7 +497,7 @@ function trapTab(ev, root) {
   const first = items[0];
   const last = items[items.length - 1];
   const active = document.activeElement;
-  if (!root.contains(active) || (ev.shiftKey && active === first)) {
+  if (!root.contains(active) || active === root || (ev.shiftKey && active === first)) {
     ev.preventDefault();
     (ev.shiftKey ? last : first).focus();
   } else if (!ev.shiftKey && active === last) {
@@ -671,8 +674,7 @@ function bindHelp() {
   $("tour-done").addEventListener("click", endTour);
   $("footer-about").addEventListener("click", (ev) => {
     ev.preventDefault();
-    if (state.view === "app") openHelp();
-    else state.pendingHelp = true; // no help over the loader or the sign-in page
+    if (state.view === "app") openHelp(); // the link is only shown in the app; nothing is queued from elsewhere
   });
   window.addEventListener("resize", () => {
     if (tourState.open) showTourStep(tourState.i);
@@ -895,7 +897,7 @@ function applyRoleGates() {
     gate(node);
   }
   $("menu-activity").hidden = !can("admin");
-  renderPlayButton(); // the gate above cleared every title; the play button gets its "(กด Space)" back
+  renderPlayButton(); // the gate above cleared every title; the play button gets its "(กดแป้นเว้นวรรค)" back
 }
 
 function eventNowUs() {
@@ -927,7 +929,7 @@ function renderBudget() {
 // the card counts the selected symbol's alerts of the last 24 h (the unit of the budget); null without a clock
 function renderAlertsKpi(now = eventNowUs()) {
   const box = $("alerts-count");
-  if (!state.symbol || !isNum(now)) {
+  if (!state.symbol || !isNum(now) || !state.alertsLoaded) {
     box.textContent = "–";
     state.alertCount = 0;
     state.alertCountKnown = false;
@@ -978,10 +980,20 @@ function heroStatus({ nowUs, alerts, f, tau, auditor, symbol } = {}) {
   return { level: "normal", title: "ตลาดปกติ", line: "ไม่มีแจ้งเตือนใน 30 นาทีล่าสุด", alertId: null };
 }
 
+// before the first alerts answer, "no alert" is not yet known: never claim a calm market
+function heroPending(failed) {
+  return {
+    level: "wait",
+    title: failed ? "ยังอ่านสถานะไม่ได้" : "กำลังอ่านสถานะ",
+    line: failed ? "อ่านรายการแจ้งเตือนไม่ได้ จึงยังบอกสถานะตลาดไม่ได้ ระบบจะลองใหม่เมื่อเชื่อมต่อได้" : "",
+    alertId: null,
+  };
+}
+
 // runs on every health, score and alert update; writes the DOM only when the sentence changes
 function renderHero() {
-  if (!state.health && !isNum(state.lastBarUs)) return; // no clock yet: keep "กำลังอ่านสถานะ"
-  const next = heroStatus({
+  if (!state.health && !isNum(state.lastBarUs) && !state.alertsFailed) return; // no clock yet: keep "กำลังอ่านสถานะ"
+  const next = !state.alertsLoaded ? heroPending(state.alertsFailed) : heroStatus({
     nowUs: eventNowUs(),
     alerts: state.alerts.values(),
     f: chart.now.f,
@@ -1005,7 +1017,7 @@ function renderHero() {
   }
 }
 
-// the replay bar's clock: the event time, and how far through its UTC day it is
+// the replay bar's clock: the event time, and how far through its Thai day it is
 function renderReplayClock(now) {
   const clock = $("replay-clock");
   const fill = $("replay-fill");
@@ -1384,7 +1396,8 @@ async function control(action, value) {
     status.textContent = action === "seek" ? `ไปที่ ${fmtThaiTime(r.cursor_us, true)} แล้ว` : "";
     return true;
   } catch (e) {
-    status.textContent = e.message;
+    console.warn("replay control:", e && e.message);
+    status.textContent = e && e.status === 409 && e.message === REPLAY_ENDED_TH ? REPLAY_ENDED_TH : plainErrorText(e);
     return false;
   }
 }
@@ -1396,13 +1409,21 @@ function renderPlayButton() {
   btn.textContent = playing ? "❚❚" : "▶";
   const label = playing ? "หยุดชั่วคราว" : "เล่นต่อ";
   btn.setAttribute("aria-label", label);
-  if (can("analyst")) btn.title = `${label} (กด Space)`;
+  if (can("analyst")) btn.title = `${label} (กดแป้นเว้นวรรค)`;
 }
 
 function renderSpeedChips() {
   for (const chip of $("replay-bar").querySelectorAll(".chip")) {
     chip.setAttribute("aria-pressed", String(Number(chip.dataset.speed) === state.speed));
   }
+}
+
+// the "go to time" box takes Thai time (UTC+7, the time shown everywhere): the server wants UTC microseconds
+function seekInputToUs(raw) {
+  const text = String(raw ?? "");
+  if (!text) return null;
+  const ms = Date.parse(text.length === 16 ? `${text}:00Z` : `${text}Z`); // read as if UTC, then take the 7 h back
+  return Number.isNaN(ms) ? null : Math.round(ms) * 1000 - TH_OFFSET_US;
 }
 
 function bindReplay() {
@@ -1424,12 +1445,12 @@ function bindReplay() {
   });
   $("btn-seek").addEventListener("click", () => {
     const raw = $("seek-input").value;
-    const ms = Date.parse(raw.length === 16 ? `${raw}:00Z` : `${raw}Z`); // the input is UTC
-    if (!raw || Number.isNaN(ms)) {
-      $("replay-status").textContent = "ใส่วันและเวลา (UTC) ก่อน";
+    const us = seekInputToUs(raw);
+    if (us === null) {
+      $("replay-status").textContent = "ใส่วันและเวลา (เวลาไทย) ก่อน";
       return;
     }
-    control("seek", Math.round(ms) * 1000);
+    control("seek", us);
   });
 }
 
@@ -1449,13 +1470,17 @@ async function loadAlerts() {
     ]);
   } catch (e) {
     console.warn("alerts:", e.message);
-    err.textContent = `อ่านรายการแจ้งเตือนไม่ได้ (${e.message}) จะลองใหม่เมื่อเชื่อมต่อได้`;
+    err.textContent = `อ่านรายการแจ้งเตือนไม่ได้ (${plainErrorText(e)}) จะลองใหม่เมื่อเชื่อมต่อได้`;
     err.hidden = false;
+    state.alertsFailed = true;
+    renderAlertsKpi();
+    renderHero();
     return;
   }
   state.alerts = new Map(items.map((a) => [a.alert_id, a]));
   if (rows) state.feedback = groupFeedback(rows);
   state.alertsLoaded = true;
+  state.alertsFailed = false;
   err.textContent = rows ? "" : "อ่านผลการตรวจไม่ได้ ตัวกรองตามผลตรวจอาจยังไม่ครบ";
   err.hidden = !!rows;
   alertsChanged();
@@ -1633,6 +1658,7 @@ function thaiTechniqueName(tax, techniqueId) {
   const parent = parentTechnique(techniqueId);
   const t = tax && tax[parent];
   if (!t || typeof t.name_th !== "string" || /-T000$/.test(parent)) return null;
+  if (TECHNIQUE_TH[parent]) return TECHNIQUE_TH[parent]; // a name whose taxonomy text keeps Latin words
   const name = t.name_th.replace(/\s*\([^)]*\)/g, "").trim();
   return name && !/[A-Za-z]/.test(name) ? name : null;
 }
@@ -1952,7 +1978,8 @@ function feedbackCard(a, onSaved) {
       await postJson(`/api/alerts/${encodeURIComponent(a.alert_id)}/feedback`, { verdict, analyst: name });
     } catch (e) {
       status.classList.add("inline-error");
-      status.textContent = `บันทึกไม่สำเร็จ (${e.message})`;
+      console.warn("feedback:", e && e.message);
+      status.textContent = `บันทึกไม่สำเร็จ (${plainErrorText(e)})`;
       setBusy(false);
       return;
     }
@@ -2068,6 +2095,21 @@ function simErrorText(err) {
   if (status === 422 && /offset|ข้อมูลสุดท้าย/.test(msg)) return SIM_PAST_END_TH;
   if (status === 422 && /symbol/.test(msg)) return SIM_SYMBOL_TH;
   return SIM_FAILED_TH;
+}
+
+// any other refused or failed request, in plain Thai: the server's own text can be English or carry field names
+const NET_FAILED_TH = "ติดต่อเซิร์ฟเวอร์ไม่ได้";
+const ACT_FAILED_TH = "ทำรายการไม่สำเร็จ ลองใหม่อีกครั้ง";
+const ACT_FORBIDDEN_TH = "สิทธิ์ไม่พอสำหรับการทำรายการนี้";
+const ACT_CONFLICT_TH = "ตอนนี้ทำรายการนี้ไม่ได้ เพราะสถานะเปลี่ยนไปแล้ว";
+const ACT_INVALID_TH = "ข้อมูลที่ส่งไม่ถูกต้อง";
+function plainErrorText(err) {
+  const status = err && err.status;
+  if (!isNum(status)) return NET_FAILED_TH; // fetch itself failed: no HTTP answer at all
+  if (status === 403) return ACT_FORBIDDEN_TH;
+  if (status === 409) return ACT_CONFLICT_TH;
+  if (status === 422) return ACT_INVALID_TH;
+  return ACT_FAILED_TH; // 401 is handled by sessionLost; 5xx and the rest
 }
 
 // the advanced fields; null when the start offset is out of range
@@ -2424,7 +2466,7 @@ function resultSentence(target, value, extra) {
     if (x.reason) return `เทียบกับวิธีพื้นฐาน: ${x.reason}`;
     // the report's own gate says "better"; otherwise the 95% CI of the difference: wholly below 0 is worse
     const better = typeof x.significant === "boolean" ? x.significant : ci[0] > 0;
-    return `เทียบกับวิธีพื้นฐาน: ${better ? "ดีกว่า" : ci[1] < 0 ? "แย่กว่า" : "ไม่ต่างอย่างมีนัยสำคัญ"}`;
+    return `เทียบกับวิธีพื้นฐาน: ${better ? "ระบบนี้ดีกว่าวิธีนี้" : ci[1] < 0 ? "ระบบนี้แย่กว่าวิธีนี้" : "ไม่ต่างกันอย่างมีนัยสำคัญ"}`;
   }
   if (target.metric === "recall_any") {
     const at = `(เมื่อเตือนไม่เกิน ${fmtPlain(b)} ${PER_DAY_TH})`;
@@ -2616,7 +2658,8 @@ async function showEval() {
   try {
     report = await api("/api/experiments");
   } catch (e) {
-    clear(box).appendChild(el("p", { class: "empty" }, e.message));
+    console.warn("experiments:", e && e.message);
+    clear(box).appendChild(el("p", { class: "empty" }, `อ่านผลวัดระบบไม่ได้ (${plainErrorText(e)})`));
     return;
   }
   clear(box);
@@ -3087,7 +3130,7 @@ async function loadMe() {
 function showView(view) {
   state.view = view;
   $("boot-loader").hidden = view !== "loading";
-  $("site-footer").hidden = view === "loading";
+  $("site-footer").hidden = view !== "app"; // the About link opens the drawer, which only exists in the app
 }
 
 function bindLogin() {
@@ -3425,12 +3468,22 @@ if (typeof document !== "undefined") {
     PAGE_ORDER,
     DEFAULT_ROUTE,
     heroStatus,
+    heroPending,
+    renderHero,
+    renderAlertsKpi,
+    loadAlerts,
+    plainErrorText,
+    getState: () => state,
     HERO_WATCH_RATIO,
     HERO_RECENT_US,
     SPEED_CHIPS,
     firstSentence,
     applyRoleGates,
     ALERT_FILTERS,
+    thaiTechniqueName,
+    trapTab,
+    seekInputToUs,
+    showView,
     VERDICT_TH,
     filterAlerts,
     onAlert,
@@ -3461,6 +3514,12 @@ if (typeof document !== "undefined") {
       SEMISYN_TH,
       BASELINE_TH,
       NEED_ANALYST_TH,
+      TECHNIQUE_TH,
+      NET_FAILED_TH,
+      ACT_FAILED_TH,
+      ACT_FORBIDDEN_TH,
+      ACT_CONFLICT_TH,
+      ACT_INVALID_TH,
       ROLE_TH,
       MODE_TH,
       TARGET_STATE_TH,

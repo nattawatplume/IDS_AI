@@ -547,7 +547,7 @@ def test_reduced_motion_disables_animation():
     css = text("styles.css")
     block = css.split("prefers-reduced-motion: reduce")[1]
     assert "animation" in block and "transition" in block
-    for name in ("pulse", "glow", "pop", "rise", "grow"):
+    for name in ("glow", "pop", "rise", "grow"):
         assert f"@keyframes {name}" in css, name
 
 
@@ -663,7 +663,7 @@ def test_alerts_kpi_counts_the_selected_symbol_only():
 
 def test_resting_styles_are_visible_when_animation_does_not_run():
     css = text("styles.css").replace("\r\n", "\n")
-    for sel in (r"\.rise", r"\.rail-row\.enter", r"\.forest \.ci-line", r"\.pop"):
+    for sel in (r"\.rail-row\.enter", r"\.forest \.ci-line"):
         rules = re.findall(r"(?m)^" + sel + r"\s*\{([^}]*)\}", css)
         assert rules, sel
         for body in rules:
@@ -895,17 +895,18 @@ assert.strictEqual(s(T("real_fa"), 1.6498753, {}), "เตือนผิดเ�
 assert.strictEqual(s(T("real_fa_hard"), 11.169999, {}), "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
 assert.strictEqual(s(T("real_fa_hard"), 0, {}), "เตือนผิดในวันที่ไม่มีเหตุการณ์ 0 ครั้ง");
 const pair = T("ae_vs_baseline.iforest");
-assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3] }), "เทียบกับวิธีพื้นฐาน: ดีกว่า");
-assert.strictEqual(s(pair, 0.05, { ci: [-0.1, 0.2] }), "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
-assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121] }), "เทียบกับวิธีพื้นฐาน: แย่กว่า");
+assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3] }), "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
+assert.strictEqual(s(pair, 0.05, { ci: [-0.1, 0.2] }), "เทียบกับวิธีพื้นฐาน: ไม่ต่างกันอย่างมีนัยสำคัญ");
+assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121] }), "เทียบกับวิธีพื้นฐาน: ระบบนี้แย่กว่าวิธีนี้");
 assert.strictEqual(s(T("ae_vs_baseline.pca"), 0.075, { ci: [0.035, 0.122] }),
-  "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+  "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
 // gated pairs follow the report's own significant flag and reason
 assert.strictEqual(s(pair, 0.01, { ci: [0.005, 0.02], significant: false }),
-  "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ"); // CI above 0 but the gate (effect size) says no
-assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3], significant: true }), "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+  "เทียบกับวิธีพื้นฐาน: ไม่ต่างกันอย่างมีนัยสำคัญ"); // CI above 0 but the gate (effect size) says no
+assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3], significant: true }),
+  "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
 assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121], significant: false }),
-  "เทียบกับวิธีพื้นฐาน: แย่กว่า");
+  "เทียบกับวิธีพื้นฐาน: ระบบนี้แย่กว่าวิธีนี้");
 const few = "ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 3 ครั้ง";
 assert.strictEqual(s(pair, 0.3, { ci: [0.1, 0.5], significant: false, reason: few }),
   "เทียบกับวิธีพื้นฐาน: " + few);
@@ -1033,7 +1034,7 @@ def test_mutating_buttons_check_can():
     rt = js[js.index("async function startSimulation(") : js.index("function addInjection(")]
     assert 'can("analyst")' in rt and rt.index('can("analyst")') < rt.index("postJson(")
     gates = js[js.index("function applyRoleGates(") :]
-    assert "ต้องเป็น analyst" in js and "title" in gates[:1500]
+    assert "ต้องเป็นผู้วิเคราะห์ขึ้นไป" in js and "title" in gates[:1500]
 
 
 def test_401_goes_to_login_with_next():
@@ -1535,7 +1536,7 @@ for (const id of ["btn-play", "seek-input", "btn-seek"]) {
 }
 for (const c of chips) assert.strictEqual(c.disabled, false);
 assert.strictEqual(nodes["replay-reason"].hidden, true);
-assert.ok(nodes["btn-play"].title.includes("(กด Space)"), nodes["btn-play"].title);
+assert.ok(nodes["btn-play"].title.includes("(กดแป้นเว้นวรรค)"), nodes["btn-play"].title);
 console.log("ok");
 """
 
@@ -2193,6 +2194,16 @@ def test_styles_css_blocks_are_balanced_and_motion_is_top_level():
     assert reduced and all(depth == 0 for _, depth, _, _ in reduced)
 
 
+def test_only_the_allowed_animations_loop():
+    # spec 4.12: the background drift, the status orb and the login line; the boot spinner is a
+    # loading indicator that goes away with the loader, not decoration
+    allowed = (".blob", ".orb", ".login-line-trace", ".boot-spinner")
+    for prelude, _, body, _ in _css_blocks(text("styles.css")):
+        if re.search(r"animation[^;]*infinite", body):
+            assert all(sel.strip().startswith(allowed) for sel in prelude.split(",")), prelude
+    assert not re.search(r"\.dot[^{]*\{[^}]*animation", text("styles.css"))
+
+
 SIM_ERROR_BODY = r"""
 const err = (status, message) => Object.assign(new Error(message), { status });
 const t = m.simErrorText;
@@ -2347,11 +2358,11 @@ RESULTS_BODY = r"""
   assert.strictEqual(badge("real_fa").textContent, "✓ ผ่านเป้า");
   has("real_fa_hard", "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
   has("semisyn_pump_burst", "จับเหตุการณ์จำลองได้ 30% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
-  has("ae_vs_baseline.iforest", "เทียบกับวิธีพื้นฐาน: แย่กว่า");
-  has("ae_vs_stat.robust_z", "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
+  has("ae_vs_baseline.iforest", "เทียบกับวิธีพื้นฐาน: ระบบนี้แย่กว่าวิธีนี้");
+  has("ae_vs_stat.robust_z", "เทียบกับวิธีพื้นฐาน: ไม่ต่างกันอย่างมีนัยสำคัญ");
   for (const id of ["ae_vs_baseline.random", "ae_vs_baseline.pca"]) {
     has(id, "วิธีเปรียบเทียบ");
-    has(id, "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+    has(id, "เทียบกับวิธีพื้นฐาน: ระบบนี้ดีกว่าวิธีนี้");
     assert.strictEqual(badge(id), undefined, id + " has no pass / fail");
   }
   has("latency_p99", "ความเร็วในการเตือน: ยังไม่วัด");
@@ -2511,6 +2522,35 @@ def test_help_drawer_taxonomy_has_no_ids(tmp_path):
     _run_dom(tmp_path, "false", HELP_TAX_BODY)
 
 
+REAL_TAX_BODY = r"""
+const tax = JSON.parse(require("fs").readFileSync(process.argv[3], "utf8"));
+const ids = Object.keys(tax).filter((id) => id !== "MM-T000");
+assert.ok(ids.length >= 5, ids.join());
+for (const id of ids) {
+  const name = m.thaiTechniqueName(tax, id);
+  assert.ok(name, `${id} has no Thai name`);
+  assert.ok(!/[A-Za-z]/.test(name), `${id}: ${name}`);
+  assert.strictEqual(m.thaiTechniqueName(tax, `${id}.001`), name, "a sub names its parent");
+}
+assert.strictEqual(m.thaiTechniqueName(tax, "MM-T005"), "การซื้อขายวนหลอก");
+assert.strictEqual(m.thaiTechniqueName(tax, "MM-T000"), null);
+const box = document.getElementById("help-taxonomy");
+m.renderHelpTaxonomy(box, tax);
+const heads = walk(box, (n) => n.tagName === "H4").map((n) => n.textContent);
+assert.deepStrictEqual(heads, ids.map((id) => m.thaiTechniqueName(tax, id)));
+console.log("ok");
+"""
+
+
+def test_every_real_technique_has_a_thai_name_and_a_drawer_card(tmp_path):
+    from idsai.detection.taxonomy import load_taxonomy
+
+    tax = load_taxonomy()
+    path = tmp_path / "tax.json"
+    path.write_text(json.dumps(tax), encoding="utf-8")
+    _run_dom(tmp_path, "false", REAL_TAX_BODY, path)
+
+
 def test_help_and_tour_markup():
     html = text("index.html")
     drawer = re.search(r'<aside id="help-drawer".*?</aside>', html, re.S).group(0)
@@ -2543,6 +2583,13 @@ CODE_WORDS = (
 )  # fmt: skip
 
 
+def _latin_words(body: str) -> list[str]:
+    """Latin words left after the allow-list: the product name and coin symbols (BTC, STEEMBTC)."""
+    body = body.replace("Market IDS", " ")
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_./-]*", body)
+    return [w for w in words if not re.fullmatch(r"[A-Z]{3,12}", w)]
+
+
 class _PlainText(HTMLParser):
     """The text a user sees by default: nothing inside <details>, <script> or <style>."""
 
@@ -2550,10 +2597,13 @@ class _PlainText(HTMLParser):
         super().__init__()
         self.skip = 0
         self.out: list[str] = []
+        self.attrs: list[str] = []  # title, aria-label and placeholder values of the plain view
 
     def handle_starttag(self, tag, attrs):
         if tag in ("details", "script", "style"):
             self.skip += 1
+        elif not self.skip:
+            self.attrs += [v for k, v in attrs if k in ("title", "aria-label", "placeholder") and v]
 
     def handle_endtag(self, tag):
         if tag in ("details", "script", "style") and self.skip:
@@ -2598,10 +2648,25 @@ def test_default_view_has_no_code_words(tmp_path):
     assert declared <= set(tables), declared - set(tables)
     pool = {"index.html": " ".join(parser.out)}
     for name, value in tables.items():
+        if name == "TOUR_STEPS":  # the selectors are not copy
+            value = [step["text"] for step in value]
+        elif name in ("ALERT_FILTERS", "SPEED_CHIPS"):  # the keys are not copy
+            value = [item["label"] for item in value]
         pool[name] = " ".join(_strings(value))
     for where, body in pool.items():
+        assert body.strip(), f"{where} is empty: the guard would pass on nothing"
         for word in CODE_WORDS:
             assert word not in body, f"{word!r} in {where}"
+    # no English in the plain view: tables and the attributes a screen reader or a tooltip shows
+    assert parser.attrs, "no title/aria-label/placeholder found in index.html"
+    attr_re = r'(?:title:|\.title =|"aria-label",|placeholder:)\s*"([^"$`]*)"'
+    js_attrs = re.findall(attr_re, text("app.js"))
+    assert js_attrs
+    checked = {k: v for k, v in pool.items() if k != "index.html"}
+    checked["index.html attributes"] = " ".join(parser.attrs)
+    checked["app.js attributes"] = " ".join(js_attrs)
+    for where, body in checked.items():
+        assert not _latin_words(body), f"Latin text in {where}: {_latin_words(body)}"
 
 
 LOST_BODY = r"""
@@ -2706,3 +2771,178 @@ console.log("ok");
 
 def test_footer_about_opens_the_drawer_only_in_the_app(tmp_path):
     _run_dom(tmp_path, "false", ABOUT_BODY)
+
+
+HERO_PENDING_BODY = r"""
+(async () => {
+  const st = m.getState();
+  const title = () => document.getElementById("hero-title").textContent;
+  const line = () => document.getElementById("hero-line").textContent;
+  const count = () => document.getElementById("alerts-count").textContent;
+  st.symbol = "STEEMBTC";
+  st.health = { overall: "ok", event_us: 5e12, mode: "replay" };
+  document.getElementById("hero-title").textContent = "กำลังอ่านสถานะ";
+  // the clock is known but no alerts have answered yet: never "ตลาดปกติ", and no number in the card
+  m.renderHero();
+  m.renderAlertsKpi();
+  assert.strictEqual(title(), "กำลังอ่านสถานะ");
+  assert.strictEqual(line(), "");
+  assert.strictEqual(count(), "–");
+  // the load fails: plain Thai says the status could not be read
+  console.warn = () => {};
+  globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+  await m.loadAlerts();
+  assert.strictEqual(title(), "ยังอ่านสถานะไม่ได้");
+  assert.ok(line().includes("อ่านรายการแจ้งเตือนไม่ได้") && !/[A-Za-z]/.test(line()), line());
+  assert.ok(!/[A-Za-z]/.test(document.getElementById("alerts-error").textContent));
+  assert.strictEqual(count(), "–");
+  // the load works: only now can the hero say the market is calm
+  globalThis.fetch = async (path) => ({ ok: true, status: 200,
+    json: async () => (path.startsWith("/api/alerts") ? [] : []) });
+  await m.loadAlerts();
+  assert.strictEqual(title(), "ตลาดปกติ");
+  assert.strictEqual(st.alertsFailed, false);
+  assert.deepStrictEqual(m.heroPending(false),
+    { level: "wait", title: "กำลังอ่านสถานะ", line: "", alertId: null });
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+def test_hero_waits_for_alerts_and_says_when_they_cannot_be_read(tmp_path):
+    _run_dom(tmp_path, "true", HERO_PENDING_BODY)
+
+
+PLAIN_ERROR_BODY = r"""
+const err = (status, message) => Object.assign(new Error(message), { status });
+const t = m.plainErrorText;
+assert.strictEqual(t(err(403, "สิทธิ์ไม่พอ (ต้องเป็น analyst)")), "สิทธิ์ไม่พอสำหรับการทำรายการนี้");
+assert.strictEqual(t(err(409, "conflict")), m.copyTables().ACT_CONFLICT_TH);
+assert.strictEqual(t(err(422, "Input should be valid")), m.copyTables().ACT_INVALID_TH);
+for (const e of [err(500, "boom"), err(502, "Bad Gateway"), err(404, "nope"), err(401, "x")]) {
+  assert.strictEqual(t(e), "ทำรายการไม่สำเร็จ ลองใหม่อีกครั้ง");
+}
+for (const e of [new TypeError("Failed to fetch"), null, undefined]) {
+  assert.strictEqual(t(e), "ติดต่อเซิร์ฟเวอร์ไม่ได้");
+}
+for (const v of Object.values(m.copyTables())) {
+  if (typeof v === "string") assert.ok(!/analyst|HTTP|fetch/i.test(v), v);
+}
+console.log("ok");
+"""
+
+
+def test_plain_error_text_maps_status_to_thai(tmp_path):
+    _run_dom(tmp_path, "false", PLAIN_ERROR_BODY)
+
+
+SEEK_BODY = r"""
+const S = 1e6;
+// Thai time in the box, UTC microseconds out: 07:00 in Bangkok is 00:00 UTC
+assert.strictEqual(m.seekInputToUs("2025-03-01T07:00"), Date.UTC(2025, 2, 1, 0, 0) * 1000);
+assert.strictEqual(m.seekInputToUs("2025-03-01T00:30:15"),
+  Date.UTC(2025, 1, 28, 17, 30, 15) * 1000);
+// what the confirmation shows is the same clock the user typed
+assert.strictEqual(m.fmtThaiTime(m.seekInputToUs("2025-03-01T23:15"), false), "23:15 น.");
+assert.strictEqual(m.seekInputToUs(""), null);
+assert.strictEqual(m.seekInputToUs("not a time"), null);
+assert.strictEqual(m.seekInputToUs(undefined), null);
+console.log("ok");
+"""
+
+
+def test_seek_input_is_thai_time(tmp_path):
+    _run_dom(tmp_path, "false", SEEK_BODY)
+    html = text("index.html")
+    assert "ไปที่เวลา (เวลาไทย)" in html
+    seek = re.search(r'<div id="advanced-seek".*?</div>', html, re.S).group(0)
+    assert "UTC" not in seek
+
+
+TRAP_BODY = r"""
+const root = new Node("div");
+const mk = () => {
+  const b = new Node("button");
+  b.focus = () => { document.activeElement = b; };
+  root.appendChild(b);
+  return b;
+};
+const first = mk(); const mid = mk(); const last = mk();
+root.contains = (n) => n === root || root.children.includes(n);
+root.querySelectorAll = () => [first, mid, last];
+root.focus = () => { document.activeElement = root; };
+const press = (shiftKey) => {
+  let stopped = false;
+  m.trapTab({ shiftKey, preventDefault: () => { stopped = true; } }, root);
+  return stopped;
+};
+// the container itself has focus: Shift+Tab goes to the last control, Tab to the first
+document.activeElement = root;
+assert.strictEqual(press(true), true);
+assert.strictEqual(document.activeElement, last);
+document.activeElement = root;
+assert.strictEqual(press(false), true);
+assert.strictEqual(document.activeElement, first);
+// inside: the ends wrap, the middle is left alone
+document.activeElement = first;
+assert.strictEqual(press(true), true);
+assert.strictEqual(document.activeElement, last);
+document.activeElement = last;
+assert.strictEqual(press(false), true);
+assert.strictEqual(document.activeElement, first);
+document.activeElement = mid;
+assert.strictEqual(press(false), false);
+// focus outside comes in
+document.activeElement = new Node("a");
+assert.strictEqual(press(false), true);
+assert.strictEqual(document.activeElement, first);
+console.log("ok");
+"""
+
+
+def test_trap_tab_keeps_shift_tab_inside_from_the_container(tmp_path):
+    _run_dom(tmp_path, "false", TRAP_BODY)
+
+
+FOOTER_BODY = r"""
+globalThis.window.addEventListener = () => {};
+m.bindHelp();
+const footer = document.getElementById("site-footer");
+const link = document.getElementById("footer-about");
+const ev = { preventDefault() {} };
+for (const view of ["loading", "login"]) {
+  m.showView(view);
+  assert.strictEqual(footer.hidden, true, view);
+}
+m.showView("app");
+assert.strictEqual(footer.hidden, false);
+// a click that somehow lands on the sign-in view queues nothing for after sign-in
+m.showView("login");
+for (const f of link.listeners.click) f(ev);
+assert.strictEqual(m.getState().pendingHelp, false);
+console.log("ok");
+"""
+
+
+def test_footer_link_is_hidden_outside_the_app_and_queues_nothing(tmp_path):
+    _run_dom(tmp_path, "false", FOOTER_BODY)
+
+
+def test_user_menu_keeps_its_visible_name_and_utc_stays_out_of_plain_tooltips():
+    html = text("index.html")
+    summary = re.search(r'<details id="user-chip".*?</summary>', html, re.S).group(0)
+    assert "aria-label" not in summary  # WCAG 2.5.3: the visible name is the accessible name
+    assert re.search(r'class="sr-only">\s*เมนูผู้ใช้', summary)
+    assert re.search(r"\.sr-only\s*\{[^}]*clip", text("styles.css"))
+    for tip in re.findall(r'title="([^"]*)"', html):
+        assert "UTC" not in tip, tip
+
+
+def test_no_dead_css_classes_left():
+    css, html, js = text("styles.css"), text("index.html"), text("app.js")
+    dead = ("banner", "banner-warn", "banner-fail", "grid-2", "form-actions", "legend")
+    for cls in (*dead, "clickable", "menu-sep"):
+        assert not re.search(rf"\.{cls}\b", css), cls
+        assert not re.search(rf'class="[^"]*{cls}', html), cls
+        assert not re.search(rf"[\"' ]{cls}[\"' ]", js), cls
+    assert "button.selected" not in css and "@keyframes pulse" not in css
