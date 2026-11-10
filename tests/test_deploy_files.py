@@ -1,4 +1,4 @@
-"""Deploy files for the Hugging Face Space image (no Docker needed to check them)."""
+"""Deploy files for the Render image (no Docker needed to check them)."""
 
 import importlib.util
 import os
@@ -125,68 +125,76 @@ def _workflow(name: str) -> tuple[dict, str]:
     return yaml.safe_load(text), text
 
 
-def test_deploy_space_workflow():
-    wf, text = _workflow("deploy-space.yml")
-    triggers = wf[True]  # PyYAML reads the key `on` as True
-    assert triggers["push"]["branches"] == ["main", "feat/mvp"]
-    assert wf["permissions"] == {"contents": "read"}
-    assert "workflow_dispatch" in triggers
-    steps = wf["jobs"]["deploy"]["steps"]
-    runs = "\n".join(s.get("run", "") for s in steps)
-    for want in ("data/", "models/", "*.duckdb", "hu_pd_logs.tsv"):
-        assert want in runs
-    assert "git ls-files" in runs
-    assert "sdk: docker" in runs
-    assert "app_port: 7860" in runs
-    assert "pinned: false" in runs
-    assert "huggingface.co/spaces/${HF_SPACE}" in runs
-    assert "HF_SPACE: ${{ vars.HF_SPACE }}" in text
-    assert "git push --force" in runs
-    assert "set -x" not in text
-    for s in steps:
-        lines = s.get("run", "").splitlines()
-        assert not any(ln.strip().startswith("echo") and "HF_TOKEN" in ln for ln in lines)
-    for ln in text.splitlines():
-        if "HF_TOKEN" in ln and "secrets." not in ln:
-            assert "HF_TOKEN}" in ln or "$HF_TOKEN" in ln or ln.strip().startswith("HF_TOKEN:")
-    assert text.count("secrets.HF_TOKEN") == 1
+def test_no_hf_deploy_workflow():
+    assert not (ROOT / ".github" / "workflows" / "deploy-space.yml").exists()
+
+
+def test_render_blueprint():
+    import yaml
+
+    text = (ROOT / "render.yaml").read_text(encoding="utf-8")
+    svc = yaml.safe_load(text)["services"][0]
+    assert svc["type"] == "web"
+    assert svc["name"] == "market-ids"
+    assert svc["runtime"] == "docker"
+    assert svc["plan"] == "free"
+    assert svc["healthCheckPath"] == "/api/health"
+    assert svc["autoDeploy"] is True
+    assert svc["envVars"] == [{"key": "IDSAI_USERS", "sync": False}]
+    assert "value" not in text
 
 
 def test_keepalive_workflow():
     wf, text = _workflow("keepalive.yml")
     triggers = wf[True]
-    assert triggers["schedule"] == [{"cron": "0 */6 * * *"}]
+    assert triggers["schedule"] == [{"cron": "*/10 * * * *"}]
     assert "workflow_dispatch" in triggers
     assert wf["permissions"] == {"contents": "read"}
-    assert "SPACE_URL: ${{ vars.SPACE_URL }}" in text
-    cmd = 'curl -fsS --retry 5 --retry-delay 30 --max-time 120 "https://$SPACE_URL/api/health"'
+    assert "APP_URL: ${{ vars.APP_URL }}" in text
+    assert "SPACE_URL" not in text
+    cmd = 'curl -fsS --retry 5 --retry-delay 30 --max-time 120 "https://$APP_URL/api/health"'
     assert cmd in text
+    assert "ยังไม่ได้ตั้ง APP_URL" in text
 
 
 def test_readme_hosting_section():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
-    head = "## เปิดบนเว็บตลอด 24 ชม. (Hugging Face Spaces)"
+    head = "## เปิดบนเว็บตลอด 24 ชม. (Render)"
     assert head in text
     assert text.index("## ระบบล็อกอิน") < text.index(head) < text.index("## รันชุดทดสอบ")
     section = text.split(head, 1)[1].split("\n## ", 1)[0]
     for want in (
+        "render.com",
         "IDSAI_USERS",
-        "HF_TOKEN",
-        "HF_SPACE",
-        "SPACE_URL",
-        "Deploy to Hugging Face Space",
-        "Run workflow",
+        "APP_URL",
+        "onrender.com",
+        "IDSAI_SPEED",
+        "20 เท่า",
+        "2–3 นาที",
         "feat/mvp",
-        "hf.space",
-        "SameSite",
+        "main",
         "รีสตาร์ต",
         "60 วัน",
+        "ใช้ร่วมกัน",
     ):
         assert want in section
-    # GitHub runs `schedule` only from the default branch: the wake-up waits for the merge
-    assert "ตัวปลุกทุก 6 ชม. ก็เหมือนกัน จะเริ่มทำงานหลังรวม PR เข้า `main`" in section
-    assert "48 ชม." in section
     for n in range(1, 8):
         assert f"\n{n}. " in section
+    for gone in ("Hugging Face", "HF_TOKEN", "HF_SPACE", "SPACE_URL", "hf.space"):
+        assert gone not in section
     assert "ยังไม่มีหน้า Dashboard" not in text
     assert "API ไม่มีระบบล็อกอิน" not in text
+
+
+def test_dockerfile_hardening():
+    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    froms = [i for i, ln in enumerate(lines) if ln.startswith("FROM ")]
+    build, runtime = "\n".join(lines[: froms[1]]), "\n".join(lines[froms[1] :])
+    for stage in (build, runtime):
+        assert "ghcr.io/astral-sh/uv:0.11.29" in stage
+        assert "uv:latest" not in stage
+        assert "ENV UV_NO_CACHE=1" in stage
+    copy = runtime.index("COPY --from=build")
+    assert runtime.index("RUN mkdir -p data") < copy
+    assert runtime.index("RUN test -w data && test -w data/app.duckdb") > copy

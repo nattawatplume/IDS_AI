@@ -1,7 +1,8 @@
 # Stage 1: build the demo data. Needs torch (train group) to train the demo bundle.
 FROM python:3.13-slim AS build
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
+ENV UV_NO_CACHE=1
 
 RUN useradd -m -u 1000 user && mkdir -p /home/user/app && chown user:user /home/user/app
 USER user
@@ -21,7 +22,8 @@ RUN idsai labels && idsai demo-pack && python deploy/check_no_hu.py data
 # Stage 2: runtime without torch.
 FROM python:3.13-slim AS runtime
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
+ENV UV_NO_CACHE=1
 
 RUN useradd -m -u 1000 user && mkdir -p /home/user/app && chown user:user /home/user/app
 USER user
@@ -33,7 +35,9 @@ RUN uv sync --frozen --no-dev --no-group train --no-install-project
 COPY --chown=user . .
 RUN uv sync --frozen --no-dev --no-group train
 
+RUN mkdir -p data
 COPY --from=build --chown=user /home/user/app/data /home/user/app/data
+RUN test -w data && test -w data/app.duckdb
 
 ENV PATH=/home/user/app/.venv/bin:$PATH
 
