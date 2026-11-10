@@ -885,9 +885,9 @@ RESULT_SENTENCE_BODY = r"""
 const T = (id) => m.EVAL_TARGETS.find((t) => t.id === id);
 const s = m.resultSentence;
 assert.strictEqual(s(T("real_recall"), 0.739, { k: 148, n: 200, budget: 2 }),
-  "จับเหตุการณ์ที่มีบันทึกได้ 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  "จับเหตุการณ์ที่มีบันทึกได้เฉลี่ย 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
 assert.strictEqual(s(T("semisyn_pump_burst"), 0.2955, { budget: 0.5 }),
-  "จับเหตุการณ์ที่มีบันทึกได้ 30% (เมื่อเตือนไม่เกิน 0.5 ครั้งต่อเหรียญต่อวัน)");
+  "จับเหตุการณ์จำลองได้ 30% (เมื่อเตือนไม่เกิน 0.5 ครั้งต่อเหรียญต่อวัน)");
 assert.strictEqual(s(T("real_recall"), 0.739, {}),
   "จับเหตุการณ์ที่มีบันทึกได้ 74% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
 assert.strictEqual(s(T("real_fa"), 1.6498753, {}), "เตือนผิดเฉลี่ย 1.65 ครั้งต่อเหรียญต่อวัน");
@@ -899,6 +899,20 @@ assert.strictEqual(s(pair, 0.05, { ci: [-0.1, 0.2] }), "เทียบกับ
 assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121] }), "เทียบกับวิธีพื้นฐาน: แย่กว่า");
 assert.strictEqual(s(T("ae_vs_baseline.pca"), 0.075, { ci: [0.035, 0.122] }),
   "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+// gated pairs follow the report's own significant flag and reason
+assert.strictEqual(s(pair, 0.01, { ci: [0.005, 0.02], significant: false }),
+  "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ"); // CI above 0 but the gate (effect size) says no
+assert.strictEqual(s(pair, 0.2, { ci: [0.1, 0.3], significant: true }), "เทียบกับวิธีพื้นฐาน: ดีกว่า");
+assert.strictEqual(s(pair, -0.17, { ci: [-0.222, -0.121], significant: false }),
+  "เทียบกับวิธีพื้นฐาน: แย่กว่า");
+const few = "ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 3 ครั้ง";
+assert.strictEqual(s(pair, 0.3, { ci: [0.1, 0.5], significant: false, reason: few }),
+  "เทียบกับวิธีพื้นฐาน: " + few);
+const gate = { runs: 5, experiments: {}, paired_bootstrap: { budget: 2, rows: [{
+  baseline: "baseline.iforest", diff_mean: 0.01, ci: [0.005, 0.02], n_events: 200,
+  significant: false, reason_th: null }] } };
+assert.strictEqual(m.targetVerdict(gate, pair).significant, false);
+assert.strictEqual(m.targetVerdict(gate, pair).state, "miss");
 assert.strictEqual(s(T("latency_p99"), null, {}), "ความเร็วในการเตือน: ยังไม่วัด");
 assert.deepStrictEqual(m.RESULT_BADGE, { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" });
 // nothing measured is never a number in the sentence
@@ -2325,13 +2339,13 @@ RESULTS_BODY = r"""
   const badge = (id) => walk(card(id), (n) => n.classList.contains("result-badge"))[0];
   const has = (id, s) => assert.ok(card(id).textContent.includes(s),
     id + ": " + card(id).textContent);
-  has("real_recall", "จับเหตุการณ์ที่มีบันทึกได้ 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  has("real_recall", "จับเหตุการณ์ที่มีบันทึกได้เฉลี่ย 148 จาก 200 ครั้ง (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
   assert.strictEqual(badge("real_recall").getAttribute("data-state"), "fail");
   assert.strictEqual(badge("real_recall").textContent, "✗ ยังไม่ถึงเป้า");
   has("real_fa", "เตือนผิดเฉลี่ย 1.65 ครั้งต่อเหรียญต่อวัน");
   assert.strictEqual(badge("real_fa").textContent, "✓ ผ่านเป้า");
   has("real_fa_hard", "เตือนผิดในวันที่ไม่มีเหตุการณ์ 11.17 ครั้ง");
-  has("semisyn_pump_burst", "จับเหตุการณ์ที่มีบันทึกได้ 30% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
+  has("semisyn_pump_burst", "จับเหตุการณ์จำลองได้ 30% (เมื่อเตือนไม่เกิน 2 ครั้งต่อเหรียญต่อวัน)");
   has("ae_vs_baseline.iforest", "เทียบกับวิธีพื้นฐาน: แย่กว่า");
   has("ae_vs_stat.robust_z", "เทียบกับวิธีพื้นฐาน: ไม่ต่างอย่างมีนัยสำคัญ");
   for (const id of ["ae_vs_baseline.random", "ae_vs_baseline.pca"]) {
@@ -2348,13 +2362,27 @@ RESULTS_BODY = r"""
   assert.deepStrictEqual(chips().map((c) => c.textContent), ["0.1", "0.5", "2", "10"]);
   const rowText = chips()[0].parentNode.parentNode.textContent;
   assert.ok(rowText.startsWith("งบเตือน") && rowText.endsWith("ครั้งต่อวัน"), rowText);
+  const plain10 = textOutside(det);
   const pressed = () => chips().map((c) => c.getAttribute("aria-pressed"));
   assert.deepStrictEqual(pressed(), ["false", "false", "true", "false"]);
   chips()[3].click();
   assert.deepStrictEqual(pressed(), ["false", "false", "false", "true"]);
   has("real_recall", "(เมื่อเตือนไม่เกิน 10 ครั้งต่อเหรียญต่อวัน)");
-  assert.strictEqual(badge("real_recall").textContent, "✓ ผ่านเป้า");
+  // pass / fail is judged at the project budget only: elsewhere the badge is neutral text
+  assert.strictEqual(walk(box, (n) => n.classList.contains("result-badge")
+    && ["pass", "fail"].includes(n.getAttribute("data-state"))).length, 0);
+  assert.ok(!/[✓✗]/.test(plain10(box)), "no pass / fail glyph at budget 10");
+  assert.strictEqual(badge("real_recall").textContent, "ไม่ได้ตั้งเป้าที่งบนี้");
+  assert.strictEqual(badge("real_fa").textContent, "ไม่ได้ตั้งเป้าที่งบนี้");
+  assert.strictEqual(card("real_recall").getAttribute("data-state"), "neutral");
+  assert.strictEqual(badge("latency_p99").textContent, "— ยังไม่วัด");
   has("ae_vs_baseline.iforest", "ยังไม่วัด");
+  // the committee targets table is always judged at the project budget, whatever the chip says
+  const heads = walk(box, (n) => n.tagName === "H3" && n.textContent.startsWith("เป้าหมายตามแผน"));
+  assert.deepStrictEqual(heads.map((h) => h.textContent), ["เป้าหมายตามแผน (งบ 2 ครั้ง/สัญลักษณ์-วัน)"]);
+  assert.ok(det.textContent.includes("ผ่านเป้า") && det.textContent.includes("ไม่ถึงเป้า"));
+  const row10 = walk(det, (n) => n.tagName === "TR" && n.textContent.includes("recall_any"));
+  assert.ok(row10.some((r) => r.textContent.includes("0.739")), "targets table still at budget 2");
   assert.deepStrictEqual(saved, [["idsai.eval_budget", "10"]]);
   assert.strictEqual(walk(box, isCommittee).length, 1);
   // the committee details survive a budget change

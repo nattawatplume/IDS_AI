@@ -2129,8 +2129,10 @@ function targetVerdict(report, target, budget) {
     if (!paired || Number(paired.budget) !== b) return none;
     const found = (paired.rows || []).find((r) => r.baseline === target.variant);
     if (!found || !isNum(found.diff_mean) || !Array.isArray(found.ci) || !isNum(found.ci[0])) return none;
-    const st = target.reference ? "reference" : found.ci[0] > target.threshold ? "pass" : "miss";
-    return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events };
+    // the report's own gate (CI, minimum effect, minimum events) decides; older reports fall back to the CI
+    const gated = typeof found.significant === "boolean" ? found.significant : found.ci[0] > target.threshold;
+    const st = target.reference ? "reference" : gated ? "pass" : "miss";
+    return { state: st, value: found.diff_mean, ci: found.ci, n: found.n_events, significant: gated, reason: found.reason_th || null };
   }
   const variants = report.experiments[target.experiment] || {};
   const cell = (variants[target.variant] || {})[String(b)];
@@ -2150,6 +2152,7 @@ function targetVerdict(report, target, budget) {
 const TARGET_STATE_TH = { pass: "ผ่านเป้า", miss: "ไม่ถึงเป้า", unmeasured: "ยังไม่ได้วัด", reference: "อ้างอิง" };
 // the plain badge: a glyph and a word, never colour alone
 const RESULT_BADGE = { pass: "ผ่านเป้า", fail: "ยังไม่ถึงเป้า", none: "ยังไม่วัด" };
+const NO_TARGET_TH = "ไม่ได้ตั้งเป้าที่งบนี้"; // the badge off the project budget: numbers only, no verdict
 const RESULT_GLYPH = { pass: "✓", fail: "✗", none: "—" };
 const RESULT_STATE = { pass: "pass", miss: "fail", unmeasured: "none" }; // a reference card has no badge
 const PER_DAY_TH = "ครั้งต่อเหรียญต่อวัน";
@@ -2168,14 +2171,18 @@ function resultSentence(target, value, extra) {
   if (target.cmp === "pair") {
     const ci = x.ci;
     if (!Array.isArray(ci) || !isNum(ci[0]) || !isNum(ci[1])) return "เทียบกับวิธีพื้นฐาน: ยังไม่วัดที่งบเตือนนี้";
-    // the 95% CI of the difference: wholly above 0, wholly below 0, or across it
-    return `เทียบกับวิธีพื้นฐาน: ${ci[0] > 0 ? "ดีกว่า" : ci[1] < 0 ? "แย่กว่า" : "ไม่ต่างอย่างมีนัยสำคัญ"}`;
+    if (x.reason) return `เทียบกับวิธีพื้นฐาน: ${x.reason}`;
+    // the report's own gate says "better"; otherwise the 95% CI of the difference: wholly below 0 is worse
+    const better = typeof x.significant === "boolean" ? x.significant : ci[0] > 0;
+    return `เทียบกับวิธีพื้นฐาน: ${better ? "ดีกว่า" : ci[1] < 0 ? "แย่กว่า" : "ไม่ต่างอย่างมีนัยสำคัญ"}`;
   }
   if (target.metric === "recall_any") {
     const at = `(เมื่อเตือนไม่เกิน ${fmtPlain(b)} ${PER_DAY_TH})`;
-    if (!isNum(value)) return `จับเหตุการณ์ที่มีบันทึกได้: ยังไม่มีผล ${at}`;
-    const got = isNum(x.k) && isNum(x.n) ? `${x.k} จาก ${x.n} ครั้ง` : `${Math.round(value * 100)}%`;
-    return `จับเหตุการณ์ที่มีบันทึกได้ ${got} ${at}`;
+    const what = target.experiment === "semisyn" ? "จับเหตุการณ์จำลองได้" : "จับเหตุการณ์ที่มีบันทึกได้";
+    if (!isNum(value)) return `${what}: ยังไม่มีผล ${at}`;
+    // a count is a mean over the test rounds
+    const got = isNum(x.k) && isNum(x.n) ? `เฉลี่ย ${x.k} จาก ${x.n} ครั้ง` : ` ${Math.round(value * 100)}%`;
+    return `${what}${got} ${at}`;
   }
   if (target.metric === "fa_per_symbol_day") {
     return isNum(value) ? `เตือนผิดเฉลี่ย ${fmtPlain(value)} ${PER_DAY_TH}` : "เตือนผิดเฉลี่ย: ยังไม่มีผล";
@@ -2209,8 +2216,11 @@ const resultShown = {};
 
 function resultCard(target, verdict, budget) {
   const wide = target.id === "real_recall";
-  const st = RESULT_STATE[verdict.state] || null;
-  const extra = { budget, ci: verdict.ci };
+  let st = RESULT_STATE[verdict.state] || null;
+  // pass / fail is judged at the project budget only; elsewhere the numbers stand without a verdict
+  const judged = String(budget) === MAIN_BUDGET;
+  if (!judged && (st === "pass" || st === "fail")) st = "neutral";
+  const extra = { budget, ci: verdict.ci, significant: verdict.significant, reason: verdict.reason };
   // a count of events only where the unit is the event (a symbol-day ratio is no count)
   if (verdict.unit === "event" && isNum(verdict.value) && isNum(verdict.n) && verdict.n > 0) {
     extra.k = Math.round(verdict.value * verdict.n);
@@ -2227,7 +2237,11 @@ function resultCard(target, verdict, budget) {
       "div",
       { class: "result-head" },
       el("h3", { class: "result-title" }, target.title),
-      st ? resultBadge(st) : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
+      st === "neutral"
+        ? el("span", { class: "result-badge", "data-state": "neutral" }, NO_TARGET_TH)
+        : st
+          ? resultBadge(st)
+          : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
     ),
   );
   if (wide && isNum(verdict.value)) {
@@ -2241,13 +2255,15 @@ function resultCard(target, verdict, budget) {
         "div",
         { class: "result-bar", "aria-hidden": "true" },
         el("span", { class: "result-fill", style: `width: ${Math.max(0, Math.min(100, pct))}%` }),
-        el("span", { class: "result-mark", style: `left: ${Math.round(target.threshold * 100)}%` }),
+        st === "neutral" ? null : el("span", { class: "result-mark", style: `left: ${Math.round(target.threshold * 100)}%` }),
       ),
     );
   }
   card.appendChild(el("p", { class: "result-sentence" }, resultSentence(target, verdict.value, extra)));
-  const seeds = wide && isNum(verdict.seeds) && verdict.seeds > 1 ? ` · ค่าเฉลี่ยจากการทดสอบ ${verdict.seeds} รอบ` : "";
-  card.appendChild(el("p", { class: "result-goal small muted" }, resultGoal(target, budget) + seeds));
+  const seeds = wide && isNum(verdict.seeds) && verdict.seeds > 1 ? `ค่าเฉลี่ยจากการทดสอบ ${verdict.seeds} รอบ` : "";
+  const goal = st === "neutral" ? "" : resultGoal(target, budget);
+  const goalLine = [goal, seeds].filter(Boolean).join(" · ");
+  if (goalLine) card.appendChild(el("p", { class: "result-goal small muted" }, goalLine));
   return card;
 }
 
@@ -2374,14 +2390,14 @@ async function showEval() {
   const chips = el("div", { class: "budget-chips", role: "group", "aria-label": "งบเตือน ครั้งต่อวัน" });
   const note = el("p", { class: "small muted budget-note" });
   const plain = el("div", { class: "results-plain" });
-  const targets = el("div");
+  const targets = el("div"); // the committee's targets: always at the project budget, not the chip
+  targets.appendChild(targetTable(report, Number(MAIN_BUDGET)));
   const tables = el("div");
   const draw = () => {
     for (const c of chips.children) c.setAttribute("aria-pressed", String(c.getAttribute("data-budget") === budget));
     note.textContent = budget === MAIN_BUDGET ? "" : `เป้าหมายของโครงการตั้งไว้ที่งบเตือน ${MAIN_BUDGET} ครั้งต่อวัน`;
     note.hidden = budget === MAIN_BUDGET;
     renderResultCards(plain, report, Number(budget));
-    clear(targets).appendChild(targetTable(report, Number(budget)));
     clear(tables);
     for (const [exp, variants] of Object.entries(report.experiments)) tables.appendChild(experimentTable(exp, variants, budget));
   };
