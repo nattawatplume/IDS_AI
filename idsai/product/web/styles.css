@@ -855,12 +855,55 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
 .orb.watch::after, .orb.alert::after { animation: ring 1.4s ease-out infinite; }
 .orb-change { animation: pop 0.35s ease-out; }
 
-/* three small cards, each as wide as it needs */
-.home-cards { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
+/* the Home grid: the chart is the big centre screen, the status and stat panels dock on its left, the alerts
+   and replay on its right. The wrappers are transparent to the grid, so every panel is a cell of #page-home.
+   3 columns from 1200 px, 2 from 720 px, 1 below that. */
+#page-home:not([hidden]) {
+  position: relative;
+  display: grid;
+  gap: 16px 24px;
+  align-items: start;
+  grid-template-columns: minmax(240px, 0.95fr) minmax(0, 2.5fr) minmax(260px, 1.05fr);
+  grid-template-areas: "hero chart alerts" "s1 chart alerts" "s2 chart replay" "s3 chart replay";
+}
+#page-home:not([hidden]):has(#replay-bar[hidden]) {
+  grid-template-areas: "hero chart alerts" "s1 chart alerts" "s2 chart alerts" "s3 chart alerts";
+}
+.home-cards, .home-body, .home-main, .home-side { display: contents; }
+#hero { grid-area: hero; margin: 0; }
+#card-alerts { grid-area: s1; }
+#card-symbol { grid-area: s2; }
+#card-health { grid-area: s3; }
+#chart-card { grid-area: chart; align-self: stretch; }
+#rail { grid-area: alerts; }
+#replay-bar { grid-area: replay; }
+#hero-cam { margin-left: auto; }
+/* the narrow side columns: a compact hero and stat values (the phone keeps its own sizes below) */
+@media (min-width: 720px) {
+  #page-home .hero { --px: 20px; --py: 16px; }
+  #page-home .hero-body { flex-wrap: wrap; gap: 12px 16px; }
+  #page-home .hero-title { font-size: 24px; }
+  #page-home .hero-line { margin-top: 6px; font-size: 14px; }
+  #page-home .card-value { font-size: 24px; }
+}
+@media (max-width: 1199px) {
+  #page-home:not([hidden]),
+  #page-home:not([hidden]):has(#replay-bar[hidden]) {
+    grid-template-columns: minmax(230px, 1fr) minmax(0, 2.2fr);
+    grid-template-areas: "hero chart" "s1 chart" "s2 chart" "s3 chart" "replay alerts";
+  }
+  #page-home:not([hidden]):has(#replay-bar[hidden]) { grid-template-areas: "hero chart" "s1 chart" "s2 chart" "s3 chart" "alerts alerts"; }
+}
+@media (max-width: 719px) {
+  #page-home:not([hidden]),
+  #page-home:not([hidden]):has(#replay-bar[hidden]) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "hero" "chart" "s1" "s2" "s3" "alerts" "replay";
+  }
+  #chart-card .chart { min-height: 360px; }
+  #chart-card .chart.lanes { min-height: 520px; }
+}
 .stat-card { display: flex; flex-direction: column; gap: 4px; margin: 0; }
-#card-alerts { flex: 1 1 220px; }
-#card-symbol { flex: 1.25 1 260px; }
-#card-health { flex: 1 1 240px; }
 .card-label { font-size: 13px; color: var(--dim); }
 .card-value { display: flex; align-items: center; gap: 8px; font-size: 28px; font-weight: 600; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .card-unit { font-size: 15px; font-weight: 400; color: var(--dim); }
@@ -881,9 +924,9 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
 .check-state.fail { color: var(--red); }
 
 /* the chart beside the rail; the replay bar sits under the chart like a player's controls */
-.home-body { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
-.home-main { min-width: 0; }
-#chart-card { --px: 16px; margin: 0; }
+#chart-card { --px: 16px; margin: 0; display: flex; flex-direction: column; }
+#chart-card .chart { flex: 1 1 0; height: auto; min-height: 440px; }
+#chart-card .chart.lanes { min-height: 620px; }
 .chart-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; margin: 0 4px 8px; }
 .card-title { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
 .readout { min-width: 0; color: var(--dim); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -892,7 +935,6 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
 .chart-details summary:hover { color: var(--text); }
 .chart-details p { margin: 8px 0; max-width: 72ch; }
 
-.home-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .replay-bar { --px: 20px; display: flex; flex-direction: column; gap: 12px; margin: 0; }
 .replay-top { display: flex; align-items: center; gap: 12px; }
 .play-btn { flex: none; width: 52px; min-width: 52px; height: 52px; min-height: 52px; border-radius: 0; font-size: 18px; line-height: 1; }
@@ -930,9 +972,6 @@ button.primary.play-btn { padding: 0; }
 .rail-sev { white-space: nowrap; }
 .rail-headline { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 14px; line-height: 1.5; }
 
-@media (max-width: 960px) {
-  .home-body { grid-template-columns: minmax(0, 1fr); }
-}
 
 /* ------------------------------------------------------------------ boot loader */
 /* only this and the background show until /api/me answers; it fades in late, so a fast answer never shows it */

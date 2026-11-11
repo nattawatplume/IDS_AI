@@ -77,7 +77,7 @@ html::after {
 .user-menu #menu-fx[aria-pressed="true"]::before { background: var(--hud-bg); transform: translate(0, -50%); }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
   .iris-core, .brand-mark { transition: none; }
@@ -91,7 +91,9 @@ html::after {
 .fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
 .fx-off .login-card button.primary::after, .fx-off .login-line-trace,
 .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led,
-.fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind { animation: none !important; }
+.fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind,
+.fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch { animation: none !important; }
+.fx-off .fx-glint, .fx-off .hud-wires { display: none; }
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off .nav-ind, .fx-off .brand-cur, .fx-off .tk-group + .tk-group, .fx-off .tk-rep { display: none; }
@@ -218,7 +220,53 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
 }
 @keyframes fx-sweep { from { transform: translateX(-110%) skewX(-18deg); } to { transform: translateX(260%) skewX(-18deg); } }
 
-/* the HUD panels (.hud in styles.css) carry their own frame and brackets; the border glint comes with the panel motion */
+/* the HUD panels (.hud in styles.css) carry their own frame and brackets; hud.js adds the border glint,
+   the wires, the tilt (inline transform) and the title glitch */
+.fx-glint { position: absolute; inset: 0; z-index: -1; overflow: hidden; clip-path: var(--cut); pointer-events: none; }
+.fx-glint::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 54px;
+  height: 3000px;
+  margin: -1500px 0 0 -27px;
+  background: var(--hi);
+  opacity: 0;
+  animation: fx-glint 7s linear var(--gd, 1.4s) infinite;
+}
+@keyframes fx-glint {
+  0% { transform: rotate(0); opacity: 0; }
+  2% { opacity: 1; }
+  26% { transform: rotate(180deg); opacity: 1; }
+  27%, 100% { transform: rotate(180deg); opacity: 0; }
+}
+.hud-wires { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.hud-wire { fill: none; stroke: rgba(0, 229, 255, .3); stroke-width: 1; transition: stroke .3s; }
+.hud-wire-node { fill: var(--fx-calm); transition: fill .3s; }
+.hud-wire-pulse {
+  fill: none;
+  stroke: var(--fx-calm);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 10px calc(var(--len, 100) * 1px);
+  stroke-dashoffset: 10px;
+  animation: hud-pulse var(--dur, 4s) linear var(--dl, 0s) infinite;
+}
+@keyframes hud-pulse {
+  0% { stroke-dashoffset: 10px; }
+  55%, 100% { stroke-dashoffset: calc(var(--len, 100) * -1px); }
+}
+html[data-mood="alert"] .hud-wire { stroke: rgba(255, 45, 85, .55); }
+html[data-mood="alert"] .hud-wire-node { fill: var(--fx-alert); }
+html[data-mood="alert"] .hud-wire-pulse { stroke: var(--fx-alert); }
+.hud-glitch { animation: hud-glitch .65s steps(6) 1; }
+@keyframes hud-glitch {
+  0% { transform: translateX(-3px); text-shadow: 3px 0 var(--fx-calm), -3px 0 var(--fx-alert); }
+  33% { transform: translateX(3px); text-shadow: -4px 0 var(--fx-calm), 4px 0 var(--fx-alert); }
+  66% { transform: translateX(-2px); text-shadow: 2px 0 var(--fx-calm), -2px 0 var(--fx-alert); }
+  100% { transform: none; text-shadow: none; }
+}
 @media (prefers-reduced-motion: no-preference) { html:not(.fx-off) .stat-card:hover { transform: translateY(-2px); } }
 
 /* ---- page transition: scan line, then the cards rise ---- */

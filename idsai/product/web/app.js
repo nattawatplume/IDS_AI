@@ -733,6 +733,14 @@ function fx(name, ...args) {
   return undefined;
 }
 
+// a KPI number: it scrambles through random digits and lands on the text (motion.js/hud.js); the plain
+// textContent is the same final value, so a missing or failing file changes nothing but the flicker
+function setKpiText(node, text) {
+  if (!node) return;
+  if (globalThis.Motion && typeof globalThis.Motion.scramble === "function") fx("scramble", node, text);
+  else node.textContent = text;
+}
+
 // ---- the header data ticker: real app state only, "–" for anything not known yet
 const TICKER_MAX_SYMBOLS = 6;
 const TICKER_GAP_MS = 1500; // the strip is decoration: values refresh at most this often
@@ -1064,7 +1072,7 @@ function renderAlertsKpi(now = eventNowUs()) {
   const rose = state.alertCountKnown && n > state.alertCount;
   state.alertCount = n;
   if (state.alertsLoaded) state.alertCountKnown = true;
-  tweenNumber(box, n, 0);
+  setKpiText(box, fmtNum(n, 0));
   if (rose) flash($("card-alerts"));
   return n;
 }
@@ -1338,7 +1346,7 @@ function renderReadout(time, price, f) {
 
 function renderSymbolPrice() {
   const p = chart.now.price;
-  $("symbol-price").textContent = `ราคาล่าสุด ${isNum(p) ? fmtNum(p, 8) : "–"}`;
+  setKpiText($("symbol-price"), `ราคาล่าสุด ${isNum(p) ? fmtNum(p, 8) : "–"}`);
 }
 
 function onCrosshair(param) {

@@ -3588,6 +3588,7 @@ def test_page_enter_wired():
 
 def test_motion_size_budget():
     assert len(text("motion.js").encode("utf-8")) <= 40 * 1024
+    assert len(text("hud.js").encode("utf-8")) <= 40 * 1024
     assert len(text("motion.css").encode("utf-8")) <= 24 * 1024
 
 
@@ -3749,3 +3750,75 @@ def test_header_follows_layout_shifts():
     mcss = text("motion.css")
     assert ".fx-off .tk-view.is-live .tk-static" in mcss
     assert ".fx-off .iris-core" in mcss
+
+
+# ---- HUD redesign, task 3: Home layout, tilt, glint, wires, scramble, glitch (hud.js) ----
+
+
+def test_home_grid_asymmetric():
+    css = text("styles.css")
+    block = re.search(r"#page-home:not\(\[hidden\]\)\s*\{([^}]*)\}", css).group(1)
+    areas = re.search(r"grid-template-areas:([^;]*);", block).group(1)
+    rows = re.findall(r'"([^"]+)"', areas)
+    # the chart is the centre column on every row
+    assert rows and all(r.split()[1] == "chart" for r in rows), rows
+    assert "grid-area: chart" in css and "display: contents" in css
+    assert "minmax(0, 2.5fr)" in block  # the centre column is the widest
+    assert "@media (max-width: 1199px)" in css and "@media (max-width: 719px)" in css
+    one = css.split("@media (max-width: 719px)", 1)[1]
+    assert 'grid-template-areas: "hero" "chart"' in one
+
+
+def test_scramble_api():
+    hud, app = text("hud.js"), text("app.js")
+    assert re.search(r"M\.scramble\s*=\s*function", hud)
+    assert re.search(r"M\.scramble\s*=\s*function[^{]*\{\s*try", hud)
+    assert "SCRAMBLE_MS = 400" in hud
+    assert 'fx("scramble"' in app
+    helper = _js_function(app, "function setKpiText(")
+    assert "node.textContent = text" in helper  # the fallback without hud.js
+    assert "setKpiText(box" in app and 'setKpiText($("symbol-price")' in app
+    assert 'src="hud.js"' in text("index.html")
+    html = text("index.html")
+    assert html.index('src="motion.js"') < html.index('src="hud.js"')
+
+
+def test_tilt_pointer_fine():
+    hud = text("hud.js")
+    assert 'matchMedia("(pointer: fine)")' in hud
+    assert "TILT_SMALL = 6" in hud and "TILT_CHART = 2.5" in hud
+    assert "e.buttons" in hud and "selecting()" in hud and "tiltReset" in hud
+    # read once per panel entry, not per move
+    assert "getBoundingClientRect" in _js_function(hud, "function onPointerMove(")
+    assert hud.count("getBoundingClientRect") == 1
+
+
+def test_wires_hidden_decoration():
+    html, hud, mcss = text("index.html"), text("hud.js"), text("motion.css")
+    tag = re.search(r'<svg[^>]*id="home-wires"[^>]*>', html).group(0)
+    assert 'aria-hidden="true"' in tag
+    assert "ResizeObserver" in hud
+    assert "layoutWires" in hud and "getTotalLength" not in hud
+    draw = _js_function(hud, "function drawScramble(")
+    assert "layoutWires" not in draw and "offsetWidth" not in draw
+    assert ".fx-off .hud-wires" in mcss
+    reduced = mcss.split("prefers-reduced-motion: reduce", 1)[1].split("}", 1)[0]
+    assert ".hud-wires" in reduced and ".fx-glint" in reduced
+    off = mcss.split(".fx-off", 1)[1]
+    for sel in (".hud-wire-pulse", ".fx-glint::before", ".hud-glitch"):
+        assert sel in off, sel
+
+
+def test_hud_js_rules():
+    hud = text("hud.js")
+    for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert api not in hud, api
+    assert "://" not in hud.replace("http://www.w3.org/2000/svg", "")
+    assert "fx-off" in hud and "removeLayer" in hud and "addLayer" in hud
+
+
+def test_hero_glitch_once_per_alert_transition():
+    hud, mcss = text("hud.js"), text("motion.css")
+    assert "GLITCH_GAP_MS = 2000" in hud
+    assert 'mood === "alert" && !wasAlert' in hud
+    assert "@keyframes hud-glitch" in mcss
