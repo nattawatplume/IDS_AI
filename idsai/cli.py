@@ -34,6 +34,7 @@ import polars as pl
 
 from idsai.config import Settings, config_hash, load_settings
 from idsai.data.accounts import build_backend
+from idsai.product.auth import RESERVED_USERNAMES
 
 if TYPE_CHECKING:  # the store pulls in DuckDB: imported only where a command needs it
     from idsai.data.replay import Replayer
@@ -1011,9 +1012,6 @@ def read_new_password(args: argparse.Namespace) -> str:
     return pw
 
 
-RESERVED_USERNAMES = ("cli", "local")  # the audit log's actor names for the CLI and auth-off mode
-
-
 def _when(us: int | None) -> str:
     if us is None:
         return "-"
@@ -1188,6 +1186,13 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
             state, background = prepare_live(args, cfg, store)
         else:
             state, background = prepare_replay(args, cfg, store)
+        state.allow_signup = args.allow_signup
+        env_users = os.environ.get("IDSAI_USERS", "")
+        if env_users.strip():
+            try:
+                state.env_usernames = frozenset(n for n, _, _ in parse_seed_users(env_users))
+            except CliError:  # a bad IDSAI_USERS is seed-env's error to report, not serve's
+                pass
         store.purge_sessions(_now_us())
         app = create_app(state, allowed_hosts=allowed_hosts(host, args.public_host))
         _say(f"เปิดที่ http://{host if ':' not in host else f'[{host}]'}:{port} (กด Ctrl+C เพื่อหยุด)")
@@ -1336,6 +1341,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument(
         "--loop", action="store_true", help="replay: เล่นวนซ้ำเมื่อจบ (ไม่ใช้กับ --mode live)"
+    )
+    s.add_argument(
+        "--allow-signup", action="store_true",
+        help="เปิดให้สมัครบัญชีเอง (สิทธิ์ viewer เท่านั้น ต้องเปิดล็อกอิน)",
     )
     g = s.add_mutually_exclusive_group()
     g.add_argument(

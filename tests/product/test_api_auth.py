@@ -413,6 +413,7 @@ def test_prefs_whitelist_and_round_trip(aenv, auth_client):
         "display_name": "Analyst",
         "role": "analyst",
         "auth_enabled": True,
+        "signup": False,
         "prefs": prefs,
     }
     # a partial update keeps the other keys
@@ -468,6 +469,7 @@ def test_auth_off_me_is_local(aenv):
             "display_name": "local",
             "role": "admin",
             "auth_enabled": False,
+            "signup": False,
             "prefs": {},
         }
         assert c.get("/api/audit").status_code == 200
