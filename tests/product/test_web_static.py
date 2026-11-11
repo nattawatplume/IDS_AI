@@ -3292,7 +3292,11 @@ def test_hero_radar_markup():
 def test_edge_flash_once():
     css = text("motion.css")
     blocks = _css_blocks(css)
-    rules = [b for b in blocks if "fx-edge" in b[0] and "animation" in b[2] and b[0][0] != "@"]
+    rules = [
+        b
+        for b in blocks
+        if "fx-edge" in b[0] and "animation" in b[2] and b[0][0] != "@" and ".fx-off" not in b[0]
+    ]
     assert rules, "#fx-edge needs an animation rule"
     for _, _, body, _ in rules:
         assert "infinite" not in body
@@ -3405,3 +3409,56 @@ def test_page_enter_wired():
 def test_motion_size_budget():
     assert len(text("motion.js").encode("utf-8")) <= 32 * 1024
     assert len(text("motion.css").encode("utf-8")) <= 14 * 1024
+
+
+# ---- command-center motion: final-review fixes ----
+
+
+def test_fx_off_does_not_kill_app_animations():
+    css = text("motion.css")
+    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and "animation: none" in b[2]]
+    assert off
+    for prelude, _, _, _ in off:
+        assert not re.search(r"\.fx-off\s+\*", prelude), "must not target *"
+        for app_class in (".page", ".rail-row", ".flash", ".orb-change", ".ci-line", ".toast"):
+            assert app_class not in prelude, app_class
+    joined = " ".join(b[0] for b in off)
+    owned_all = ("#fx-edge", ".fx-wipe", ".fx-rise", ".fx-sweep", ".cctv", ".orb-radar")
+    for owned in (*owned_all, ".stat-card::before"):
+        assert owned in joined, owned
+    js = text("motion.js")
+    drop = _js_function(js, "function dropTransient(")
+    for cls in ("is-flash", "fx-sweep", "fx-rise", "fx-wipe"):
+        assert cls in drop, cls
+    assert "dropTransient()" in _js_function(js, "function apply(")
+    assert '"animationcancel"' in js
+
+
+def test_chart_shockwave_is_rate_limited():
+    js = text("motion.js")
+    cross = _js_function(js, "function chartCross(")
+    assert "S.crossAt" in cross and "BURST_GAP_MS" in cross
+    assert cross.index("BURST_GAP_MS") < cross.index("O.cross =")
+
+
+def test_failed_series_load_resets_the_crossing_baseline():
+    app = text("app.js")
+    inner = _js_function(app, "async function loadSeriesInner(")
+    catch = inner[inner.index("catch (e)") : inner.index("if (symbol !== state.symbol)")]
+    assert "chart.now.f = null" in catch and "setTau(null)" in catch
+    handler = app[app.index('$("symbol-select").addEventListener("change"') :][:700]
+    assert "chart.now.f = null" in handler
+
+
+def test_chart_overlay_stops_drawing_when_hidden():
+    js = text("motion.js")
+    attach = js[js.index("new G.ResizeObserver"):][:700]
+    zero = attach[attach.index("r.width <= 0") :][:260]
+    assert "O.w = 0" in zero and "O.h = 0" in zero and "return" in zero
+    assert "!O.w || !O.h" in _js_function(js, "function chartDraw(")
+
+
+def test_login_beam_returns_after_a_failed_sign_in():
+    js = text("motion.js")
+    leave = _js_function(js, "function loginLeave(")
+    assert "Lg.leaving = false" in leave and "addLayer(loginDraw)" in leave

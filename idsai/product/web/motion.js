@@ -100,6 +100,22 @@
 
   // ---------------------------------------------------------------- on / off
 
+  // a one-shot cut off mid-flight never fires animationend; remove what it left behind
+  function dropTransient() {
+    var edge = DOC.getElementById("fx-edge");
+    if (edge) edge.classList.remove("is-flash");
+    var k;
+    var sw = DOC.querySelectorAll(".fx-sweep");
+    for (k = 0; k < sw.length; k += 1) sw[k].classList.remove("fx-sweep");
+    var ri = DOC.querySelectorAll(".fx-rise");
+    for (k = 0; k < ri.length; k += 1) {
+      ri[k].classList.remove("fx-rise");
+      ri[k].style.removeProperty("--fx-i");
+    }
+    var wp = DOC.querySelectorAll(".fx-wipe");
+    for (k = 0; k < wp.length; k += 1) if (wp[k].parentNode) wp[k].parentNode.removeChild(wp[k]);
+  }
+
   function apply(off) {
     S.off = !!off;
     var root = DOC.documentElement;
@@ -108,6 +124,7 @@
     if (S.off) {
       stop();
       clearAll();
+      dropTransient();
     } else {
       size();
       start();
@@ -412,6 +429,14 @@
         pulse(v.ov, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(1.2)" }], { duration: 420, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" });
         G.setTimeout(function () {
           if (v.ov.parentNode) v.ov.parentNode.removeChild(v.ov);
+          var Lg = S.login;
+          if (Lg && Lg.leaving) {
+            Lg.leaving = false; // a failed sign-in stays on the login page: the beam returns
+            if (!Lg.on && !Lg.page.hidden) {
+              Lg.on = true;
+              addLayer(loginDraw);
+            }
+          }
         }, 480);
       }, LEAVE_MS);
     } catch (e) {
@@ -443,9 +468,11 @@
       replay(edge, "is-flash"); // one iteration; it clears itself
       if (!edge.fxBound) {
         edge.fxBound = true;
-        edge.addEventListener("animationend", function () {
+        var clear = function () {
           edge.classList.remove("is-flash");
-        });
+        };
+        edge.addEventListener("animationend", clear);
+        edge.addEventListener("animationcancel", clear);
       }
     }
     // the newest card: the first of the alerts page and the first row of the home rail
@@ -694,7 +721,13 @@
     if (typeof G.ResizeObserver === "function") {
       O.ro = new G.ResizeObserver(function (entries) {
         var r = entries[0] && entries[0].contentRect;
-        if (!r || r.width <= 0 || r.height <= 0) return;
+        if (!r) return;
+        if (r.width <= 0 || r.height <= 0) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          O.w = 0; // hidden page: nothing to draw until it has a size again
+          O.h = 0;
+          return;
+        }
         var dpr = Math.min(G.devicePixelRatio || 1, 2);
         O.w = Math.round(r.width);
         O.h = Math.round(r.height);
@@ -715,6 +748,9 @@
     var O = S.chartOv;
     Motion.alertBurst({ severity: "high" }); // rate-limited
     if (S.off || !O || !point) return;
+    var nowMs = G.performance.now();
+    if (S.crossAt !== undefined && nowMs - S.crossAt < BURST_GAP_MS) return; // the shockwave obeys the same gap
+    S.crossAt = nowMs;
     var x = O.api.timeScale().timeToCoordinate(point.time);
     var y = O.series.priceToCoordinate(point.value);
     if (x === null || y === null) return; // off-screen: only the burst

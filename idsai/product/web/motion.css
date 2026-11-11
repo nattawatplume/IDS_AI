@@ -71,7 +71,12 @@ html::after {
   *, *::before, *::after { animation: none !important; }
 }
 
-.fx-off *, .fx-off *::before, .fx-off *::after { animation: none !important; }
+/* only what motion owns is stopped: the app's own one-shot animations (page enter, rail rows, flash, toasts,
+   help drawer) keep their behaviour, so turning effects back on replays nothing */
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .fx-wipe, .fx-off .fx-rise, .fx-off .fx-sweep, .fx-off .fx-sweep::after,
+.fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
+.fx-off .login-card button.primary::after, .fx-off .login-line-trace, .fx-off .blob,
+.fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .stat-card::before, .fx-off #hero-cam .cam-led { animation: none !important; }
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off .stat-card::before { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }

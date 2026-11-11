@@ -1350,6 +1350,8 @@ async function loadSeriesInner() {
     s = await api(`/api/series?symbol=${encodeURIComponent(symbol)}`);
   } catch (e) {
     console.warn("series:", e.message);
+    chart.now.f = null; // the old coin's baseline must not judge the next coin
+    setTau(null);
     return;
   }
   if (symbol !== state.symbol) return; // the picker moved on meanwhile
@@ -3696,7 +3698,7 @@ async function boot() {
   });
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
-    chart.loading = true; // no crossing is judged against the old coin until loadSeries is done
+    chart.loading = true; chart.now.f = null; // old coin's baseline
     $("rt-symbol").value = state.symbol;
     $("symbol-name").textContent = state.symbol || "–";
     savePrefs({ symbol: state.symbol });
