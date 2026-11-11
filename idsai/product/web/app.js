@@ -748,7 +748,7 @@ function tickerItems() {
     items.push({ label: String(sym), value: isNum(p) ? String(Number(p.toFixed(8))) : dash });
   }
   items.push({ label: "HEALTH", value: word(state.health && state.health.overall) });
-  items.push({ label: "ALERTS 24H", value: state.alertCountKnown && isNum(state.alertCount) ? String(state.alertCount) : dash });
+  items.push({ label: state.symbol ? `ALERTS 24H · ${state.symbol}` : "ALERTS 24H", value: state.alertCountKnown && isNum(state.alertCount) ? String(state.alertCount) : dash });
   return items;
 }
 

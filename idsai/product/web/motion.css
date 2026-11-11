@@ -80,6 +80,9 @@ html::after {
   #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
+  .iris-core, .brand-mark { transition: none; }
+  .tk-track { display: none; }
+  .tk-view.is-live .tk-static { display: block; }
 }
 
 /* only what motion owns is stopped: the app's own one-shot animations (page enter, rail rows, flash, toasts,
@@ -92,7 +95,9 @@ html::after {
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off .nav-ind, .fx-off .brand-cur, .fx-off .tk-group + .tk-group, .fx-off .tk-rep { display: none; }
-.fx-off .tk-track { transform: none !important; }
+.fx-off .iris-core, .fx-off .brand-mark { transition: none; }
+.fx-off .tk-track { display: none; }
+.fx-off .tk-view.is-live .tk-static { display: block; }
 .fx-off #cctv-beam { opacity: .3; }
 
 /* ---- login: the CCTV camera over the sample chart ---- */

@@ -264,7 +264,8 @@
 
   var H = { iris: null, lid: null, name: null, bar: null, text: "", typing: 0, timer: 0, x: 0, tx: 0, next: 900, blink: -999, nextBlink: 3200, ready: false };
   var NAV = { a: null, placed: false };
-  var TK = { sig: "", vals: [] };
+  var TK = { sig: "", vals: [], items: null, one: 0, reps: 0 };
+  var HF = { raf: 0, ro: null };
   var TYPE_AT = 300; // ms before the first letter
 
   function headerInit() {
@@ -276,6 +277,31 @@
     H.bar = DOC.getElementById("topbar");
     H.text = H.name ? H.name.textContent : "";
     if (H.iris) addLayer(eyeDraw);
+    watchHeader();
+  }
+
+  // the nav shifts when a link appears (the admin's Users) or the strip is resized: re-place the underline and
+  // refill the marquee, once per frame at most, from the observer and never from the draw loop
+  function watchHeader() {
+    if (typeof G.ResizeObserver !== "function") return;
+    var run = function () {
+      HF.raf = 0;
+      try {
+        navPlace();
+        tickerFit();
+      } catch (e) {
+        /* decoration only */
+      }
+    };
+    var RO = G.ResizeObserver;
+    HF.ro = new RO(function () {
+      if (!HF.raf) HF.raf = G.requestAnimationFrame(run);
+    });
+    var sels = [".nav", ".brand", ".tk-view"];
+    for (var i = 0; i < sels.length; i += 1) {
+      var n = DOC.querySelector(sels[i]);
+      if (n) HF.ro.observe(n);
+    }
   }
 
   // the name types itself out once, the first time the bar is on screen; the plain text stays in the markup
@@ -357,6 +383,7 @@
   function ticker(items) {
     var track = DOC.getElementById("tk-track");
     if (!track || !Array.isArray(items) || !items.length) return;
+    TK.items = items;
     var sig = items
       .map(function (it) {
         return it.label;
@@ -383,10 +410,23 @@
     var view = track.parentNode ? track.parentNode.clientWidth : 0;
     var reps = one > 0 && view > 0 ? Math.min(6, Math.max(1, Math.ceil(view / one))) : 3;
     TK.vals = [];
+    TK.one = one;
+    TK.reps = reps;
     track.removeChild(probe);
     track.appendChild(tickerGroup(items, reps));
     track.appendChild(tickerGroup(items, reps));
     track.style.setProperty("--tk-dur", Math.max(20, Math.round(((one || 600) * reps) / 45)) + "s");
+  }
+
+  // the strip got wider than the repeats (or was hidden when first built): build the repeats again
+  function tickerFit() {
+    var track = DOC.getElementById("tk-track");
+    var view = track && track.parentNode ? track.parentNode.clientWidth : 0;
+    if (!TK.items || !view) return;
+    if (!TK.one || view > TK.one * TK.reps) {
+      TK.sig = "";
+      ticker(TK.items);
+    }
   }
 
   // the active nav link: the underline slides to it with a transform; off or hidden, the link's own underline shows

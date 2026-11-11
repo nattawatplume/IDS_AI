@@ -3672,6 +3672,8 @@ assert.strictEqual(by(it, "ETHUSDT").value, "–");
 assert.strictEqual(by(it, "MODE").value, "REPLAY");
 assert.strictEqual(by(it, "HEALTH").value, "OK");
 assert.strictEqual(by(it, "ALERTS 24H").value, "3");
+m.setTickerState({ symbol: "ETHUSDT" });
+assert.strictEqual(by(m.tickerItems(), "ALERTS 24H · ETHUSDT").value, "3");
 for (const i of it) assert.ok(!/NaN|undefined/.test(i.label + i.value));
 """
 
@@ -3690,6 +3692,11 @@ def test_logo_eye_svg():
     assert "MARKET IDS" in header and 'class="brand-cur"' in header
     css = text("motion.css")
     assert "html[data-mood=\"alert\"]" in css and "logo-" in css
+    styles = text("styles.css")
+    red = re.search(r'html\[data-mood="alert"\] \.brand-mark\s*\{([^}]*)\}', styles)
+    assert red and "var(--hud-alert)" in red.group(1)
+    stare = re.search(r'html\[data-mood="alert"\] \.iris-core\s*\{([^}]*)\}', styles)
+    assert stare and "scale(" in stare.group(1)
 
 
 def test_ticker_reads_state():
@@ -3729,3 +3736,16 @@ def test_header_motion_off_paths():
     reduced = css.split("prefers-reduced-motion: reduce", 1)[1].split("}", 1)[0]
     for sel in (".nav-ind", ".brand-cur"):
         assert sel in reduced, sel
+
+
+def test_header_follows_layout_shifts():
+    js, css = text("motion.js"), text("styles.css")
+    assert "ResizeObserver" in js and "requestAnimationFrame(run)" in js
+    assert '".nav"' in js and "function tickerFit(" in js
+    draw = _js_function(js, "function eyeDraw(")
+    assert "navPlace" not in draw and "ResizeObserver" not in draw
+    name = re.search(r"\.brand-name\s*\{([^}]*)\}", css).group(1)
+    assert re.search(r"width:\s*calc\(10ch", name)
+    mcss = text("motion.css")
+    assert ".fx-off .tk-view.is-live .tk-static" in mcss
+    assert ".fx-off .iris-core" in mcss

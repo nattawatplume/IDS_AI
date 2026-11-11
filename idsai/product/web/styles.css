@@ -197,7 +197,8 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .brand { display: flex; align-items: center; gap: 8px; color: var(--text); flex: none; }
 .brand:hover { text-decoration: none; }
 .brand-mark { width: 36px; height: 36px; flex: none; color: var(--hud-line); filter: drop-shadow(0 0 3px currentColor); transition: color 0.3s; }
-.brand-name { font: 700 14px/1 var(--mono); letter-spacing: 0.18em; white-space: nowrap; }
+/* a fixed width, so the typed name does not push the nav around while it types */
+.brand-name { display: inline-block; width: calc(10ch + 1.8em); font: 700 14px/1 var(--mono); letter-spacing: 0.18em; white-space: nowrap; }
 .brand-cur { display: none; width: 0.55em; height: 1em; margin-left: -5px; background: var(--hud-line); box-shadow: 0 0 6px var(--hud-line); }
 /* alert mood: the eye turns red and stares (the iris grows and centres); static, so it shows with effects off too */
 html[data-mood="alert"] .brand-mark { color: var(--hud-alert); }
