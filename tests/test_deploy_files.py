@@ -64,6 +64,9 @@ def test_start_script_render():
     raw = (ROOT / "deploy" / "start.sh").read_bytes()
     assert b"\r" not in raw
     text = raw.decode("utf-8")
+    serve_lines = [ln for ln in text.splitlines() if ln.startswith("exec idsai serve")]
+    assert len(serve_lines) == 1
+    assert "--allow-signup" in serve_lines[0]
     for want in (
         "idsai user seed-env",
         "RENDER_EXTERNAL_HOSTNAME",
@@ -144,7 +147,10 @@ def test_render_blueprint():
     assert svc["plan"] == "free"
     assert svc["healthCheckPath"] == "/api/health"
     assert svc["autoDeploy"] is True
-    assert svc["envVars"] == [{"key": "IDSAI_USERS", "sync": False}]
+    assert svc["envVars"] == [
+        {"key": "IDSAI_USERS", "sync": False},
+        {"key": "DATABASE_URL", "sync": False},
+    ]
     assert "value" not in text
 
 
@@ -170,6 +176,15 @@ def test_readme_hosting_section():
     for want in (
         "render.com",
         "IDSAI_USERS",
+        "neon.tech",
+        "DATABASE_URL",
+        "Oregon",
+        "บัญชีที่สมัครเองได้สิทธิ์ `viewer` เสมอ",
+        "จะถูกเขียนทับรหัสผ่านและสิทธิ์จาก `IDSAI_USERS` ทุกครั้งที่บูต",
+        "การรีสตาร์ตทำให้ทุกคนต้องเข้าสู่ระบบใหม่ แต่บัญชีที่สมัครไว้ยังอยู่",
+        "ถ้าไม่ตั้ง `DATABASE_URL` บัญชีที่สมัครเองจะหายทุกครั้งที่รีสตาร์ต",
+        "การลบบรรทัดออกจาก `IDSAI_USERS` ไม่ได้ลบบัญชีนั้น",
+        "ที่ถูกปิดใช้งานในแอปจะถูกเปิดใหม่ทุกครั้งที่บูต",
         "APP_URL",
         "onrender.com",
         "IDSAI_SPEED",
@@ -190,7 +205,7 @@ def test_readme_hosting_section():
         "ใช้ร่วมกัน",
     ):
         assert want in section
-    for n in range(1, 8):
+    for n in range(1, 11):
         assert f"\n{n}. " in section
     for gone in ("Hugging Face", "HF_TOKEN", "HF_SPACE", "SPACE_URL", "hf.space"):
         assert gone not in section

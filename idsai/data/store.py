@@ -18,6 +18,7 @@ import polars as pl
 from idsai.config import file_sha
 from idsai.contracts.alert import Alert
 from idsai.contracts.frames import LABELS, TRADES, conform, empty
+from idsai.data.accounts import AccountBackend
 
 log = logging.getLogger(__name__)
 DAY_US = 86_400_000_000
@@ -59,6 +60,7 @@ class Store:
         self._trades_dir = self.data_dir / "trades"
         self._index_path = self._trades_dir / "_index.parquet"
         self._lock = threading.RLock()
+        self._accounts: AccountBackend | None = None
         self._trades_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._con: duckdb.DuckDBPyConnection | None = duckdb.connect(str(self.db_path))
@@ -471,6 +473,42 @@ class Store:
             names = [d[0] for d in cur.description]
             return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
 
+    def attach_accounts(self, backend: AccountBackend) -> None:
+        """Make `backend` the source of truth: replace local users/prefs with its rows and
+        write through to it from now on."""
+        backend.ensure_schema()
+        users, prefs = backend.load_all()
+        with self._lock:
+            con = self._db()
+            con.execute("BEGIN")
+            try:
+                con.execute("DELETE FROM users")
+                con.execute("DELETE FROM user_prefs")
+                for u in users:
+                    con.execute(
+                        "INSERT INTO users(user_id, username, display_name, role, pw_hash, "
+                        "created_us, disabled) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            u["user_id"],
+                            u["username"],
+                            u["display_name"],
+                            u["role"],
+                            u["pw_hash"],
+                            u["created_us"],
+                            bool(u["disabled"]),
+                        ],
+                    )
+                for pref in prefs:
+                    con.execute(
+                        "INSERT INTO user_prefs(user_id, json) VALUES (?, ?)",
+                        [pref["user_id"], pref["json"]],
+                    )
+                con.execute("COMMIT")
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            self._accounts = backend
+
     def add_user(
         self, username: str, display_name: str, role: str, pw_hash: str, now_us: int
     ) -> str:
@@ -479,6 +517,18 @@ class Store:
             con = self._db()
             if con.execute("SELECT 1 FROM users WHERE username = ?", [username]).fetchone():
                 raise ValueError(f"username already taken: {username}")
+            if self._accounts is not None:
+                self._accounts.insert_user(
+                    {
+                        "user_id": user_id,
+                        "username": username,
+                        "display_name": display_name,
+                        "role": role,
+                        "pw_hash": pw_hash,
+                        "created_us": now_us,
+                        "disabled": False,
+                    }
+                )
             try:
                 con.execute(
                     "INSERT INTO users(user_id, username, display_name, role, pw_hash, "
@@ -507,6 +557,8 @@ class Store:
 
     def set_role(self, username: str, role: str) -> None:
         with self._lock:
+            if self._accounts is not None:
+                self._accounts.update_user(username, role=role)
             self._db().execute("UPDATE users SET role = ? WHERE username = ?", [role, username])
 
     def _drop_user_sessions(self, username: str) -> None:
@@ -517,12 +569,16 @@ class Store:
 
     def set_disabled(self, username: str, flag: bool) -> None:
         with self._lock:
+            if self._accounts is not None:
+                self._accounts.update_user(username, disabled=flag)
             self._db().execute("UPDATE users SET disabled = ? WHERE username = ?", [flag, username])
             if flag:
                 self._drop_user_sessions(username)
 
     def set_password(self, username: str, pw_hash: str) -> None:
         with self._lock:
+            if self._accounts is not None:
+                self._accounts.update_user(username, pw_hash=pw_hash)
             self._db().execute(
                 "UPDATE users SET pw_hash = ? WHERE username = ?", [pw_hash, username]
             )
@@ -585,10 +641,13 @@ class Store:
         return json.loads(row[0]) if row else {}
 
     def set_prefs(self, user_id: str, prefs: dict) -> None:
+        text = json.dumps(prefs, sort_keys=True)
         with self._lock:
+            if self._accounts is not None:
+                self._accounts.set_prefs(user_id, text)
             self._db().execute(
                 "INSERT OR REPLACE INTO user_prefs(user_id, json) VALUES (?, ?)",
-                [user_id, json.dumps(prefs, sort_keys=True)],
+                [user_id, text],
             )
 
     def add_audit(

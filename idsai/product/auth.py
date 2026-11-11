@@ -7,6 +7,7 @@ import hmac
 import re
 import secrets
 import time
+from collections import deque
 from collections.abc import Callable
 
 ROLES = ("viewer", "analyst", "admin")
@@ -16,6 +17,7 @@ _PREFIX = f"scrypt$n={_N},r={_R},p={_P}$"
 _MAXMEM = 64 * 1024 * 1024
 _USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
 _MIN_PASSWORD = 10
+RESERVED_USERNAMES = ("cli", "local")  # the audit log's actor names for the CLI and auth-off mode
 
 
 def role_at_least(role: str, need: str) -> bool:
@@ -153,3 +155,45 @@ class LoginLimiter:
         self._fails.pop(username, None)
         self._locked_until.pop(username, None)
         self._hit.discard(username)
+
+
+class SignupLimiter:
+    """In-memory sliding windows for self sign-up: `per_ip` per client address and `total` site-wide
+    within `window_s`. `allow` records an attempt only when it lets it through."""
+
+    def __init__(self, per_ip: int = 10, total: int = 60, window_s: float = 3600.0) -> None:
+        self.per_ip = per_ip
+        self.total = total
+        self.window_s = window_s
+        self._by_ip: dict[str, deque[float]] = {}
+        self._all: deque[float] = deque()
+
+    def allow(self, ip: str, now_s: float) -> bool:
+        cutoff = now_s - self.window_s
+        while self._all and self._all[0] <= cutoff:
+            self._all.popleft()
+        for k, q in list(self._by_ip.items()):  # drop idle addresses: the dict stays bounded
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if not q:
+                del self._by_ip[k]
+        if len(self._all) >= self.total or len(self._by_ip.get(ip, ())) >= self.per_ip:
+            return False
+        self._all.append(now_s)
+        self._by_ip.setdefault(ip, deque()).append(now_s)
+        return True
+
+    def refund(self, ip: str, now_s: float) -> None:
+        """Give back the slot `allow(ip, now_s)` recorded (an attempt that created no account)."""
+        try:
+            self._all.remove(now_s)
+        except ValueError:
+            pass
+        q = self._by_ip.get(ip)
+        if q is not None:
+            try:
+                q.remove(now_s)
+            except ValueError:
+                pass
+            if not q:
+                del self._by_ip[ip]

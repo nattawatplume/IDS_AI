@@ -29,6 +29,7 @@
       <a href="#/alerts" data-route="alerts"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span>การแจ้งเตือน</span></a>
       <a href="#/simulate" data-route="simulate"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><path d="M10.25 8.75 15.25 12l-5 3.25z"/></svg><span>ทดลองจำลอง</span></a>
       <a href="#/results" data-route="results"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 20h16M6.5 20v-7M12 20V5.5M17.5 20v-10"/></svg><span>ผลวัดระบบ</span></a>
+      <a href="#/users" data-route="users" id="nav-users" hidden><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="9" cy="8.5" r="3.25"/><path d="M3.5 19c.4-3.2 2.6-5 5.5-5s5.1 1.8 5.5 5"/><path d="M16 5.6a3.1 3.1 0 0 1 0 5.8M17.5 14.3c1.8.6 2.8 2.2 3 4.7"/></svg><span>ผู้ใช้</span></a>
     </nav>
     <div class="topbar-side">
       <span class="chip mode-chip" title="โหมดข้อมูลและเวลาเหตุการณ์ (เวลาไทย)">
@@ -89,7 +90,33 @@
         </label>
         <p id="login-error" class="small login-error" role="alert" hidden></p>
         <button id="login-submit" type="submit" class="primary">เข้าสู่ระบบ</button>
-        <p class="small muted login-note">บัญชีผู้ใช้สร้างโดยผู้ดูแลระบบ</p>
+        <p id="login-note" class="small muted login-note">บัญชีผู้ใช้สร้างโดยผู้ดูแลระบบ</p>
+        <p id="signup-line" class="small muted login-note" hidden>ยังไม่มีบัญชี? <button id="signup-open" type="button" class="link-btn">สมัครสมาชิก</button></p>
+      </form>
+      <form id="signup-form" class="card login-card" method="post" autocomplete="on" aria-label="สมัครสมาชิก" novalidate hidden>
+        <h2 class="signup-title">สมัครสมาชิก</h2>
+        <label class="field">
+          <span>ชื่อผู้ใช้</span>
+          <input id="signup-user" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" aria-describedby="signup-user-hint" required>
+          <small id="signup-user-hint" class="hint">a-z ตัวเลข _ . - ยาว 3 ถึง 32 ตัว</small>
+        </label>
+        <label class="field">
+          <span>ชื่อที่แสดง <span class="muted">(ไม่ใส่ก็ได้)</span></span>
+          <input id="signup-name" type="text" name="display_name" autocomplete="nickname" maxlength="40">
+        </label>
+        <label class="field">
+          <span>รหัสผ่าน</span>
+          <input id="signup-pass" type="password" name="password" autocomplete="new-password" maxlength="256" aria-describedby="signup-pass-hint" required>
+          <small id="signup-pass-hint" class="hint">อย่างน้อย 10 ตัว</small>
+        </label>
+        <label class="field">
+          <span>รหัสผ่านอีกครั้ง</span>
+          <input id="signup-pass2" type="password" name="password2" autocomplete="new-password" maxlength="256" required>
+        </label>
+        <p id="signup-error" class="small login-error" role="alert" hidden></p>
+        <button id="signup-submit" type="submit" class="primary">สมัคร</button>
+        <p class="small muted login-note">สมัครแล้วดูได้อย่างเดียว ถ้าต้องการสิทธิ์เพิ่มให้บอกผู้ดูแล</p>
+        <p class="small muted login-note"><button id="signup-back" type="button" class="link-btn">มีบัญชีแล้ว? เข้าสู่ระบบ</button></p>
       </form>
     </section>
 
@@ -273,6 +300,21 @@
       <h1>ผลวัดระบบ</h1>
       <p class="page-lead muted">ผลทดสอบระบบกับข้อมูลการซื้อขายย้อนหลัง แต่ละการ์ดบอกว่าถึงเป้าที่ตั้งไว้แล้วหรือยัง</p>
       <div id="eval-body"></div>
+    </section>
+
+    <!-- Users (admin) -->
+    <section id="page-users" class="page" hidden>
+      <h1>ผู้ใช้</h1>
+      <p class="muted small">เปลี่ยนสิทธิ์หรือปิดบัญชีได้ที่นี่ (เฉพาะ admin) ผู้สมัครใหม่จะเป็นผู้ชมก่อน</p>
+      <div class="table-wrap">
+        <table class="table" id="users-table">
+          <thead>
+            <tr><th>ชื่อผู้ใช้</th><th>สิทธิ์</th><th>สถานะ</th><th>เห็นล่าสุด</th></tr>
+          </thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+      <p id="users-status" class="muted small" role="status"></p>
     </section>
 
     <!-- Activity (admin) -->

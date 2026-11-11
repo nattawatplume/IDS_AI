@@ -142,6 +142,7 @@ const state = {
   bootError: null, // why the last /api/me gave no usable answer: { status } or { answered } or {}
   pendingHelp: false, // a help route asked before the app was entered: opened by enterApp()
   evalBudget: null, // saved Eval budget (string, as the option value)
+  users: [], // the admin Users page rows
   audit: [], // Activity rows already loaded, newest first
   auditDone: false,
 };
@@ -152,6 +153,7 @@ const ROLE_ORDER = ["viewer", "analyst", "admin"];
 const AUDIT_ACTIONS = [
   "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
+  "signup", "role_change", "user_seed",
 ];
 // parent techniques whose taxonomy name_th holds Latin words ("wash trading"): the plain view names them here
 const TECHNIQUE_TH = { "MM-T005": "การซื้อขายวนหลอก" };
@@ -897,6 +899,7 @@ function applyRoleGates() {
     gate(node);
   }
   $("menu-activity").hidden = !can("admin");
+  $("nav-users").hidden = !can("admin");
   renderPlayButton(); // the gate above cleared every title; the play button gets its "(กดแป้นเว้นวรรค)" back
 }
 
@@ -2962,6 +2965,7 @@ function retrainCard(title, block) {
 const PAGES = {
   login: "page-login",
   activity: "page-activity",
+  users: "page-users",
   home: "page-home",
   alerts: "page-alerts",
   alert: "page-alert",
@@ -2972,7 +2976,7 @@ const PAGES = {
 // old links keep working: the 6-tab names map onto the 4 pages; About and Taxonomy live in help
 const ROUTE_REDIRECTS = { "#/monitor": "#/home", "#/redteam": "#/simulate", "#/eval": "#/results" };
 const HELP_ROUTES = ["#/about", "#/taxonomy"];
-const KNOWN_ROUTES = ["#/home", "#/alerts", "#/simulate", "#/results", "#/activity"];
+const KNOWN_ROUTES = ["#/home", "#/alerts", "#/simulate", "#/results", "#/activity", "#/users"];
 
 // where a hash should land: { route, help }; anything unknown goes home
 function routeFor(hash) {
@@ -3020,7 +3024,7 @@ function route() {
     goLogin(); // no session yet: a typed or bookmarked page waits behind the sign-in
     return;
   }
-  if (r.name === "activity" && !can("admin")) {
+  if ((r.name === "activity" || r.name === "users") && !can("admin")) {
     // a convenience redirect: GET /api/audit answers 403 for anyone else anyway
     location.hash = DEFAULT_ROUTE;
     return;
@@ -3029,6 +3033,7 @@ function route() {
     location.hash = r.next; // already signed in (or auth is off): nothing to do here
     return;
   }
+  const cameFrom = state.route;
   state.route = r.name;
   document.body.classList.toggle("login-mode", r.name === "login");
   $("topbar").hidden = r.name === "login"; // the sign-in page carries its own logo
@@ -3049,9 +3054,12 @@ function route() {
     showEval();
   } else if (r.name === "activity") {
     showActivity();
+  } else if (r.name === "users") {
+    showUsers();
   } else if (r.name === "login") {
     applyFramedHint(window, $("login-framed"), $("login-framed-link"));
-    $("login-user").focus();
+    if (cameFrom !== "login") showAuthForm("login"); // a lost session lands on sign-in, not on a half-filled sign-up
+    else if (!$("login-form").hidden) $("login-user").focus();
   }
 }
 
@@ -3133,6 +3141,92 @@ function showView(view) {
   $("site-footer").hidden = view !== "app"; // the About link opens the drawer, which only exists in the app
 }
 
+// what follows a sign-in or a sign-up: take the account, go where the user was headed, load the app
+async function completeSignIn(me) {
+  const next = parseRoute().next || DEFAULT_ROUTE;
+  adoptMe({ ...me, auth_enabled: true });
+  location.hash = next;
+  await enterApp();
+}
+
+// ------------------------------------------------------------------ sign-up
+
+const SIGNUP_NAME_RE = /^[a-z0-9_.-]{3,32}$/;
+const SIGNUP_MIN_PASS = 10;
+
+// the first thing wrong with the form as typed, in plain Thai, or "" when it can go to the server
+function signupProblem(username, password, again) {
+  if (!SIGNUP_NAME_RE.test(username)) return "ชื่อผู้ใช้ใช้ได้แค่ a-z ตัวเลข _ . - และต้องยาว 3 ถึง 32 ตัว";
+  if (password.length < SIGNUP_MIN_PASS) return `รหัสผ่านสั้นไป ต้องมีอย่างน้อย ${SIGNUP_MIN_PASS} ตัว`;
+  if (password === username) return "รหัสผ่านต้องไม่เหมือนชื่อผู้ใช้";
+  if (password !== again) return "รหัสผ่านสองช่องไม่ตรงกัน";
+  return "";
+}
+
+function showSignupError(text) {
+  const box = $("signup-error");
+  box.hidden = !text;
+  box.textContent = text || "";
+}
+
+// one card at a time, in the same place; the cursor goes to the first field
+function showAuthForm(which) {
+  const signup = which === "signup";
+  $("login-form").hidden = signup;
+  $("signup-form").hidden = !signup;
+  showLoginError("");
+  showSignupError("");
+  $(signup ? "signup-user" : "login-user").focus();
+}
+
+// the link to sign-up shows only when the server says sign-up is open; any failure leaves it hidden
+async function loadSignupConfig() {
+  let open = false;
+  try {
+    const cfg = await api("/api/auth/config");
+    open = !!cfg && cfg.signup === true;
+  } catch (e) {
+    open = false;
+  }
+  $("signup-line").hidden = !open;
+  $("login-note").hidden = open;
+  if (!open && !$("signup-form").hidden) showAuthForm("login");
+}
+
+function bindSignup() {
+  $("signup-open").addEventListener("click", () => showAuthForm("signup"));
+  $("signup-back").addEventListener("click", () => showAuthForm("login"));
+  $("signup-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("signup-submit");
+    const username = $("signup-user").value.trim().toLowerCase();
+    const password = $("signup-pass").value;
+    const problem = signupProblem(username, password, $("signup-pass2").value);
+    if (problem) {
+      showSignupError(problem);
+      return;
+    }
+    btn.disabled = true;
+    showSignupError("");
+    try {
+      const me = await postJson("/api/auth/signup", {
+        username,
+        display_name: $("signup-name").value.trim(),
+        password,
+      });
+      $("signup-pass").value = "";
+      $("signup-pass2").value = "";
+      await completeSignIn(me);
+    } catch (e) {
+      $("signup-pass").value = "";
+      $("signup-pass2").value = "";
+      showSignupError(e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 function bindLogin() {
   $("login-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -3150,10 +3244,7 @@ function bindLogin() {
       });
       loginFails = 0;
       $("login-pass").value = "";
-      const next = parseRoute().next || DEFAULT_ROUTE;
-      adoptMe({ ...me, auth_enabled: true });
-      location.hash = next;
-      await enterApp();
+      await completeSignIn(me);
     } catch (e) {
       loginFails += 1;
       $("login-pass").value = "";
@@ -3164,6 +3255,7 @@ function bindLogin() {
       btn.disabled = false;
     }
   });
+  bindSignup();
   $("btn-logout").addEventListener("click", async () => {
     try {
       await api("/api/auth/logout", { method: "POST" });
@@ -3261,6 +3353,104 @@ function bindActivity() {
   $("audit-user").addEventListener("input", renderAudit);
   $("audit-action").addEventListener("change", renderAudit);
   $("audit-more").addEventListener("click", () => loadAudit(true));
+}
+
+// ------------------------------------------------------------------ users (admin)
+
+// "14:05 น." for today, "3 พ.ย. 14:05 น." for an earlier day (Thai time)
+const TH_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+
+function fmtThaiDayTime(us, nowUs) {
+  if (!isNum(us) || us <= 0) return "ยังไม่เคยเข้า";
+  const day = (t) => Math.floor((t + TH_OFFSET_US) / (86400 * S_US));
+  const time = fmtThaiTime(us);
+  if (isNum(nowUs) && day(us) === day(nowUs)) return time;
+  const when = new Date(Math.floor((us + TH_OFFSET_US) / 1000));
+  return `${when.getUTCDate()} ${TH_MONTHS[when.getUTCMonth()]} ${time}`;
+}
+
+function usersStatus(text) {
+  $("users-status").textContent = text || "";
+}
+
+// one control changed: send it, toast the result; on a refusal put the control back and say why
+async function changeUser(u, control, path, body, undo, done) {
+  control.disabled = true;
+  try {
+    const saved = await postJson(`/api/users/${encodeURIComponent(u.username)}/${path}`, body);
+    Object.assign(u, saved);
+    showToast(done(saved));
+    renderUsers();
+  } catch (e) {
+    undo();
+    showToast(e.message);
+    control.disabled = false;
+  }
+}
+
+function userRow(u, nowUs) {
+  const mine = !!state.me && u.username === state.me.username;
+  const name = u.display_name && u.display_name !== u.username ? u.display_name : null;
+  const role = el("select", { "aria-label": `สิทธิ์ของ ${u.username}`, disabled: mine });
+  for (const r of ROLE_ORDER) role.appendChild(el("option", { value: r }, ROLE_TH[r]));
+  role.value = u.role;
+  role.addEventListener("change", () => {
+    const before = u.role;
+    changeUser(u, role, "role", { role: role.value }, () => (role.value = before), (upd) => `${upd.username} เป็น${ROLE_TH[upd.role]}แล้ว`);
+  });
+  const on = !u.disabled;
+  const sw = el(
+    "button",
+    {
+      type: "button",
+      class: "switch",
+      role: "switch",
+      "aria-checked": String(on),
+      "aria-label": `เปิดใช้บัญชี ${u.username}`,
+      disabled: mine,
+      title: mine ? "ปิดบัญชีตัวเองไม่ได้" : null,
+    },
+    el("span", { class: "switch-knob", "aria-hidden": "true" }),
+  );
+  sw.addEventListener("click", () => {
+    sw.setAttribute("aria-checked", String(!on));
+    changeUser(u, sw, "disabled", { disabled: on }, () => sw.setAttribute("aria-checked", String(on)), (upd) =>
+      upd.disabled ? `ปิดบัญชี ${upd.username} แล้ว` : `เปิดบัญชี ${upd.username} แล้ว`,
+    );
+  });
+  return el(
+    "tr",
+    { class: u.disabled ? "gone" : null },
+    el(
+      "td",
+      {},
+      el("span", { class: "user-name" }, u.username),
+      name ? el("span", { class: "muted small user-sub" }, name) : null,
+      mine ? el("span", { class: "tag" }, "คุณ") : null,
+      u.from_env ? el("span", { class: "tag", title: "บัญชีนี้มาจากค่าตั้งของเซิร์ฟเวอร์" }, "จาก IDSAI_USERS") : null,
+    ),
+    el("td", {}, role),
+    el("td", {}, el("span", { class: "switch-wrap" }, sw, el("span", { class: "small" }, on ? "ใช้งานอยู่" : "ปิดอยู่"))),
+    el("td", { class: "when" }, fmtThaiDayTime(u.last_seen_us, nowUs)),
+  );
+}
+
+function renderUsers() {
+  const nowUs = Date.now() * 1000;
+  const body = clear($("users-body"));
+  for (const u of state.users) body.appendChild(userRow(u, nowUs));
+  usersStatus(state.users.length ? `${state.users.length} บัญชี` : "ยังไม่มีบัญชี");
+}
+
+async function showUsers() {
+  usersStatus("กำลังโหลด");
+  try {
+    const rows = await api("/api/users");
+    state.users = Array.isArray(rows) ? rows : [];
+    renderUsers();
+  } catch (e) {
+    usersStatus(e.message);
+  }
 }
 
 // ------------------------------------------------------------------ websocket
@@ -3409,6 +3599,7 @@ async function boot() {
   });
   if (!LWC) console.warn("dashboard: the chart library did not load");
 
+  loadSignupConfig();
   let authEnabled = await loadMe();
   for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {
     // no usable answer: keep only the loader up, say why, and ask again with a growing wait

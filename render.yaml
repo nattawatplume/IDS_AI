@@ -8,3 +8,5 @@ services:
     envVars:
       - key: IDSAI_USERS
         sync: false
+      - key: DATABASE_URL
+        sync: false

@@ -50,6 +50,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 
 from idsai.contracts.alert import Alert
+from idsai.data.accounts import AccountStoreError
 from idsai.data.store import Verdict
 from idsai.detection.simulator import base_quote_rate
 from idsai.detection.simulator.guard import EthicsError, assert_injection_allowed
@@ -62,8 +63,11 @@ from idsai.detection.simulator.scenarios import (
 from idsai.detection.taxonomy import load_taxonomy
 from idsai.product.api.state import AppState, clean, health
 from idsai.product.auth import (
+    RESERVED_USERNAMES,
     ROLES,
+    check_password,
     check_username,
+    hash_password,
     new_token,
     role_at_least,
     token_hash,
@@ -88,6 +92,11 @@ WS_UNAUTHORIZED = 4401
 VERIFY_SLOTS = 2  # password checks run in worker threads, at most this many at once
 MAX_LOGIN_WAITERS = 16  # logins queued on or holding a verify slot; beyond it: 429
 BUSY_TH = "ระบบไม่ว่าง ลองใหม่อีกครั้ง"
+SIGNUP_TAKEN_TH = "ชื่อนี้มีคนใช้แล้ว"
+SIGNUP_LIMITED_TH = "สมัครถี่เกินไป ลองใหม่ภายหลัง"
+SIGNUP_FAILED_TH = "บันทึกบัญชีไม่สำเร็จ ลองใหม่อีกครั้ง"
+LAST_ADMIN_TH = "ต้องมีผู้ดูแลอย่างน้อย 1 คน"
+DISPLAY_NAME_MAX = 40
 WS_RECHECK_S = 60  # an open WebSocket re-reads its session this often; gone or disabled: 4401
 LOCAL_USER = {"user_id": "local", "username": "local", "display_name": "local", "role": "admin"}
 _USER_KEYS = ("user_id", "username", "display_name", "role")
@@ -136,6 +145,20 @@ class LoginIn(_Body):
     username: str = Field(max_length=64)
     password: str = Field(max_length=1024)
     remember: bool = False
+
+
+class SignupIn(_Body):
+    username: str = Field(max_length=64)
+    display_name: str = Field(default="", max_length=200)
+    password: str = Field(max_length=1024)
+
+
+class RoleIn(_Body):
+    role: str = Field(max_length=32)
+
+
+class DisabledIn(_Body):
+    disabled: StrictBool
 
 
 class PrefsIn(_Body):
@@ -344,19 +367,91 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         if user is None or not ok or user["disabled"]:
             raise failed(user, "unknown" if user is None else "disabled" if ok else "password")
         limiter.ok(name)
-        auth = state.cfg.auth
-        life_s = auth.remember_days * DAY_S if body.remember else auth.session_hours * 3600
-        token = new_token()
-        store.create_session(
-            user["user_id"], token_hash(token), now, now + life_s * S_US, body.remember
-        )
-        me = {k: user[k] for k in _USER_KEYS}  # never pw_hash
+        resp = _start_session(user, body.remember)
         store.add_audit(
-            now, me["user_id"], me["username"], "login", "", {"remember": body.remember}
+            now, user["user_id"], user["username"], "login", "", {"remember": body.remember}
         )
+        return resp
+
+    def _start_session(user: dict, remember: bool) -> Response:
+        """A session for `user` and the response (body and cookie) login and sign-up both send."""
+        store = state.store
+        auth = state.cfg.auth
+        now = _now_us()
+        life_s = auth.remember_days * DAY_S if remember else auth.session_hours * 3600
+        token = new_token()
+        store.create_session(user["user_id"], token_hash(token), now, now + life_s * S_US, remember)
+        me = {k: user[k] for k in _USER_KEYS}  # never pw_hash
         out = {k: me[k] for k in ("username", "display_name", "role")}
         resp = _json({**out, "prefs": store.get_prefs(me["user_id"])})
-        resp.set_cookie(COOKIE, token, max_age=life_s if body.remember else None, **cookie_flags())
+        resp.set_cookie(COOKIE, token, max_age=life_s if remember else None, **cookie_flags())
+        return resp
+
+    def client_ip(request: Request) -> str:
+        """The limiter's address: behind a TLS proxy (`cookie_secure`) the left-most
+        X-Forwarded-For entry, else the socket peer."""
+        if state.cfg.auth.cookie_secure:
+            fwd = request.headers.get("x-forwarded-for")
+            if fwd:
+                first = fwd.split(",", 1)[0].strip()
+                if first:
+                    return first
+        return request.client.host if request.client else "unknown"
+
+    @app.get("/api/auth/config")
+    async def auth_config():
+        return _json({"signup": state.auth_enabled and state.allow_signup})
+
+    @app.post("/api/auth/signup", dependencies=[Depends(same_origin)])
+    async def signup(body: SignupIn, request: Request):
+        nonlocal login_waiters
+        if not state.auth_enabled:
+            raise HTTPException(409, "ระบบล็อกอินปิดอยู่")
+        if not state.allow_signup:
+            raise HTTPException(404, "ไม่พบหน้านี้")
+        name = body.username
+        try:
+            check_username(name)
+            if name in RESERVED_USERNAMES:
+                raise ValueError("ชื่อนี้สงวนไว้ เลือกชื่ออื่น")
+            check_password(body.password)
+            if body.password == name:
+                raise ValueError("รหัสผ่านต้องไม่เหมือนชื่อผู้ใช้")
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        shown = body.display_name.strip()
+        if len(shown) > DISPLAY_NAME_MAX or any(ord(ch) < 32 or ord(ch) == 127 for ch in shown):
+            raise HTTPException(
+                422, f"ชื่อที่แสดงต้องไม่เกิน {DISPLAY_NAME_MAX} ตัว และห้ามมีอักขระควบคุม"
+            )
+        shown = shown or name
+        ip, slot = client_ip(request), time.monotonic()
+        if not state.signup_limiter.allow(ip, slot):
+            raise HTTPException(429, SIGNUP_LIMITED_TH)
+        if login_waiters >= MAX_LOGIN_WAITERS:
+            raise HTTPException(429, BUSY_TH)
+        login_waiters += 1
+        try:
+            async with verify_slots:  # scrypt off the loop, a bounded number at a time
+                try:
+                    pw_hash = await asyncio.to_thread(hash_password, body.password)
+                except Exception:  # e.g. a password with lone surrogates cannot be encoded
+                    raise HTTPException(422, "รหัสผ่านไม่ถูกต้อง") from None
+        finally:
+            login_waiters -= 1
+        store, now = state.store, _now_us()
+        try:
+            uid = store.add_user(name, shown, "viewer", pw_hash, now)
+        except ValueError:
+            state.signup_limiter.refund(ip, slot)  # a taken name creates nothing: no quota spent
+            raise HTTPException(409, SIGNUP_TAKEN_TH) from None
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
+        user = store.get_user(uid)
+        if user is None:  # cannot happen: just inserted
+            raise HTTPException(503, SIGNUP_FAILED_TH)
+        resp = _start_session(user, False)
+        store.add_audit(now, uid, name, "signup", "", {})
         return resp
 
     @app.post("/api/auth/logout", status_code=204, dependencies=[Depends(same_origin)])
@@ -377,6 +472,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 "display_name": user["display_name"],
                 "role": user["role"],
                 "auth_enabled": state.auth_enabled,
+                "signup": state.auth_enabled and state.allow_signup,
                 "prefs": state.store.get_prefs(user["user_id"]),
             }
         )
@@ -394,7 +490,10 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 prefs.pop(k, None)
             else:
                 prefs[k] = v
-        state.store.set_prefs(user["user_id"], prefs)
+        try:
+            state.store.set_prefs(user["user_id"], prefs)
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
         return _json(prefs)
 
     @app.get("/api/audit")
@@ -404,6 +503,69 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         before_us: int | None = None,
     ):
         return _json(state.store.list_audit(limit, before_us))
+
+    # ---- users (admin) ----
+
+    def user_row(u: dict) -> dict:
+        return {
+            "username": u["username"],
+            "display_name": u["display_name"],
+            "role": u["role"],
+            "disabled": bool(u["disabled"]),
+            "created_us": u["created_us"],
+            "last_seen_us": u["last_seen_us"],
+            "from_env": u["username"] in state.env_usernames,
+        }
+
+    def find_user(name: str) -> dict:
+        row = next((u for u in state.store.list_users() if u["username"] == name), None)
+        if row is None:
+            raise HTTPException(404, "ไม่พบผู้ใช้นี้")
+        return row
+
+    def other_enabled_admin(name: str) -> bool:
+        return any(
+            u["role"] == "admin" and not u["disabled"] and u["username"] != name
+            for u in state.store.list_users()
+        )
+
+    @app.get("/api/users")
+    async def users(user: Admin):
+        return _json([user_row(u) for u in state.store.list_users()])
+
+    @app.post("/api/users/{username}/role", dependencies=[Depends(same_origin)])
+    async def set_user_role(username: str, body: RoleIn, user: Admin):
+        if body.role not in ROLES:
+            raise HTTPException(422, f"role ต้องเป็นหนึ่งใน {', '.join(ROLES)}")
+        target = find_user(username)
+        old = target["role"]
+        if old == body.role:
+            return _json(user_row(target))
+        if old == "admin" and not target["disabled"] and not other_enabled_admin(username):
+            raise HTTPException(409, LAST_ADMIN_TH)
+        try:
+            state.store.set_role(username, body.role)
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
+        audit(user, "role_change", username, {"from": old, "to": body.role})
+        return _json(user_row(find_user(username)))
+
+    @app.post("/api/users/{username}/disabled", dependencies=[Depends(same_origin)])
+    async def set_user_disabled(username: str, body: DisabledIn, user: Admin):
+        target = find_user(username)
+        if bool(target["disabled"]) == body.disabled:
+            return _json(user_row(target))
+        if body.disabled:
+            if target["role"] == "admin" and not other_enabled_admin(username):
+                raise HTTPException(409, LAST_ADMIN_TH)
+            if username == user["username"]:
+                raise HTTPException(409, "ปิดบัญชีตัวเองไม่ได้")
+        try:
+            state.store.set_disabled(username, body.disabled)
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
+        audit(user, "user_disable" if body.disabled else "user_enable", username)
+        return _json(user_row(find_user(username)))
 
     # ---- alerts ----
 
