@@ -161,7 +161,7 @@ class SignupLimiter:
     """In-memory sliding windows for self sign-up: `per_ip` per client address and `total` site-wide
     within `window_s`. `allow` records an attempt only when it lets it through."""
 
-    def __init__(self, per_ip: int = 3, total: int = 30, window_s: float = 3600.0) -> None:
+    def __init__(self, per_ip: int = 10, total: int = 60, window_s: float = 3600.0) -> None:
         self.per_ip = per_ip
         self.total = total
         self.window_s = window_s
@@ -182,3 +182,18 @@ class SignupLimiter:
         self._all.append(now_s)
         self._by_ip.setdefault(ip, deque()).append(now_s)
         return True
+
+    def refund(self, ip: str, now_s: float) -> None:
+        """Give back the slot `allow(ip, now_s)` recorded (an attempt that created no account)."""
+        try:
+            self._all.remove(now_s)
+        except ValueError:
+            pass
+        q = self._by_ip.get(ip)
+        if q is not None:
+            try:
+                q.remove(now_s)
+            except ValueError:
+                pass
+            if not q:
+                del self._by_ip[ip]

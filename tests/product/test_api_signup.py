@@ -27,11 +27,31 @@ def open_env(aenv):  # noqa: F811
 
 def test_signup_limiter_windows():
     lim = SignupLimiter()
-    assert [lim.allow("1.1.1.1", t) for t in (0, 1, 2, 3)] == [True, True, True, False]
+    assert (lim.per_ip, lim.total) == (10, 60)
+    assert [lim.allow("1.1.1.1", float(t)) for t in range(11)] == [True] * 10 + [False]
     assert lim.allow("1.1.1.1", 3601.0) is True
     lim = SignupLimiter()
-    assert all(lim.allow(f"10.0.0.{i}", float(i)) for i in range(30))
-    assert lim.allow("10.0.1.1", 31.0) is False
+    assert all(lim.allow(f"10.0.0.{i}", float(i)) for i in range(60))
+    assert lim.allow("10.0.1.1", 61.0) is False
+
+
+def test_signup_limiter_refund():
+    lim = SignupLimiter(per_ip=1, total=1)
+    assert lim.allow("1.1.1.1", 5.0)
+    assert not lim.allow("1.1.1.1", 6.0)
+    lim.refund("1.1.1.1", 5.0)
+    assert lim.allow("1.1.1.1", 7.0)
+    lim.refund("9.9.9.9", 1.0)  # unknown slot: harmless
+
+
+def test_signup_name_taken_does_not_use_quota(open_env, auth_client):  # noqa: F811
+    open_env.state.signup_limiter = SignupLimiter(per_ip=2, total=5)
+    c = auth_client()
+    assert signup(c, "user-one").status_code == 200
+    for _ in range(4):
+        assert signup(c, "user-one").status_code == 409
+    assert signup(c, "user-two").status_code == 200
+    assert signup(c, "user-three").status_code == 429
 
 
 def test_config_reports_signup(aenv, auth_client):  # noqa: F811
@@ -141,3 +161,13 @@ def test_signup_refuses_cross_origin(open_env, auth_client):  # noqa: F811
     r = signup(auth_client(), headers={"origin": "http://evil.example"})
     assert r.status_code == 403
     assert open_env.store.get_user_by_name("newbie") is None
+
+
+def test_put_prefs_backend_failure_is_503(open_env, auth_client):  # noqa: F811
+    backend = MemoryAccounts()
+    open_env.store.attach_accounts(backend)
+    c = auth_client()
+    assert signup(c).status_code == 200
+    backend.fail = True
+    r = send(c, "PUT", "/api/me/prefs", {"eval_budget": None})
+    assert r.status_code == 503 and r.json()["detail"] == FAILED_TH

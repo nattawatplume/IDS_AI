@@ -425,7 +425,8 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 422, f"ชื่อที่แสดงต้องไม่เกิน {DISPLAY_NAME_MAX} ตัว และห้ามมีอักขระควบคุม"
             )
         shown = shown or name
-        if not state.signup_limiter.allow(client_ip(request), time.monotonic()):
+        ip, slot = client_ip(request), time.monotonic()
+        if not state.signup_limiter.allow(ip, slot):
             raise HTTPException(429, SIGNUP_LIMITED_TH)
         if login_waiters >= MAX_LOGIN_WAITERS:
             raise HTTPException(429, BUSY_TH)
@@ -442,6 +443,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         try:
             uid = store.add_user(name, shown, "viewer", pw_hash, now)
         except ValueError:
+            state.signup_limiter.refund(ip, slot)  # a taken name creates nothing: no quota spent
             raise HTTPException(409, SIGNUP_TAKEN_TH) from None
         except AccountStoreError:
             raise HTTPException(503, SIGNUP_FAILED_TH) from None
@@ -488,7 +490,10 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 prefs.pop(k, None)
             else:
                 prefs[k] = v
-        state.store.set_prefs(user["user_id"], prefs)
+        try:
+            state.store.set_prefs(user["user_id"], prefs)
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
         return _json(prefs)
 
     @app.get("/api/audit")

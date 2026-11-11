@@ -82,8 +82,9 @@ There are two implementations:
 2. Run `check_password` (at least 10 chars). The password must also differ from the username. Failure gets a 422.
 3. `display_name` is trimmed to 1–40 chars, and control characters are rejected (422). If it is empty, the username is used.
 4. **Rate limits**, in memory and reset on restart, both checked before hashing:
-   - per client IP, at most 3 sign-ups per hour;
-   - site-wide, at most 30 per hour.
+   - per client IP, at most 10 sign-ups per hour (raised from 3 after the final review: a class on one Wi-Fi shares one IP);
+   - site-wide, at most 60 per hour.
+   - A 409 (name taken) does not consume quota: the slot is refunded.
    - Over a limit, the response is 429 `สมัครถี่เกินไป ลองใหม่ภายหลัง`.
    - **Client IP** is the left-most `X-Forwarded-For` entry when `--secure-cookies` is on (hosted behind Render's proxy), else `request.client.host`. The per-IP limit can be dodged by spoofing the header; the site-wide cap is the hard bound.
 5. Hash with scrypt off the event loop, using the same `verify_slots` semaphore as login.

@@ -18,7 +18,7 @@
 - With `DATABASE_URL` unset, behaviour is exactly as today. Sign-up is off unless `--allow-signup` is passed.
 - There is no Postgres call on the read path (`get_user_by_name`, `get_session`, `list_users`, `has_enabled_admin`).
 - Sign-up role is always `viewer`.
-- Rate limits: per IP 3 sign-ups/hour, site-wide 30/hour, in memory.
+- Rate limits: per IP 10 sign-ups/hour, site-wide 60/hour, in memory; a 409 name-taken does not consume quota.
 - Name rules come from `check_username` (`^[a-z0-9_.-]{3,32}$`; `cli` and `local` are reserved). Password rules come from `check_password` (at least 10 chars) and the password must differ from the username. `display_name` is trimmed to 1–40 chars, with no control chars, and an empty one becomes the username.
 - Thai messages, verbatim from the spec:
   - `ชื่อนี้มีคนใช้แล้ว` (409)

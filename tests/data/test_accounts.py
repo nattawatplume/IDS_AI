@@ -114,3 +114,53 @@ def test_attach_failure_keeps_local_state(store):
         store.attach_accounts(MemoryAccounts(fail=True))
     assert store._accounts is None
     assert store.get_user_by_name("old") is not None
+
+
+class _FakeCon:
+    closed = False
+
+    def __init__(self):
+        self.sql = []
+
+    def execute(self, sql, *a):
+        self.sql.append(sql)
+
+
+def test_postgres_connect_is_bounded(monkeypatch):
+    import psycopg
+
+    from idsai.data.accounts import PostgresAccounts
+
+    seen = {}
+    con = _FakeCon()
+
+    def fake_connect(url, **kw):
+        seen["url"], seen["kw"] = url, kw
+        return con
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+    url = "postgresql://u:p@h/db?options=-csearch_path%3Dx"
+    assert PostgresAccounts(url)._connect() is con
+    kw = seen["kw"]
+    assert seen["url"] == url and "options" not in kw  # URL options kept
+    assert kw["connect_timeout"] == 5 and kw["autocommit"] is True
+    assert (kw["keepalives"], kw["keepalives_idle"]) == (1, 30)
+    assert (kw["keepalives_interval"], kw["keepalives_count"]) == (10, 3)
+    assert con.sql == ["SET statement_timeout = 5000"]
+
+
+def test_postgres_errors_do_not_chain_the_cause(monkeypatch):
+    import psycopg
+
+    from idsai.data.accounts import PostgresAccounts
+
+    def boom(url, **kw):
+        raise psycopg.OperationalError("server secret-host.neon.tech, user bob failed")
+
+    monkeypatch.setattr(psycopg, "connect", boom)
+    be = PostgresAccounts("postgresql://bob:pw@secret-host.neon.tech/db")
+    with pytest.raises(AccountStoreError) as ei:
+        be._run("SELECT 1")
+    e = ei.value
+    assert e.__cause__ is None and e.__suppress_context__
+    assert "secret-host" not in str(e) and "bob" not in str(e)

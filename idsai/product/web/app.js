@@ -153,6 +153,7 @@ const ROLE_ORDER = ["viewer", "analyst", "admin"];
 const AUDIT_ACTIONS = [
   "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
+  "signup", "role_change", "user_seed",
 ];
 // parent techniques whose taxonomy name_th holds Latin words ("wash trading"): the plain view names them here
 const TECHNIQUE_TH = { "MM-T005": "การซื้อขายวนหลอก" };

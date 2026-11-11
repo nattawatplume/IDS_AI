@@ -95,9 +95,20 @@ class PostgresAccounts:
         import psycopg
 
         try:
-            return psycopg.connect(self._url, connect_timeout=10, autocommit=True)
-        except psycopg.Error as e:
-            raise AccountStoreError("cannot connect to account database") from e
+            con = psycopg.connect(
+                self._url,
+                connect_timeout=5,
+                autocommit=True,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=3,
+            )
+            # a SET, not the `options` parameter, so `options` already in the URL survive
+            con.execute("SET statement_timeout = 5000")
+            return con
+        except psycopg.Error:
+            raise AccountStoreError("cannot connect to account database") from None
 
     def _run(self, sql: str, args: tuple = (), fetch: bool = False) -> list[tuple]:
         import psycopg
@@ -109,9 +120,9 @@ class PostgresAccounts:
                 with self._con.cursor() as cur:
                     cur.execute(sql, args)
                     return cur.fetchall() if fetch else []
-            except psycopg.errors.UniqueViolation as e:
-                raise ValueError("username already taken") from e
-            except psycopg.OperationalError as e:
+            except psycopg.errors.UniqueViolation:
+                raise ValueError("username already taken") from None
+            except psycopg.OperationalError:
                 try:
                     if self._con is not None:
                         self._con.close()
@@ -119,9 +130,9 @@ class PostgresAccounts:
                     pass
                 self._con = None
                 if attempt == 2:
-                    raise AccountStoreError("account database unavailable") from e
-            except psycopg.Error as e:
-                raise AccountStoreError("account database error") from e
+                    raise AccountStoreError("account database unavailable") from None
+            except psycopg.Error:
+                raise AccountStoreError("account database error") from None
         return []  # pragma: no cover
 
     def ensure_schema(self) -> None:

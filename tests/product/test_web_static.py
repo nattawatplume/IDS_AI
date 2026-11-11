@@ -3018,3 +3018,9 @@ def test_signup_client_checks():
     assert "password !== again" in js and "password === username" in js
     for hint in ("รหัสผ่านสองช่องไม่ตรงกัน", "รหัสผ่านสั้นไป", "ชื่อผู้ใช้ใช้ได้แค่"):
         assert hint in js, hint
+
+
+def test_audit_filter_lists_server_actions():
+    block = text("app.js").split("const AUDIT_ACTIONS = [", 1)[1].split("];", 1)[0]
+    for a in ("signup", "role_change", "user_seed", "user_role"):
+        assert f'"{a}"' in block
