@@ -145,6 +145,7 @@ const state = {
   users: [], // the admin Users page rows
   audit: [], // Activity rows already loaded, newest first
   auditDone: false,
+  prices: {}, // symbol -> the last close seen on a bar or in a series (feeds the header ticker)
 };
 
 // ------------------------------------------------------------------ roles + sign-in state
@@ -732,6 +733,47 @@ function fx(name, ...args) {
   return undefined;
 }
 
+// ---- the header data ticker: real app state only, "–" for anything not known yet
+const TICKER_MAX_SYMBOLS = 6;
+const TICKER_GAP_MS = 1500; // the strip is decoration: values refresh at most this often
+let tickerTimer = 0;
+let tickerAt = 0;
+
+function tickerItems() {
+  const dash = "–";
+  const word = (x) => (typeof x === "string" && x ? x.toUpperCase() : dash);
+  const items = [{ label: "MODE", value: word(state.mode) }];
+  for (const sym of (state.symbols || []).slice(0, TICKER_MAX_SYMBOLS)) {
+    const p = state.prices ? state.prices[sym] : null;
+    items.push({ label: String(sym), value: isNum(p) ? String(Number(p.toFixed(8))) : dash });
+  }
+  items.push({ label: "HEALTH", value: word(state.health && state.health.overall) });
+  items.push({ label: "ALERTS 24H", value: state.alertCountKnown && isNum(state.alertCount) ? String(state.alertCount) : dash });
+  return items;
+}
+
+function paintTicker() {
+  try {
+    const items = tickerItems();
+    const plain = $("tk-static");
+    if (plain) plain.textContent = items.map((i) => `${i.label} ${i.value}`).join(" · ");
+    fx("ticker", items);
+  } catch (e) {
+    /* decoration only */
+  }
+}
+
+// called from the existing state paths (bar, series, health, alerts); coalesced, so a bar a second costs one repaint per gap
+function tickerRefresh() {
+  if (tickerTimer) return;
+  const wait = Math.max(0, TICKER_GAP_MS - (Date.now() - tickerAt));
+  tickerTimer = setTimeout(() => {
+    tickerTimer = 0;
+    tickerAt = Date.now();
+    paintTicker();
+  }, wait);
+}
+
 // the "ลดเอฟเฟกต์" choice: the account's pref when auth is on and it has one, this browser's mirror otherwise
 function fxUserOff() {
   const pref = authOn() ? loadedPrefs().fx_off : undefined;
@@ -876,6 +918,7 @@ function renderHealth(h) {
   renderBudget();
   renderHero();
   tickInjections(); // the Red-Team card moves with the clock above it
+  tickerRefresh();
 }
 
 // "สุขภาพระบบ": the auditor's overall word, and its checks in Thai behind the card's summary
@@ -1387,6 +1430,8 @@ async function loadSeriesInner() {
   chart.fGlow.setData(f);
   chart.last.f = lastTime(f);
   chart.now = { price: lastValue(price), f: lastValue(f) };
+  if (isNum(chart.now.price)) state.prices[symbol] = chart.now.price;
+  tickerRefresh();
   for (const [key] of LANES) {
     if (!chart.lanes[key]) continue;
     const d = seriesData(times, s[key] || []);
@@ -1461,6 +1506,10 @@ function onBar(bar) {
   const closeUs = bar.t_us + S_US;
   if (!isNum(state.lastBarUs) || closeUs > state.lastBarUs) state.lastBarUs = closeUs;
   if (state.mode === "live") $("clock").textContent = fmtThaiTime(state.lastBarUs, true);
+  if (typeof bar.symbol === "string" && isNum(bar.close)) {
+    state.prices[bar.symbol] = bar.close;
+    tickerRefresh();
+  }
   if (bar.symbol !== state.symbol || !chart.api) return;
   const t = toSec(closeUs); // a bar closes at t_us + 1 s, where its score row ends
   if (plot("price", chart.price, t, bar.close)) {
@@ -1613,6 +1662,7 @@ function alertsChanged() {
   renderBudget();
   renderHero();
   checkInjections();
+  tickerRefresh();
 }
 
 function onAlert(data) {
@@ -3154,6 +3204,7 @@ function route() {
   state.route = r.name;
   document.body.classList.toggle("login-mode", r.name === "login");
   $("topbar").hidden = r.name === "login"; // the sign-in page carries its own logo
+  $("ticker").hidden = r.name === "login";
   const chip = $("user-chip");
   if (chip) chip.open = false;
   if (r.name !== "alert") destroyDetailChart();
@@ -3163,6 +3214,8 @@ function route() {
     if (a.dataset.route === tab) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  fx("navTo", document.querySelector('.nav a[aria-current="page"]')); // the underline slides to the current link
+  tickerRefresh();
   if (r.name === "home") {
     initChart();
   } else if (r.name === "alert") {
@@ -3832,6 +3885,8 @@ if (typeof document !== "undefined") {
     fxUserOff,
     setFxOff,
     heroMood,
+    tickerItems,
+    setTickerState: (o) => Object.assign(state, o),
     // every Thai UI string table: the copy guard in the tests reads these
     copyTables: () => ({
       SEVERITY_TH,

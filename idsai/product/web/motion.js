@@ -125,9 +125,11 @@
       stop();
       clearAll();
       dropTransient();
+      headerOff();
     } else {
       size();
       start();
+      navPlace();
     }
   }
 
@@ -168,6 +170,7 @@
     S.resizeTimer = G.setTimeout(function () {
       S.resizeTimer = 0;
       if (!S.off) size();
+      navPlace();
     }, 150);
   }
 
@@ -254,6 +257,157 @@
         ctx.fillStyle = rgba(0.3);
         ctx.fillRect(0, sy, w, 1);
       }
+    }
+  }
+
+  // ---------------------------------------------------------------- header: eye, typed name, ticker, nav underline
+
+  var H = { iris: null, lid: null, name: null, bar: null, text: "", typing: 0, timer: 0, x: 0, tx: 0, next: 900, blink: -999, nextBlink: 3200, ready: false };
+  var NAV = { a: null, placed: false };
+  var TK = { sig: "", vals: [] };
+  var TYPE_AT = 300; // ms before the first letter
+
+  function headerInit() {
+    if (H.ready) return;
+    H.ready = true;
+    H.iris = DOC.getElementById("logo-iris");
+    H.lid = DOC.getElementById("logo-lid");
+    H.name = DOC.getElementById("brand-name");
+    H.bar = DOC.getElementById("topbar");
+    H.text = H.name ? H.name.textContent : "";
+    if (H.iris) addLayer(eyeDraw);
+  }
+
+  // the name types itself out once, the first time the bar is on screen; the plain text stays in the markup
+  function typeStart() {
+    if (!H.name || H.typing || !H.text) return;
+    H.typing = 1;
+    H.name.textContent = "";
+    var n = 0;
+    var step = function () {
+      H.timer = 0;
+      n += 1;
+      H.name.textContent = H.text.slice(0, n);
+      if (n < H.text.length) H.timer = G.setTimeout(step, 65 + Math.random() * 70);
+      else H.typing = 2;
+    };
+    H.timer = G.setTimeout(step, TYPE_AT);
+  }
+
+  // the iris drifts left and right and blinks; in alert mood it centres and stares (the red and the size are CSS)
+  function eyeDraw(ctx, t, dt) {
+    if (!H.iris || (H.bar && H.bar.hidden)) return;
+    if (!H.typing) typeStart();
+    var alert = S.mood === "alert";
+    if (alert) H.tx = 0;
+    else if (t > H.next) {
+      var o = [-7, -4.5, 0, 3, 6.5];
+      H.tx = o[Math.floor(Math.random() * o.length)];
+      H.next = t + 900 + Math.random() * 1900;
+    }
+    H.x += (H.tx - H.x) * Math.min(1, dt * 7);
+    H.iris.setAttribute("transform", "translate(" + (22 + H.x).toFixed(2) + " 22)");
+    var sy = 1;
+    if (!alert) {
+      if (t > H.nextBlink) {
+        H.blink = t;
+        H.nextBlink = t + 3500 + Math.random() * 3500;
+      }
+      var b = t - H.blink;
+      if (b >= 0 && b < 190) sy = 1 - Math.sin((b / 190) * Math.PI) * 0.9;
+    }
+    if (H.lid) H.lid.setAttribute("transform", "translate(0 22) scale(1 " + sy.toFixed(3) + ") translate(0 -22)");
+  }
+
+  // effects off: the eye rests, the name is whole, the static nav underline takes over
+  function headerOff() {
+    if (H.timer) G.clearTimeout(H.timer);
+    H.timer = 0;
+    if (H.typing === 1) {
+      if (H.name) H.name.textContent = H.text;
+      H.typing = 2;
+    }
+    H.x = 0;
+    H.tx = 0;
+    if (H.iris) H.iris.setAttribute("transform", "translate(22 22)");
+    if (H.lid) H.lid.removeAttribute("transform");
+    NAV.placed = false;
+    navPlace();
+  }
+
+  // text nodes only: each item is "LABEL" + <b>value</b>; the list is repeated to fill the strip
+  function tickerGroup(items, reps) {
+    var g = DOC.createElement("div");
+    g.className = "tk-group";
+    for (var r = 0; r < reps; r += 1) {
+      for (var i = 0; i < items.length; i += 1) {
+        var sp = DOC.createElement("span");
+        var b = DOC.createElement("b");
+        b.textContent = items[i].value;
+        sp.appendChild(DOC.createTextNode(items[i].label));
+        sp.appendChild(b);
+        if (r) sp.className = "tk-rep";
+        g.appendChild(sp);
+        (TK.vals[i] = TK.vals[i] || []).push(b);
+      }
+    }
+    return g;
+  }
+
+  function ticker(items) {
+    var track = DOC.getElementById("tk-track");
+    if (!track || !Array.isArray(items) || !items.length) return;
+    var sig = items
+      .map(function (it) {
+        return it.label;
+      })
+      .join("|");
+    var i;
+    if (sig === TK.sig) {
+      // same shape: only the values change, in place, so the marquee does not jump
+      for (i = 0; i < items.length; i += 1) {
+        for (var k = 0; k < TK.vals[i].length; k += 1) {
+          if (TK.vals[i][k].textContent !== items[i].value) TK.vals[i][k].textContent = items[i].value;
+        }
+      }
+      return;
+    }
+    TK.sig = sig;
+    TK.vals = [];
+    while (track.firstChild) track.removeChild(track.firstChild);
+    track.hidden = false;
+    if (track.parentNode) track.parentNode.classList.add("is-live");
+    var probe = tickerGroup(items, 1);
+    track.appendChild(probe);
+    var one = probe.offsetWidth;
+    var view = track.parentNode ? track.parentNode.clientWidth : 0;
+    var reps = one > 0 && view > 0 ? Math.min(6, Math.max(1, Math.ceil(view / one))) : 3;
+    TK.vals = [];
+    track.removeChild(probe);
+    track.appendChild(tickerGroup(items, reps));
+    track.appendChild(tickerGroup(items, reps));
+    track.style.setProperty("--tk-dur", Math.max(20, Math.round(((one || 600) * reps) / 45)) + "s");
+  }
+
+  // the active nav link: the underline slides to it with a transform; off or hidden, the link's own underline shows
+  function navPlace() {
+    var ind = DOC.querySelector(".nav-ind");
+    var nav = ind && ind.parentNode;
+    if (!nav) return;
+    var a = NAV.a;
+    if (S.off || !a || !a.offsetWidth) {
+      nav.classList.remove("has-ind");
+      return;
+    }
+    var first = !NAV.placed;
+    if (first) ind.style.transition = "none";
+    ind.style.width = Math.max(0, a.offsetWidth - 16) + "px";
+    ind.style.transform = "translate3d(" + (a.offsetLeft + 8) + "px,0,0)";
+    nav.classList.add("has-ind");
+    if (first) {
+      void ind.offsetWidth;
+      ind.style.transition = "";
+      NAV.placed = true;
     }
   }
 
@@ -808,6 +962,7 @@
           S.canvas = DOC.getElementById("fx-bg");
           S.ctx = S.canvas && typeof S.canvas.getContext === "function" ? S.canvas.getContext("2d") : null;
           if (S.ctx) addLayer(drawBackground, { ctx: S.ctx });
+          headerInit();
           G.addEventListener("resize", onResize);
           DOC.addEventListener("visibilitychange", function () {
             if (DOC.hidden) stop();
@@ -899,6 +1054,25 @@
     pageEnter: function (node) {
       try {
         pageEnter(node);
+      } catch (e) {
+        /* decoration only */
+      }
+    },
+
+    // the data strip: items is [{label, value}]; text nodes only; the same labels update the values in place
+    ticker: function (items) {
+      try {
+        ticker(items);
+      } catch (e) {
+        /* decoration only */
+      }
+    },
+
+    // the nav link that is current now: the underline slides to it
+    navTo: function (a) {
+      try {
+        NAV.a = a || null;
+        navPlace();
       } catch (e) {
         /* decoration only */
       }

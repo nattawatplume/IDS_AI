@@ -196,10 +196,32 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 }
 .brand { display: flex; align-items: center; gap: 8px; color: var(--text); flex: none; }
 .brand:hover { text-decoration: none; }
-.brand-mark { width: 28px; height: 28px; flex: none; }
-.brand-name { font-weight: 600; font-size: 15px; white-space: nowrap; }
+.brand-mark { width: 36px; height: 36px; flex: none; color: var(--hud-line); filter: drop-shadow(0 0 3px currentColor); transition: color 0.3s; }
+.brand-name { font: 700 14px/1 var(--mono); letter-spacing: 0.18em; white-space: nowrap; }
+.brand-cur { display: none; width: 0.55em; height: 1em; margin-left: -5px; background: var(--hud-line); box-shadow: 0 0 6px var(--hud-line); }
+/* alert mood: the eye turns red and stares (the iris grows and centres); static, so it shows with effects off too */
+html[data-mood="alert"] .brand-mark { color: var(--hud-alert); }
+html[data-mood="alert"] .brand-cur { background: var(--hud-alert); box-shadow: 0 0 6px var(--hud-alert); }
+.iris-core { transform-box: fill-box; transform-origin: center; transition: transform 0.4s; }
+html[data-mood="alert"] .iris-core { transform: scale(1.32); }
 
-.nav { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; justify-content: center; min-width: 0; }
+/* the data strip above the header: the marquee is built by motion.js; the plain text is the fallback */
+.ticker { display: flex; align-items: stretch; height: 28px; overflow: hidden; background: rgba(5, 7, 13, 0.92); border-bottom: 1px solid rgba(0, 229, 255, 0.18); font: 400 11px/28px var(--mono); color: var(--hud-muted); white-space: nowrap; }
+.ticker[hidden] { display: none; }
+.tk-lbl { flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--hud-line); letter-spacing: 0.16em; border-right: 1px solid rgba(0, 229, 255, 0.35); }
+.tk-view { position: relative; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.tk-static { display: block; padding: 0 16px; overflow: hidden; text-overflow: ellipsis; }
+.tk-view.is-live .tk-static { display: none; }
+.tk-track { display: inline-flex; will-change: transform; }
+.tk-group { display: inline-flex; flex: none; }
+.tk-group > span { padding: 0 18px; border-right: 1px solid rgba(138, 160, 184, 0.14); }
+.tk-group b { color: var(--hud-text); font-weight: 400; margin-left: 6px; }
+
+.nav { position: relative; display: flex; align-items: center; gap: 4px; flex: 1 1 auto; justify-content: center; min-width: 0; }
+/* the sliding underline (motion.js moves it with a transform); without it the active link draws its own */
+.nav-ind { display: none; position: absolute; left: 0; bottom: 0; width: 0; height: 9px; border: solid var(--hud-line); border-width: 0 1px 2px; pointer-events: none; filter: drop-shadow(0 0 4px var(--hud-line)); transform: translate3d(0, 0, 0); transition: transform 0.42s cubic-bezier(0.65, 0, 0.2, 1), width 0.42s cubic-bezier(0.65, 0, 0.2, 1); }
+.nav.has-ind .nav-ind { display: block; }
+.nav.has-ind a[aria-current="page"]::after { display: none; }
 .nav a {
   position: relative;
   display: flex;
@@ -997,7 +1019,7 @@ td.when { white-space: nowrap; }
 /* ------------------------------------------------------------------ tablet: <= 1200 px, icon-only brand, dot-only status chips */
 @media (max-width: 1200px) {
   .topbar { gap: 8px 12px; }
-  .brand-name, #user-name { display: none; }
+  .brand-name, .brand-cur, #user-name { display: none; }
   .nav { gap: 0; }
   .nav a { padding: 8px 12px; }
 }
@@ -1012,7 +1034,7 @@ td.when { white-space: nowrap; }
 @media (max-width: 720px) {
   /* no backdrop-filter here: it would become the containing block of the fixed bottom nav */
   .topbar { width: auto; margin: 8px 8px 0; padding: 8px 8px 8px 12px; gap: 8px; justify-content: space-between; background: rgba(5, 7, 13, 0.92); }
-  .brand-name { display: none; }
+  .brand-name, .brand-cur { display: none; }
   .nav {
     position: fixed;
     left: 8px;

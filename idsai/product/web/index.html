@@ -17,16 +17,45 @@
     <span id="boot-text" class="small muted">กำลังตรวจสอบการเข้าสู่ระบบ</span>
   </div>
 
+  <div id="ticker" class="ticker" aria-hidden="true" hidden>
+    <div class="tk-lbl"><span class="hud-rec"></span>DATA FEED</div>
+    <div class="tk-view">
+      <span id="tk-static" class="tk-static">MODE – · HEALTH – · ALERTS 24H –</span>
+      <div id="tk-track" class="tk-track" hidden></div>
+    </div>
+  </div>
+
   <header id="topbar" class="topbar" hidden>
     <a class="brand" href="#/home" aria-label="Market IDS หน้าหลัก">
-      <svg class="brand-mark" viewBox="0 0 28 28" fill="none" aria-hidden="true" focusable="false">
-        <rect x="0.75" y="0.75" width="26.5" height="26.5" rx="0" fill="rgba(0, 229, 255, 0.1)" stroke="rgba(0, 229, 255, 0.5)" stroke-width="1.5"/>
-        <path d="M7 18.5l4.5-5.5 3.5 3.5 6-8" stroke="#00e5ff" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="21" cy="8.5" r="1.75" fill="#e6f1ff"/>
+      <svg id="logo-eye" class="brand-mark" viewBox="0 0 44 44" fill="none" aria-hidden="true" focusable="false">
+        <defs><clipPath id="logo-eye-clip"><path d="M5 22Q22 7.5 39 22Q22 36.5 5 22Z"/></clipPath></defs>
+        <g id="logo-ring" stroke="currentColor">
+          <circle cx="22" cy="22" r="20.5" stroke-opacity=".35" stroke-width="1" stroke-dasharray="1.5 3.5"/>
+          <circle cx="22" cy="22" r="20.5" stroke-width="1.6" stroke-dasharray="20 108.8"/>
+          <circle cx="22" cy="22" r="20.5" stroke-width="1.6" stroke-dasharray="6 58.4" stroke-dashoffset="-50" stroke-opacity=".7"/>
+        </g>
+        <g stroke="currentColor" stroke-width="1" stroke-opacity=".8">
+          <line x1="22" y1="0" x2="22" y2="3.5"/><line x1="22" y1="40.5" x2="22" y2="44"/>
+          <line x1="0" y1="22" x2="3.5" y2="22"/><line x1="40.5" y1="22" x2="44" y2="22"/>
+        </g>
+        <g id="logo-lid">
+          <path d="M5 22Q22 7.5 39 22Q22 36.5 5 22Z" stroke="currentColor" stroke-width="1.4"/>
+          <g clip-path="url(#logo-eye-clip)">
+            <g id="logo-iris" transform="translate(22 22)">
+              <g class="iris-core">
+                <circle r="6.6" stroke="currentColor" stroke-width="1.3"/>
+                <circle r="4.4" stroke="currentColor" stroke-width=".6" stroke-dasharray="1 1.3" stroke-opacity=".8"/>
+                <circle r="2.5" fill="currentColor"/>
+                <circle cx="-1.5" cy="-1.6" r=".85" fill="#05070d"/>
+              </g>
+            </g>
+          </g>
+        </g>
       </svg>
-      <span class="brand-name">Market IDS</span>
+      <span class="brand-name" id="brand-name">MARKET IDS</span><span class="brand-cur" aria-hidden="true"></span>
     </a>
     <nav class="nav" aria-label="หน้า">
+      <span class="nav-ind" aria-hidden="true"></span>
       <a href="#/home" data-route="home"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></svg><span>หน้าหลัก</span></a>
       <a href="#/alerts" data-route="alerts"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span>การแจ้งเตือน</span></a>
       <a href="#/simulate" data-route="simulate"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8.5"/><path d="M10.25 8.75 15.25 12l-5 3.25z"/></svg><span>ทดลองจำลอง</span></a>

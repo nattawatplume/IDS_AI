@@ -77,7 +77,7 @@ html::after {
 .user-menu #menu-fx[aria-pressed="true"]::before { background: var(--hud-bg); transform: translate(0, -50%); }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
 }
@@ -87,9 +87,12 @@ html::after {
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .fx-wipe, .fx-off .fx-rise, .fx-off .fx-sweep, .fx-off .fx-sweep::after,
 .fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
 .fx-off .login-card button.primary::after, .fx-off .login-line-trace,
-.fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led { animation: none !important; }
+.fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led,
+.fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind { animation: none !important; }
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
+.fx-off .nav-ind, .fx-off .brand-cur, .fx-off .tk-group + .tk-group, .fx-off .tk-rep { display: none; }
+.fx-off .tk-track { transform: none !important; }
 .fx-off #cctv-beam { opacity: .3; }
 
 /* ---- login: the CCTV camera over the sample chart ---- */
@@ -232,3 +235,12 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
 /* ---- main chart overlay: scan line, live-point ring, crossing shockwave (drawn on this canvas) ---- */
 #chart { position: relative; }
 #fx-chart { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+
+/* ---- header: the logo's cursor and scan ring, the data ticker, the sliding nav underline ---- */
+html:not(.fx-off) .brand-cur { display: inline-block; animation: fx-cur 1s steps(1) infinite; }
+@keyframes fx-cur { 50% { opacity: 0; } }
+#logo-ring { transform-box: fill-box; transform-origin: center; animation: fx-ring-spin 24s linear infinite; }
+html[data-mood="alert"] #logo-ring { animation-duration: 6s; }
+@keyframes fx-ring-spin { to { transform: rotate(360deg); } }
+.tk-track { animation: fx-tk var(--tk-dur, 60s) linear infinite; }
+@keyframes fx-tk { to { transform: translate3d(-50%, 0, 0); } }

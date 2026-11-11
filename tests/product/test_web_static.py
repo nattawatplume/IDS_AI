@@ -3214,6 +3214,8 @@ MOTION_API = (
     "chartAttach",
     "chartCross",
     "pageEnter",
+    "ticker",
+    "navTo",
 )
 
 
@@ -3269,7 +3271,7 @@ def test_motion_api_defined():
     for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert api not in js, api
     assert "://" not in js
-    assert len(js.encode("utf-8")) <= 32 * 1024
+    assert len(js.encode("utf-8")) <= 40 * 1024
 
 
 def test_motion_stubs_are_safe():
@@ -3640,3 +3642,90 @@ def test_login_beam_returns_after_a_failed_sign_in():
     js = text("motion.js")
     leave = _js_function(js, "function loginLeave(")
     assert "Lg.leaving = false" in leave and "addLayer(loginDraw)" in leave
+
+
+# ---- header: data ticker, CCTV-eye logo, sliding nav indicator ----
+
+TICKER_BODY = r"""
+const empty = m.tickerItems();
+assert.ok(Array.isArray(empty) && empty.length >= 3);
+for (const it of empty) {
+  assert.strictEqual(typeof it.label, "string");
+  assert.strictEqual(typeof it.value, "string");
+  assert.ok(!/NaN|undefined|null/.test(it.label + it.value), JSON.stringify(it));
+}
+const by = (items, l) => items.find((i) => i.label === l);
+assert.strictEqual(by(empty, "MODE").value, "–");
+assert.strictEqual(by(empty, "HEALTH").value, "–");
+assert.strictEqual(by(empty, "ALERTS 24H").value, "–");
+m.setTickerState({
+  mode: "replay",
+  symbols: ["BTCUSDT", "ETHUSDT"],
+  prices: { BTCUSDT: 100.5, ETHUSDT: NaN },
+  health: { overall: "ok" },
+  alertCountKnown: true,
+  alertCount: 3,
+});
+const it = m.tickerItems();
+assert.strictEqual(by(it, "BTCUSDT").value, "100.5");
+assert.strictEqual(by(it, "ETHUSDT").value, "–");
+assert.strictEqual(by(it, "MODE").value, "REPLAY");
+assert.strictEqual(by(it, "HEALTH").value, "OK");
+assert.strictEqual(by(it, "ALERTS 24H").value, "3");
+for (const i of it) assert.ok(!/NaN|undefined/.test(i.label + i.value));
+"""
+
+
+def test_ticker_items_use_state_only(tmp_path):
+    _run_motion(tmp_path, "false", TICKER_BODY)
+
+
+def test_logo_eye_svg():
+    html = text("index.html")
+    header = re.search(r'<header id="topbar".*?</header>', html, re.S).group(0)
+    svg = re.search(r'<svg[^>]*\sid="logo-eye"[^>]*>.*?</svg>', header, re.S)
+    assert svg, "no svg#logo-eye in the header"
+    assert 'aria-hidden="true"' in svg.group(0).split(">")[0]
+    assert 'id="logo-iris"' in svg.group(0) and 'id="logo-ring"' in svg.group(0)
+    assert "MARKET IDS" in header and 'class="brand-cur"' in header
+    css = text("motion.css")
+    assert "html[data-mood=\"alert\"]" in css and "logo-" in css
+
+
+def test_ticker_reads_state():
+    js = text("app.js")
+    assert "function tickerItems(" in js
+    body = _js_function(js, "function tickerItems(")
+    assert "state." in body and "isNum(" in body and '"–"' in body
+    assert 'fx("ticker"' in js
+    html = text("index.html")
+    strip = re.search(r'<div id="ticker"[^>]*>.*?</div>\s*</div>', html, re.S) or re.search(
+        r'<div id="ticker".*?<header id="topbar"', html, re.S
+    )
+    assert strip and 'aria-hidden="true"' in strip.group(0).split(">")[0]
+    assert not re.search(r"\d+\.\d|\d{3,}", strip.group(0)), "a number in the ticker markup"
+    for sel in (".tk-track", ".tk-group"):
+        assert sel in text("motion.css") or sel in text("styles.css"), sel
+
+
+def test_nav_slider():
+    html = text("index.html")
+    nav = re.search(r'<nav class="nav".*?</nav>', html, re.S).group(0)
+    ind_tag = nav.split('class="nav-ind"')[1].split(">")[0]
+    assert 'class="nav-ind"' in nav and "aria-hidden" in ind_tag
+    ind = re.search(r"(?m)^\.nav-ind\s*\{([^}]*)\}", text("styles.css")).group(1)
+    assert "transform" in ind and "gradient" not in ind
+    js = text("motion.js")
+    assert "translate3d" in js or "translateX" in js
+    assert 'fx("navTo"' in text("app.js")
+    assert ".has-ind" in text("styles.css")  # the static underline is the fallback
+
+
+def test_header_motion_off_paths():
+    css = text("motion.css")
+    off = css.split(".fx-off", 1)[1]
+    for sel in (".brand-cur", "#logo-ring", ".tk-track", ".nav-ind"):
+        assert sel in off, sel
+    reduced = css.split("prefers-reduced-motion: reduce", 1)[1].split("}", 1)[0]
+    for sel in (".nav-ind", ".brand-cur"):
+        assert sel in reduced, sel
