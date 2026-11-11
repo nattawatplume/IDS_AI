@@ -65,8 +65,88 @@ html::after {
 
 @media (prefers-reduced-motion: reduce) {
   #fx-bg, #fx-edge { display: none; }
+  #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
 }
 
 .fx-off *, .fx-off *::before, .fx-off *::after { animation: none !important; }
 .fx-off #fx-bg, .fx-off #fx-edge { display: none; }
+.fx-off #cctv-beam { opacity: .3; }
+
+/* ---- login: the CCTV camera over the sample chart ---- */
+.cctv-stage { position: relative; width: 100%; max-width: 520px; aspect-ratio: 520 / 260; margin-top: 20px; }
+.cctv-stage .login-line { position: absolute; left: 0; bottom: 0; width: 100%; max-width: none; margin: 0; }
+.cctv { position: absolute; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
+.cctv-pan { transform-box: view-box; transform-origin: 0 0; animation: cctv-pan 3.6s cubic-bezier(.37, 0, .63, 1) infinite alternate; }
+.cctv-beam-a { stop-color: var(--fx-alert); }
+.cctv-beam { animation: cctv-flicker 2.6s ease-in-out infinite alternate; }
+.cctv-lens-dot, .cctv-rec, .cctv-blink { fill: var(--fx-alert); }
+.cctv-lens-dot { filter: drop-shadow(0 0 3px var(--fx-alert)); }
+.cctv-rec { filter: drop-shadow(0 0 3px var(--fx-alert)); animation: cctv-blink 1s step-end infinite; }
+.cctv-blink { animation: cctv-blink 1s step-end infinite; }
+.cctv-hud { fill: none; stroke: rgba(34, 211, 238, .42); stroke-width: 1.5; stroke-linecap: round; }
+.cctv-hud-text text { font: 600 10px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .14em; fill: rgba(186, 230, 253, .78); }
+.cctv-ring { fill: none; stroke: var(--fx-alert); stroke-width: 2; opacity: 0; transform-box: fill-box; transform-origin: center; }
+.cctv-tag text { fill: #fff; font-size: 12px; font-weight: 600; }
+.login-line-spike { fill: none; stroke: transparent; stroke-width: 3; transition: stroke .25s, filter .35s; }
+.login-line-spike.is-hit { stroke: #fecaca; filter: drop-shadow(0 0 5px var(--fx-alert)) drop-shadow(0 0 14px var(--fx-alert)); transition-duration: .08s; }
+
+@keyframes cctv-pan { from { transform: rotate(-18deg); } to { transform: rotate(18deg); } }
+@keyframes cctv-flicker { from { opacity: .82; } to { opacity: 1; } }
+@keyframes cctv-blink { from, 50% { opacity: 1; } 50.01%, to { opacity: .12; } }
+@keyframes cctv-rise { from { opacity: 0; transform: translate3d(0, 14px, 0); } to { opacity: 1; transform: none; } }
+@keyframes cctv-card-in { from { opacity: 0; transform: translate3d(34px, 0, 0) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes cctv-sheen { 0% { transform: translateX(-140%) skewX(-18deg); } 36%, 100% { transform: translateX(340%) skewX(-18deg); } }
+
+/* the entrance: the hero lines rise one after another, the card slides in from the side */
+#page-login:not([hidden]) .login-brand { animation: cctv-rise .6s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .login-tagline { animation: cctv-rise .6s .12s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .cctv-stage { animation: cctv-rise .7s .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .login-card:not([hidden]) { animation: cctv-card-in .7s .1s cubic-bezier(.2, .8, .2, 1) backwards; }
+
+/* inputs glow on focus; the submit button has a light sheen passing over it every few seconds */
+.login-card .field > input { transition: border-color .18s, box-shadow .18s; }
+.login-card .field > input:focus { border-color: var(--fx-calm); box-shadow: 0 0 0 3px rgba(34, 211, 238, .14), 0 0 22px rgba(34, 211, 238, .26); }
+.login-card .field > input:focus-visible { outline: 1px solid rgba(34, 211, 238, .7); outline-offset: 1px; }
+.login-card button.primary { position: relative; overflow: hidden; }
+.login-card button.primary::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, .34), transparent);
+  transform: translateX(-140%) skewX(-18deg);
+  animation: cctv-sheen 4.4s ease-in-out 1.4s infinite;
+}
+
+/* "ยืนยันตัวตนแล้ว": the sign-in overlay (built by motion.js) */
+#fx-verify {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  background: radial-gradient(55% 45% at 50% 46%, rgba(34, 211, 238, .18), transparent 72%), rgba(7, 11, 26, .94);
+}
+.fx-verify-box { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.fx-verify-mark {
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  border: 2px solid var(--fx-calm);
+  color: var(--fx-calm);
+  font-size: 38px;
+  line-height: 1;
+  box-shadow: 0 0 34px rgba(34, 211, 238, .45), inset 0 0 18px rgba(34, 211, 238, .2);
+}
+.fx-verify-text { font-size: 22px; font-weight: 600; letter-spacing: .02em; color: #e6fbff; }
+
+@media (max-width: 720px) {
+  .cctv-stage { display: none; }
+}

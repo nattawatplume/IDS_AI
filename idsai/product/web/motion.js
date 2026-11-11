@@ -20,6 +20,7 @@
     mood: "calm",
     rgb: MOODS.calm.slice(),
     layers: [],
+    login: null,
     raf: 0,
     last: 0,
     canvas: null,
@@ -239,6 +240,185 @@
     }
   }
 
+  // ---------------------------------------------------------------- login: the CCTV scene
+
+  var PAN_MS = 3600; // one sweep; there and back is two (the CSS animation cctv-pan, +-18 degrees, alternate)
+  var PAN_DEG = 18;
+  var HIT_DEG = 2; // the beam is on the spike when it is this close, in degrees
+  var LEAVE_MS = 620; // the dashboard starts loading here; the fallback below never lets it wait longer
+
+  function num(el, name) {
+    return Number(el.getAttribute(name)) || 0;
+  }
+
+  // the angles are fixed by the artwork, so they are read once on enter and again on resize, never per frame
+  function aim(L) {
+    var wrap = L.root.querySelector("#cctv-beam-wrap");
+    var target = L.root.querySelector("#cctv-target");
+    if (!wrap || !target) return;
+    var x = num(wrap, "data-x");
+    var y = num(wrap, "data-y");
+    L.base = num(wrap, "data-a");
+    L.goal = (Math.atan2(num(target, "cy") - y, num(target, "cx") - x) * 180) / Math.PI;
+  }
+
+  function onLoginResize() {
+    if (S.login) aim(S.login);
+  }
+
+  // the pan angle in degrees, from the CSS animation's own clock (no layout read); null before it runs
+  function panAngle(L, t) {
+    var a = L.anim;
+    if (!a && t >= L.retry) {
+      L.retry = t + 600;
+      try {
+        var list = typeof L.pan.getAnimations === "function" ? L.pan.getAnimations() : [];
+        a = L.anim = list.length ? list[0] : null;
+      } catch (e) {
+        a = L.anim = null;
+      }
+    }
+    var ms = a && a.currentTime != null ? Number(a.currentTime) : NaN;
+    if (!(ms >= 0)) {
+      L.anim = null; // cancelled (effects went off and back on): look it up again
+      return null;
+    }
+    var n = Math.floor(ms / PAN_MS);
+    var p = (ms - n * PAN_MS) / PAN_MS;
+    if (n % 2 === 1) p = 1 - p;
+    L.cycle = Math.floor(n / 2);
+    return -PAN_DEG + 2 * PAN_DEG * ((1 - Math.cos(Math.PI * p)) / 2);
+  }
+
+  function pulse(el, frames, opts) {
+    if (el && typeof el.animate === "function") el.animate(frames, opts);
+  }
+
+  // the beam crosses the spike: it glows, a ring spreads from it and the tag shows for 1.5 s
+  function beamHit(L) {
+    if (L.spike) L.spike.classList.add("is-hit");
+    if (L.hitTimer) G.clearTimeout(L.hitTimer);
+    L.hitTimer = G.setTimeout(function () {
+      L.hitTimer = 0;
+      if (L.spike) L.spike.classList.remove("is-hit");
+    }, 1500);
+    for (var i = 0; i < L.rings.length; i += 1) {
+      pulse(L.rings[i], [{ transform: "scale(.35)", opacity: 0.95 }, { transform: "scale(3.4)", opacity: 0 }], { duration: 950, delay: i * 200, easing: "ease-out" });
+    }
+    pulse(L.tag, [{ opacity: 0 }, { opacity: 1, offset: 0.14 }, { opacity: 1, offset: 0.86 }, { opacity: 0 }], { duration: 1500 });
+  }
+
+  function loginDraw(ctx, t) {
+    var L = S.login;
+    if (!L || L.leaving || !L.pan || L.page.hidden) return;
+    var deg = panAngle(L, t);
+    if (deg === null) return;
+    if (Math.abs(L.base + deg - L.goal) < HIT_DEG && L.cycle !== L.hitCycle) {
+      L.hitCycle = L.cycle; // at most one hit per pan cycle
+      beamHit(L);
+    }
+  }
+
+  function loginEnter() {
+    var root = DOC.getElementById("cctv");
+    if (!root) return;
+    var L = S.login;
+    if (!L || L.root !== root) {
+      L = S.login = {
+        root: root,
+        page: DOC.getElementById("page-login") || root,
+        pan: root.querySelector(".cctv-pan"),
+        spike: DOC.getElementById("cctv-spike"),
+        tag: root.querySelector("#cctv-tag"),
+        rings: root.querySelectorAll(".cctv-ring"),
+        base: 0,
+        goal: 0,
+        anim: undefined,
+        retry: 0,
+        cycle: 0,
+        hitCycle: -1,
+        hitTimer: 0,
+        leaving: false,
+        on: false,
+      };
+      G.addEventListener("resize", onLoginResize);
+    }
+    L.leaving = false;
+    L.hitCycle = -1;
+    L.anim = undefined;
+    aim(L);
+    if (!L.on) {
+      L.on = true;
+      addLayer(loginDraw); // it runs once the loop does (after init, and not while effects are off)
+    }
+  }
+
+  // the "ยืนยันตัวตนแล้ว" overlay, built from nodes (never from markup strings)
+  function verifyOverlay() {
+    var ov = DOC.createElement("div");
+    ov.id = "fx-verify";
+    ov.setAttribute("aria-hidden", "true");
+    var box = DOC.createElement("div");
+    box.className = "fx-verify-box";
+    var mark = DOC.createElement("span");
+    mark.className = "fx-verify-mark";
+    mark.textContent = "✓";
+    var label = DOC.createElement("span");
+    label.className = "fx-verify-text";
+    label.textContent = "ยืนยันตัวตนแล้ว";
+    box.appendChild(mark);
+    box.appendChild(label);
+    ov.appendChild(box);
+    DOC.body.appendChild(ov);
+    return { ov: ov, mark: mark, label: label };
+  }
+
+  // 600 ms of "ยืนยันตัวตนแล้ว ✓", then a zoom and fade into the dashboard. done() always runs: at once when
+  // effects are off, and from a timer even if something below throws.
+  function loginLeave(done) {
+    var called = false;
+    function fin() {
+      if (called) return;
+      called = true;
+      try {
+        if (typeof done === "function") done();
+      } catch (e) {
+        /* the caller's problem, never ours */
+      }
+    }
+    try {
+      var L = S.login;
+      if (S.off || (L && L.leaving) || !DOC.body || typeof DOC.createElement !== "function") {
+        fin();
+        return;
+      }
+      G.setTimeout(fin, LEAVE_MS + 80); // the guarantee: well inside 900 ms whatever happens next
+      if (L) {
+        L.leaving = true;
+        if (L.on) removeLayer(loginDraw);
+        L.on = false;
+      }
+      var v = verifyOverlay();
+      if (typeof v.ov.animate !== "function") {
+        v.ov.remove();
+        fin();
+        return;
+      }
+      pulse(v.ov, [{ opacity: 0 }, { opacity: 1 }], { duration: 200, fill: "forwards", easing: "ease-out" });
+      pulse(v.mark, [{ transform: "scale(.5)", opacity: 0 }, { transform: "scale(1.12)", opacity: 1, offset: 0.6 }, { transform: "scale(1)", opacity: 1 }], { duration: 420, delay: 80, easing: "cubic-bezier(.2,.8,.2,1)", fill: "backwards" });
+      pulse(v.label, [{ transform: "translateY(8px)", opacity: 0 }, { transform: "none", opacity: 1 }], { duration: 320, delay: 180, easing: "ease-out", fill: "backwards" });
+      G.setTimeout(function () {
+        fin(); // the dashboard builds underneath while the overlay zooms away
+        pulse(v.ov, [{ opacity: 1, transform: "scale(1)" }, { opacity: 0, transform: "scale(1.2)" }], { duration: 420, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" });
+        G.setTimeout(function () {
+          if (v.ov.parentNode) v.ov.parentNode.removeChild(v.ov);
+        }, 480);
+      }, LEAVE_MS);
+    } catch (e) {
+      fin();
+    }
+  }
+
   // ---------------------------------------------------------------- public API
 
   var Motion = {
@@ -288,23 +468,29 @@
       }
     },
 
-    // later tasks fill these in; until then they do nothing
+    // the login page's camera and beam; safe before init (the layer waits for the loop) and safe to repeat
     loginEnter: function () {
       try {
-        /* the CCTV scene */
+        loginEnter();
       } catch (e) {
         /* decoration only */
       }
     },
 
+    // done() runs within 900 ms, and at once when effects are off
     loginLeave: function (done) {
       try {
-        if (typeof done === "function") done();
+        loginLeave(done);
       } catch (e) {
-        /* decoration only */
+        try {
+          if (typeof done === "function") done();
+        } catch (e2) {
+          /* decoration only */
+        }
       }
     },
 
+    // later tasks fill these in; until then they do nothing
     alertBurst: function (info) {
       try {
         void info;

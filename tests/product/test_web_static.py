@@ -3096,10 +3096,10 @@ def test_motion_api_defined():
     assert len(js.encode("utf-8")) <= 25_000
 
 
-def test_motion_stubs_are_safe_and_login_leave_calls_done():
+def test_motion_stubs_are_safe():
     js = text("motion.js")
-    leave = js[js.index("loginLeave") :]
-    assert "done()" in leave[: leave.index("}")], "the loginLeave stub must call done() at once"
+    for name in ("alertBurst", "chartAttach", "chartCross", "pageEnter"):
+        assert re.search(rf"{name}: function[^{{]*\{{\s*try", js), name  # every method has its try
 
 
 def test_app_calls_motion_only_through_guard():
@@ -3163,4 +3163,101 @@ def test_motion_js_is_valid_javascript():
         pytest.skip("node is not installed")
     path = str(WEB_DIR / "motion.js")
     r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+# ---- command-center motion: login CCTV scene ----
+
+
+def _login_hero() -> str:
+    html = text("index.html")
+    page = re.search(r'<section id="page-login"[^>]*>(.*?)</section>', html, re.S).group(1)
+    return page[page.index('class="login-hero"') : page.index('id="login-form"')]
+
+
+def test_login_cctv_markup():
+    hero = _login_hero()
+    cctv = re.search(r'<svg\b[^>]*\bid="cctv"[^>]*>', hero)
+    assert cctv and 'aria-hidden="true"' in cctv.group(0)
+    body = hero[hero.index('id="cctv"') :]
+    body = body[: body.index("</svg>")]
+    for ident in ("cctv-beam", "cctv-rec", "cctv-target", "cctv-tag", "cctv-spike"):
+        assert f'id="{ident}"' in hero, ident
+    tag = re.search(r'<g\b[^>]*\bid="cctv-tag"[^>]*>(.*?)</g>', body, re.S)
+    assert tag and "ตรวจพบ" in re.sub(r"<[^>]+>", "", tag.group(1))
+    assert re.search(r'id="cctv-tag"[^>]*\bopacity="0"', body)  # hidden until the beam hits
+    assert "<img" not in hero and "<ul" not in hero
+    # the camera sits over the sample chart: the existing chart svg is still there
+    assert re.search(r'<svg class="login-line"[^>]*aria-hidden="true"', hero)
+
+
+def test_login_leave_always_continues():
+    js = text("motion.js")
+    start = js.index("function loginLeave(")
+    leave = js[start : js.index("public API")]
+    assert "setTimeout" in leave and "done" in leave
+    assert re.search(r"setTimeout\([^;]*\b(fin|finish|cont)\b", leave), "a timer must call done"
+    assert "catch" in leave
+    app = text("app.js")
+    sign_in = app[app.index("async function completeSignIn(") :]
+    sign_in = sign_in[: sign_in.index("\n}\n")]
+    assert 'fx("loginLeave"' in sign_in and "enterApp()" in sign_in
+    assert "setTimeout" in sign_in  # app.js carries its own fallback if Motion never answers
+
+
+def test_login_enter_called_when_login_shows():
+    app = text("app.js")
+    route = app[app.index("function route()") :]
+    route = route[: route.index("\n}\n")]
+    assert 'fx("loginEnter")' in route
+
+
+def test_verified_copy():
+    assert "ยืนยันตัวตนแล้ว" in text("index.html") + text("motion.js")
+    assert "ตรวจพบ" in text("index.html")
+
+
+def test_login_scene_css():
+    css = text("motion.css")
+    for needle in ("#cctv-beam", ".cctv-rec", ".cctv-pan", "@keyframes cctv-pan", ".login-card"):
+        assert needle in css, needle
+    assert "18deg" in css  # pans +-18 degrees
+    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and "#cctv-beam" in b[0]]
+    assert off, "the beam is dim and still when effects are off"
+    reduced = [b for b in _css_blocks(css) if "prefers-reduced-motion: reduce" in b[0]]
+    assert "#cctv-beam" in reduced[0][2] or any("#cctv-beam" in b[0] for b in _css_blocks(css))
+
+
+def test_login_leave_calls_done_at_once_when_off(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "leave.js"
+    script.write_text(
+        """
+const assert = require("assert");
+const classes = new Set();
+globalThis.document = {
+  hidden: false,
+  documentElement: {
+    classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
+    setAttribute() {},
+  },
+  getElementById: () => null,
+  addEventListener() {},
+};
+globalThis.addEventListener = () => {};
+require(process.argv[2]);
+let n = 0;
+globalThis.Motion.loginLeave(() => { n += 1; });
+assert.strictEqual(n, 1, "done must run at once before init / when off");
+globalThis.Motion.loginLeave(() => { n += 1; throw new Error("done may throw"); });
+assert.strictEqual(n, 2);
+globalThis.Motion.loginEnter();
+globalThis.Motion.loginEnter();
+""",
+        encoding="utf-8",
+    )
+    cmd = [node, str(script), str(WEB_DIR / "motion.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

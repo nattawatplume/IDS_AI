@@ -3115,6 +3115,7 @@ function route() {
     applyFramedHint(window, $("login-framed"), $("login-framed-link"));
     if (cameFrom !== "login") showAuthForm("login"); // a lost session lands on sign-in, not on a half-filled sign-up
     else if (!$("login-form").hidden) $("login-user").focus();
+    fx("loginEnter"); // the camera and its beam start moving
   }
 }
 
@@ -3201,8 +3202,20 @@ function showView(view) {
 async function completeSignIn(me) {
   const next = parseRoute().next || DEFAULT_ROUTE;
   adoptMe({ ...me, auth_enabled: true });
-  location.hash = next;
-  await enterApp();
+  // the "ยืนยันตัวตนแล้ว" moment (motion.js) comes first; the boot continues from it, and from this
+  // timer when motion.js is missing or never answers
+  await new Promise((resolve, reject) => {
+    let ran = false;
+    const cont = () => {
+      if (ran) return;
+      ran = true;
+      location.hash = next;
+      enterApp().then(resolve, reject);
+    };
+    fx("loginLeave", cont);
+    if (globalThis.Motion) setTimeout(cont, 900);
+    else cont();
+  });
 }
 
 // ------------------------------------------------------------------ sign-up
