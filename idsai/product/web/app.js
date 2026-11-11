@@ -1059,11 +1059,11 @@ function renderHero() {
     symbol: state.symbol,
   });
   const prev = state.hero;
+  fx("mood", heroMood(next.level)); // every pass decides the mood, which also ends an alert burst's
   if (prev && prev.level === next.level && prev.title === next.title && prev.line === next.line && prev.alertId === next.alertId) {
     return;
   }
   state.hero = next;
-  fx("mood", heroMood(next.level));
   $("hero").dataset.level = next.level;
   $("hero-title").textContent = next.title;
   const line = clear($("hero-line"));
@@ -1588,7 +1588,10 @@ function onAlert(data) {
   const fresh = !state.alerts.has(data.alert_id); // an update of a known alert is not a new one
   state.alerts.set(data.alert_id, data);
   alertsChanged();
-  if (fresh) showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
+  if (fresh) {
+    showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
+    fx("alertBurst", { severity: data.severity }); // after the render, so the newest card is in place
+  }
 }
 
 // a toast in the top right for TOAST_MS; at most TOAST_MAX at once, the oldest makes room

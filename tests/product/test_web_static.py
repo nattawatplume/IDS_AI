@@ -3261,3 +3261,53 @@ globalThis.Motion.loginEnter();
     cmd = [node, str(script), str(WEB_DIR / "motion.js")]
     r = subprocess.run(cmd, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ---- command-center motion: hero radar, alert burst, card glow ----
+
+
+def test_alert_burst_rate_limited():
+    js = text("motion.js")
+    assert "BURST_GAP_MS = 2000" in js
+    start = js.index("function alertBurst(")
+    assert "BURST_GAP_MS" in js[start : start + 600]
+    app = text("app.js")
+    fn = app[app.index("function onAlert(") :]
+    fn = fn[: fn.index("\n}\n")]
+    assert 'fx("alertBurst"' in fn and "severity" in fn[fn.index('fx("alertBurst"') :][:80]
+
+
+def test_hero_radar_markup():
+    html = text("index.html")
+    hero = html[html.index('id="hero"') : html.index('class="home-cards"')]
+    orb = re.search(r'<span id="hero-orb"[^>]*>(.*?)</span>\s*(?=<)', hero, re.S)
+    assert orb is not None
+    assert re.search(r'class="orb-radar"[^>]*aria-hidden="true"', hero)
+    assert hero.index("orb-radar") > hero.index('id="hero-orb"')
+    assert len(re.findall(r'class="orb-ring"[^>]*aria-hidden="true"', hero)) >= 2
+    assert re.search(r'<svg\b[^>]*\bid="hero-cam"[^>]*aria-hidden="true"', hero)
+    assert "<img" not in hero
+
+
+def test_edge_flash_once():
+    css = text("motion.css")
+    blocks = _css_blocks(css)
+    rules = [b for b in blocks if "fx-edge" in b[0] and "animation" in b[2] and b[0][0] != "@"]
+    assert rules, "#fx-edge needs an animation rule"
+    for _, _, body, _ in rules:
+        assert "infinite" not in body
+        assert re.search(r"animation-iteration-count:\s*1\b", body) or re.search(
+            r"animation:[^;]*\s1\s*(;|$)", body
+        )
+    assert "@keyframes fx-edge-flash" in css
+
+
+def test_radar_rings_camera_and_card_glow_css():
+    css = text("motion.css")
+    needles = (".orb-radar", ".orb-ring", "#hero-cam", ".fx-sweep", ".stat-card")
+    for needle in (*needles, "@keyframes fx-radar", "@keyframes fx-orbit"):
+        assert needle in css, needle
+    assert re.search(r"\.stat-card:hover[^{]*\{[^}]*translateY\(-2px\)", css)
+    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and ".orb-radar" in b[0]]
+    assert off, "the radar is hidden when effects are off"
+    assert len(css.encode("utf-8")) <= 12_000

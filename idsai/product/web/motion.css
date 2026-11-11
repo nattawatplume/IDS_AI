@@ -43,6 +43,8 @@ html::after {
   opacity: 0;
   box-shadow: inset 0 0 90px 10px rgba(239, 68, 68, .5);
 }
+#fx-edge.is-flash { animation: fx-edge-flash .9s ease-out 1; animation-iteration-count: 1; }
+@keyframes fx-edge-flash { 0% { opacity: 0; } 14% { opacity: 1; } 100% { opacity: 0; } }
 
 /* the "ลดเอฟเฟกต์" switch in the account menu: a label and a small track */
 .user-menu #menu-fx {
@@ -64,13 +66,15 @@ html::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge { display: none; }
+  #fx-bg, #fx-edge, .orb-radar, .orb-ring, .stat-card::before { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
 }
 
 .fx-off *, .fx-off *::before, .fx-off *::after { animation: none !important; }
-.fx-off #fx-bg, .fx-off #fx-edge { display: none; }
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off .orb-radar, .fx-off .orb-ring { display: none; }
+.fx-off .stat-card::before { display: none; }
+.fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off #cctv-beam { opacity: .3; }
 
 /* ---- login: the CCTV camera over the sample chart ---- */
@@ -147,6 +151,72 @@ html::after {
 }
 .fx-verify-text { font-size: 22px; font-weight: 600; letter-spacing: .02em; color: #e6fbff; }
 
+/* ---- hero: the radar sweep (calm) and the red pulse rings (alert) live inside the orb ---- */
+.orb-radar, .orb-ring { position: absolute; inset: 0; border-radius: 50%; pointer-events: none; }
+.orb-radar {
+  background: conic-gradient(from 0deg, transparent 0 66%, rgba(255, 255, 255, .5) 99%, rgba(255, 255, 255, .85) 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .28), inset 0 0 0 9px transparent, inset 0 0 0 10px rgba(255, 255, 255, .14);
+  animation: fx-radar 4s linear infinite;
+  will-change: transform;
+}
+.orb-ring { display: none; border: 2px solid var(--fx-alert); opacity: 0; }
+html[data-mood="alert"] .orb-radar { display: none; }
+html[data-mood="alert"] .orb-ring { display: block; animation: fx-ring 3.6s ease-out infinite; }
+html[data-mood="alert"] .orb-ring:nth-of-type(3) { animation-delay: 1.2s; }
+html[data-mood="alert"] .orb-ring:nth-of-type(4) { animation-delay: 2.4s; }
+html[data-mood="alert"] .orb::after { animation: none; }
+@keyframes fx-radar { to { transform: rotate(360deg); } }
+@keyframes fx-ring { 0% { transform: scale(1); opacity: .85; } 70%, 100% { transform: scale(3); opacity: 0; } }
+
+/* the small camera: it idles, and turns toward the chart (below) when the mood is alert */
+#hero-cam { flex: none; margin-left: auto; overflow: visible; }
+#hero-cam .cam-mount { fill: none; stroke: rgba(186, 230, 253, .5); stroke-width: 3; stroke-linecap: round; }
+#hero-cam .cam-body { fill: rgba(15, 23, 42, .85); stroke: rgba(186, 230, 253, .55); stroke-width: 1.5; }
+#hero-cam .cam-lens { fill: #0b1230; stroke: var(--fx-now); stroke-width: 1.5; }
+#hero-cam .cam-led { fill: var(--fx-now); }
+#hero-cam .cam-beam { fill: var(--fx-alert); opacity: 0; transition: opacity .6s; }
+#hero-cam .cam-head { transform-box: view-box; transform-origin: 52px 20px; transform: rotate(6deg); transition: transform .9s cubic-bezier(.4, 0, .2, 1); }
+html[data-mood="alert"] #hero-cam .cam-head { transform: rotate(-34deg); }
+html[data-mood="alert"] #hero-cam .cam-beam { opacity: .22; }
+html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end infinite; }
+
+/* the newest alert card: one red light sweep, 1.2 s */
+.fx-sweep { position: relative; overflow: hidden; }
+.fx-sweep::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 45%;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent, rgba(239, 68, 68, .38), transparent);
+  animation: fx-sweep 1.2s ease-in-out 1 both;
+}
+@keyframes fx-sweep { from { transform: translateX(-110%) skewX(-18deg); } to { transform: translateX(260%) skewX(-18deg); } }
+
+/* the KPI cards: a thin light travels the border about every 6 s, each card out of phase; hover lifts 2 px */
+@property --fx-a { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+.stat-card { position: relative; }
+.stat-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(from var(--fx-a), transparent 0 84%, color-mix(in srgb, var(--fx-now) 85%, transparent) 97%, transparent);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  animation: fx-orbit 6s linear infinite;
+}
+#card-symbol::before { animation-delay: -2s; }
+#card-health::before { animation-delay: -4s; }
+@keyframes fx-orbit { to { --fx-a: 360deg; } }
+.stat-card:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--fx-now) 60%, white 10%); }
+
 @media (max-width: 720px) {
   .cctv-stage { display: none; }
+  #hero-cam { display: none; }
 }

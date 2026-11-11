@@ -419,6 +419,46 @@
     }
   }
 
+  // ---------------------------------------------------------------- alert burst
+
+  var BURST_GAP_MS = 2000; // bursts are rate-limited; with the one-shot flash this keeps well under 3 flashes a second
+  var SWEEP_MS = 1200;
+
+  // restart a one-shot CSS animation class (a single layout read per burst, never in the loop)
+  function replay(node, cls) {
+    node.classList.remove(cls);
+    void node.offsetWidth;
+    node.classList.add(cls);
+  }
+
+  function alertBurst(info) {
+    void info;
+    var now = G.performance && typeof G.performance.now === "function" ? G.performance.now() : Date.now();
+    if (S.burstAt !== undefined && now - S.burstAt < BURST_GAP_MS) return;
+    S.burstAt = now;
+    Motion.mood("alert"); // the next hero pass decides again
+    if (S.off) return; // the colour shows, nothing moves
+    var edge = DOC.getElementById("fx-edge");
+    if (edge) {
+      replay(edge, "is-flash"); // one iteration; it clears itself
+      if (!edge.fxBound) {
+        edge.fxBound = true;
+        edge.addEventListener("animationend", function () {
+          edge.classList.remove("is-flash");
+        });
+      }
+    }
+    // the newest card: the first of the alerts page and the first row of the home rail
+    var cards = DOC.querySelectorAll("#alerts-list > .alert-card:first-child, #alert-rail > .rail-row:first-child");
+    for (var i = 0; i < cards.length; i += 1) replay(cards[i], "fx-sweep");
+    if (S.sweepTimer) G.clearTimeout(S.sweepTimer);
+    S.sweepTimer = G.setTimeout(function () {
+      S.sweepTimer = 0;
+      var on = DOC.querySelectorAll(".fx-sweep");
+      for (var j = 0; j < on.length; j += 1) on[j].classList.remove("fx-sweep");
+    }, SWEEP_MS);
+  }
+
   // ---------------------------------------------------------------- public API
 
   var Motion = {
@@ -490,15 +530,17 @@
       }
     },
 
-    // later tasks fill these in; until then they do nothing
+    // a live alert: the screen edge flashes once, the newest card gets a red sweep, the mood goes red until
+    // the next hero pass decides. At most one burst per BURST_GAP_MS; info.severity is not needed to draw it.
     alertBurst: function (info) {
       try {
-        void info;
+        alertBurst(info);
       } catch (e) {
         /* decoration only */
       }
     },
 
+    // later tasks fill these in; until then they do nothing
     chartAttach: function (api, series, opts) {
       try {
         void api;
