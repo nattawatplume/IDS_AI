@@ -66,13 +66,13 @@ html::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, .orb-radar, .orb-ring, .stat-card::before { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .stat-card::before { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
 }
 
 .fx-off *, .fx-off *::before, .fx-off *::after { animation: none !important; }
-.fx-off #fx-bg, .fx-off #fx-edge, .fx-off .orb-radar, .fx-off .orb-ring { display: none; }
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring { display: none; }
 .fx-off .stat-card::before { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off #cctv-beam { opacity: .3; }
@@ -220,3 +220,7 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
   .cctv-stage { display: none; }
   #hero-cam { display: none; }
 }
+
+/* ---- main chart overlay: scan line, live-point ring, crossing shockwave (drawn on this canvas) ---- */
+#chart { position: relative; }
+#fx-chart { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }

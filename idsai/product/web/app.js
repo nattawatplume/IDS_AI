@@ -1207,6 +1207,19 @@ function initChart() {
   // one chart, one crosshair: it already spans the price, F and layer panes; the readout follows it
   chart.api.subscribeCrosshairMove(onCrosshair);
   renderReadout(null, chart.now.price, chart.now.f);
+  // the overlay (scan line, live-point ring, crossing shockwave); the limit line is looked up when it is
+  // drawn, because setTau() creates it again whenever the limit changes
+  fx("chartAttach", chart.api, chart.f, {
+    limitLine: chart.tauLine,
+    getLimit: () => chart.tauLine,
+    priceSeries: chart.price,
+    latest: () => ({ time: chart.last.f, value: chart.now.f }),
+  });
+}
+
+// the score went from at or below the limit to above it: true only when all three are real numbers
+function crossedUp(prev, cur, limit) {
+  return Number.isFinite(prev) && Number.isFinite(cur) && Number.isFinite(limit) && prev <= limit && limit < cur;
 }
 
 function addLanes() {
@@ -1423,8 +1436,10 @@ function onBar(bar) {
 function onScore(p) {
   if (!p || p.symbol !== state.symbol || !chart.api || !isNum(p.t_end_us)) return;
   const t = toSec(p.t_end_us);
+  const prevF = chart.now.f;
   if (plot("f", chart.f, t, p.F)) {
     chart.fGlow.update({ time: t, value: p.F });
+    if (crossedUp(prevF, p.F, chart.tau)) fx("chartCross", { time: t, value: p.F });
     if (!chart.hover) renderReadout(null, chart.now.price, chart.now.f);
   }
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);

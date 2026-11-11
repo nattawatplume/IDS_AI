@@ -3093,7 +3093,7 @@ def test_motion_api_defined():
     for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert api not in js, api
     assert "://" not in js
-    assert len(js.encode("utf-8")) <= 25_000
+    assert len(js.encode("utf-8")) <= 28_000
 
 
 def test_motion_stubs_are_safe():
@@ -3130,7 +3130,7 @@ def test_motion_css_tokens_and_off_paths():
     for prelude, depth, _, parents in blocks:
         if prelude.startswith("@keyframes"):
             assert depth == 0 and not parents, prelude
-    assert len(css.encode("utf-8")) <= 12_000
+    assert len(css.encode("utf-8")) <= 14_000
 
 
 def test_fx_switch_copy():
@@ -3310,4 +3310,66 @@ def test_radar_rings_camera_and_card_glow_css():
     assert re.search(r"\.stat-card:hover[^{]*\{[^}]*translateY\(-2px\)", css)
     off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and ".orb-radar" in b[0]]
     assert off, "the radar is hidden when effects are off"
-    assert len(css.encode("utf-8")) <= 12_000
+    assert len(css.encode("utf-8")) <= 14_000
+
+
+# ---- command-center motion: chart overlay and crossing shockwave ----
+
+
+def _js_function(src: str, header: str) -> str:
+    start = src.index(header)
+    depth, i = 0, src.index("{", start)
+    for j in range(i, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[j], 0)
+        if depth == 0:
+            return src[start : j + 1]
+    raise AssertionError(f"{header} is not closed")
+
+
+def test_crossed_up_contract():
+    js = text("app.js")
+    body = _js_function(js, "function crossedUp(prev, cur, limit)")
+    assert "Number.isFinite" in body and "<= limit" in body
+    assert "< cur" in body or "limit < cur" in body
+    calls = [m.start() for m in re.finditer(r'fx\("chartCross"', js)]
+    assert len(calls) == 1
+    guard = js[: calls[0]].rstrip().splitlines()[-1]
+    assert guard.lstrip().startswith("if (crossedUp(")  # the only guard before the call
+    assert (
+        "chartCross" not in js[js.index("async function loadSeries") : js.index("function plot(")]
+    )
+    attach = js[js.index('fx("chartAttach"') :][:400]
+    assert "chart.api" in attach and "chart.f" in attach and "limitLine" in attach
+
+
+def test_chart_attach_replaces_previous():
+    js = text("motion.js")
+    body = _js_function(js, "function chartAttach(")
+    assert "chartDetach()" in body and body.index("chartDetach()") < body.index("addLayer(")
+    detach = _js_function(js, "function chartDetach(")
+    assert (
+        "removeLayer(" in detach
+        and "disconnect()" in detach
+        and "unsubscribeVisibleTimeRangeChange" in detach
+    )
+    assert "ResizeObserver" in body and "subscribeVisibleTimeRangeChange" in body
+    cross = _js_function(js, "function chartCross(")
+    assert "alertBurst" in cross and "=== null" in cross  # null coordinates: only the burst
+    draw = _js_function(js, "function chartDraw(")
+    assert (
+        "getBoundingClientRect" not in draw and "offsetWidth" not in draw
+    )  # no layout reads in the loop
+
+
+def test_chart_overlay_canvas():
+    html = text("index.html")
+    tag = re.search(r'<canvas[^>]*id="fx-chart"[^>]*>', html)
+    assert tag and 'aria-hidden="true"' in tag.group(0)
+    assert html.index('id="chart"') < html.index('id="fx-chart"') < html.index('id="chart-empty"')
+    css = text("motion.css")
+    blocks = _css_blocks(css)
+    reduced = [b for b in blocks if "prefers-reduced-motion: reduce" in b[0]]
+    assert "#fx-chart" in reduced[0][2] and "display: none" in reduced[0][2]
+    assert any(".fx-off #fx-chart" in b[0] and "display: none" in b[2] for b in blocks)
+    own = [b for b in blocks if b[0].strip() == "#fx-chart"]
+    assert own and "pointer-events: none" in own[0][2] and "position: absolute" in own[0][2]

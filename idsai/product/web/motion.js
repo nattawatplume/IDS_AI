@@ -459,6 +459,267 @@
     }, SWEEP_MS);
   }
 
+  // ---------------------------------------------------------------- main chart overlay
+
+  var SHOCK_MS = 900; // two rings expand to 60 px
+  var RING_GAP_MS = 140;
+  var LIMIT_MS = 400; // limit line glows red, shakes 2 px
+  var READ_MS = 250; // re-read the latest point this often
+  var FILL_MAX = 300;
+
+  function chartDetach() {
+    var O = S.chartOv;
+    S.chartOv = null;
+    if (!O) return;
+    removeLayer(O.draw);
+    if (O.ro) O.ro.disconnect();
+    try {
+      O.api.timeScale().unsubscribeVisibleTimeRangeChange(O.onRange);
+    } catch (e) {
+      /* the chart is gone */
+    }
+    O.canvas.width = O.canvas.width; // clear
+  }
+
+  // pane offsets and plot width: layout reads, on resize and range change only
+  function chartLayout(O) {
+    try {
+      var y0 = O.host.getBoundingClientRect().top;
+      var panes = O.api.panes();
+      O.top = [];
+      O.ph = [];
+      for (var i = 0; i < panes.length; i += 1) {
+        O.top.push(panes[i].getHTMLElement().getBoundingClientRect().top - y0);
+        O.ph.push(panes[i].getHeight());
+      }
+      O.pw = O.api.timeScale().width();
+    } catch (e) {
+      /* keep what was read before */
+    }
+    O.dirty = true;
+  }
+
+  function limitLineOf(O) {
+    return O.getLimit ? O.getLimit() : O.limitLine;
+  }
+
+  function limitPrice(O) {
+    try {
+      var p = limitLineOf(O).options().price;
+      return typeof p === "number" ? p : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function chartRead(O) {
+    var ts = O.api.timeScale();
+    var pt = O.latest ? O.latest() : null;
+    O.px = null;
+    O.py = null;
+    if (pt && Number.isFinite(pt.time) && Number.isFinite(pt.value)) {
+      var x = ts.timeToCoordinate(pt.time);
+      var y = O.series.priceToCoordinate(pt.value);
+      if (x !== null && y !== null) {
+        O.px = x;
+        O.py = y + (O.top[1] || 0);
+      }
+    }
+    var lp = limitPrice(O);
+    var ly = lp === null ? null : O.series.priceToCoordinate(lp);
+    O.ty = ly === null ? null : ly + (O.top[1] || 0);
+    var stamp = pt ? pt.time : null;
+    if (O.refill || stamp !== O.lastTime) {
+      O.refill = false;
+      O.lastTime = stamp;
+      O.fill = [];
+      if (O.priceSeries) {
+        var d = O.priceSeries.data();
+        var from = Math.max(0, d.length - 600);
+        var step = Math.max(1, Math.ceil((d.length - from) / FILL_MAX));
+        for (var i = from; i < d.length; i += step) {
+          if (typeof d[i].value !== "number") continue;
+          var fx0 = ts.timeToCoordinate(d[i].time);
+          var fy0 = O.priceSeries.priceToCoordinate(d[i].value);
+          if (fx0 !== null && fy0 !== null) O.fill.push(fx0, fy0);
+        }
+      }
+    }
+    O.dirty = false;
+  }
+
+  function ringAt(ctx, x, y, r, a, c, w) {
+    if (a <= 0.01) return;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.lineWidth = w;
+    ctx.strokeStyle = "rgba(" + c + "," + a + ")";
+    ctx.stroke();
+  }
+
+  // vertical gradient, colour c, one alpha per evenly spaced stop
+  function vgrad(ctx, y0, y1, c, a) {
+    var g = ctx.createLinearGradient(0, y0, 0, y1);
+    for (var i = 0; i < a.length; i += 1) g.addColorStop(i / (a.length - 1), "rgba(" + c + "," + a[i] + ")");
+    return g;
+  }
+
+  function drawFill(ctx, O, c) {
+    var f = O.fill;
+    if (f.length < 4 || !O.ph[0]) return;
+    var top = O.top[0] || 0;
+    var bottom = top + O.ph[0];
+    ctx.beginPath();
+    ctx.moveTo(f[0], f[1]);
+    for (var i = 2; i < f.length; i += 2) ctx.lineTo(f[i], f[i + 1]);
+    ctx.lineTo(f[f.length - 2], bottom);
+    ctx.lineTo(f[0], bottom);
+    ctx.closePath();
+    ctx.fillStyle = vgrad(ctx, top, bottom, c, [0.2, 0]);
+    ctx.fill();
+  }
+
+  function drawScan(ctx, O, c, t) {
+    var x = Math.round(O.px);
+    ctx.fillStyle = vgrad(ctx, 0, O.h, c, [0.1, 0.6, 0.1]);
+    ctx.fillRect(x - 0.5, 0, 1, O.h);
+    var sy = ((t % 3200) / 3200) * O.h; // bright spot travelling down
+    ctx.fillStyle = vgrad(ctx, sy - 24, sy + 24, c, [0, 0.85, 0]);
+    ctx.fillRect(x - 1, sy - 24, 2, 48);
+  }
+
+  function drawCross(ctx, O, t, plotW) {
+    var X = O.cross;
+    var e = Math.max(0, t - X.t0);
+    var red = "239,68,68";
+    if (e > SHOCK_MS + RING_GAP_MS) {
+      O.cross = null;
+      return;
+    }
+    if (e < 180) {
+      var fa = 1 - e / 180; // short flash
+      var rg = ctx.createRadialGradient(X.x, X.y, 0, X.x, X.y, 34);
+      rg.addColorStop(0, "rgba(255,255,255," + 0.9 * fa + ")");
+      rg.addColorStop(0.4, "rgba(" + red + "," + 0.6 * fa + ")");
+      rg.addColorStop(1, "rgba(" + red + ",0)");
+      ctx.fillStyle = rg;
+      ctx.fillRect(X.x - 34, X.y - 34, 68, 68);
+    }
+    for (var k = 0; k < 2; k += 1) {
+      var p = (e - k * RING_GAP_MS) / SHOCK_MS;
+      if (p < 0 || p > 1) continue;
+      var ease = 1 - Math.pow(1 - p, 3);
+      ringAt(ctx, X.x, X.y, 8 + 52 * ease, 0.9 * (1 - p), red, 3 - 1.8 * p);
+    }
+    if (e < LIMIT_MS && O.ty !== null) {
+      var lk = 1 - e / LIMIT_MS;
+      var yy = O.ty + Math.sin(e / 28) * 2 * lk;
+      ctx.save();
+      ctx.shadowColor = "rgba(" + red + ",.9)";
+      ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.moveTo(0, yy);
+      ctx.lineTo(plotW, yy);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(" + red + "," + (0.35 + 0.65 * lk) + ")";
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function chartDraw(ctx, t) {
+    var O = S.chartOv;
+    if (!O || !O.w || !O.h) return;
+    ctx.clearRect(0, 0, O.w, O.h);
+    if (O.dirty || t - O.read > READ_MS) {
+      O.read = t;
+      chartRead(O);
+    }
+    var c = S.rgb.join(",");
+    var plotW = O.pw || O.w;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, plotW, O.h);
+    ctx.clip();
+    drawFill(ctx, O, c);
+    if (O.px !== null) drawScan(ctx, O, c, t);
+    if (O.px !== null && O.py !== null) {
+      var ph = (t % 1600) / 1600; // pulsing ring on the latest point
+      ringAt(ctx, O.px, O.py, 4 + ph * 12, 0.8 * (1 - ph), c, 1.5);
+      ctx.beginPath();
+      ctx.arc(O.px, O.py, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(" + c + ",.95)";
+      ctx.fill();
+    }
+    ctx.restore();
+    if (O.cross) drawCross(ctx, O, t, plotW); // not clipped: the rings may cross the axis
+  }
+
+  // replaces any overlay made before, then draws on #fx-chart
+  function chartAttach(api, series, opts) {
+    chartDetach();
+    var canvas = DOC.getElementById("fx-chart");
+    var host = DOC.getElementById("chart");
+    var ctx = canvas && canvas.getContext && canvas.getContext("2d");
+    if (!ctx || !host || !api || !series) return;
+    opts = opts || {};
+    var O = {
+      api: api,
+      series: series,
+      priceSeries: opts.priceSeries,
+      limitLine: opts.limitLine,
+      getLimit: opts.getLimit,
+      latest: opts.latest,
+      canvas: canvas,
+      host: host,
+      ctx: ctx,
+      draw: chartDraw,
+      w: 0,
+      h: 0,
+      top: [],
+      ph: [],
+      px: null,
+      py: null,
+      ty: null,
+      fill: [],
+      read: 0,
+      dirty: true,
+      refill: true,
+    };
+    O.onRange = function () {
+      O.refill = true;
+      chartLayout(O);
+    };
+    if (typeof G.ResizeObserver === "function") {
+      O.ro = new G.ResizeObserver(function (entries) {
+        var r = entries[0] && entries[0].contentRect;
+        if (!r || r.width <= 0 || r.height <= 0) return;
+        var dpr = Math.min(G.devicePixelRatio || 1, 2);
+        O.w = Math.round(r.width);
+        O.h = Math.round(r.height);
+        canvas.width = Math.round(r.width * dpr);
+        canvas.height = Math.round(r.height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        O.refill = true;
+        chartLayout(O);
+      });
+      O.ro.observe(host);
+    }
+    api.timeScale().subscribeVisibleTimeRangeChange(O.onRange);
+    S.chartOv = O;
+    addLayer(chartDraw, { ctx: ctx });
+  }
+
+  function chartCross(point) {
+    var O = S.chartOv;
+    Motion.alertBurst({ severity: "high" }); // rate-limited
+    if (S.off || !O || !point) return;
+    var x = O.api.timeScale().timeToCoordinate(point.time);
+    var y = O.series.priceToCoordinate(point.value);
+    if (x === null || y === null) return; // off-screen: only the burst
+    O.cross = { x: x, y: y + (O.top[1] || 0), t0: G.performance.now() };
+  }
+
   // ---------------------------------------------------------------- public API
 
   var Motion = {
@@ -540,20 +801,19 @@
       }
     },
 
-    // later tasks fill these in; until then they do nothing
+    // the main chart: scan line, live-point ring, price glow
     chartAttach: function (api, series, opts) {
       try {
-        void api;
-        void series;
-        void opts;
+        chartAttach(api, series, opts);
       } catch (e) {
         /* decoration only */
       }
     },
 
+    // the score crossed the limit going up: rings, red limit line, edge flash
     chartCross: function (point) {
       try {
-        void point;
+        chartCross(point);
       } catch (e) {
         /* decoration only */
       }
