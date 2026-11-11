@@ -11,4 +11,4 @@ if [ -z "$PUBLIC_HOST" ]; then
 fi
 
 idsai user seed-env
-exec idsai serve --mode replay --loop --speed "$SPEED" --host 0.0.0.0 --port "$PORT" --auth --secure-cookies --public-host "$PUBLIC_HOST"
+exec idsai serve --mode replay --loop --speed "$SPEED" --host 0.0.0.0 --port "$PORT" --auth --secure-cookies --allow-signup --public-host "$PUBLIC_HOST"
