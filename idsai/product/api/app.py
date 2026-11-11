@@ -95,6 +95,7 @@ BUSY_TH = "ระบบไม่ว่าง ลองใหม่อีกค�
 SIGNUP_TAKEN_TH = "ชื่อนี้มีคนใช้แล้ว"
 SIGNUP_LIMITED_TH = "สมัครถี่เกินไป ลองใหม่ภายหลัง"
 SIGNUP_FAILED_TH = "บันทึกบัญชีไม่สำเร็จ ลองใหม่อีกครั้ง"
+LAST_ADMIN_TH = "ต้องมีผู้ดูแลอย่างน้อย 1 คน"
 DISPLAY_NAME_MAX = 40
 WS_RECHECK_S = 60  # an open WebSocket re-reads its session this often; gone or disabled: 4401
 LOCAL_USER = {"user_id": "local", "username": "local", "display_name": "local", "role": "admin"}
@@ -150,6 +151,14 @@ class SignupIn(_Body):
     username: str = Field(max_length=64)
     display_name: str = Field(default="", max_length=200)
     password: str = Field(max_length=1024)
+
+
+class RoleIn(_Body):
+    role: str = Field(max_length=32)
+
+
+class DisabledIn(_Body):
+    disabled: StrictBool
 
 
 class PrefsIn(_Body):
@@ -489,6 +498,69 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         before_us: int | None = None,
     ):
         return _json(state.store.list_audit(limit, before_us))
+
+    # ---- users (admin) ----
+
+    def user_row(u: dict) -> dict:
+        return {
+            "username": u["username"],
+            "display_name": u["display_name"],
+            "role": u["role"],
+            "disabled": bool(u["disabled"]),
+            "created_us": u["created_us"],
+            "last_seen_us": u["last_seen_us"],
+            "from_env": u["username"] in state.env_usernames,
+        }
+
+    def find_user(name: str) -> dict:
+        row = next((u for u in state.store.list_users() if u["username"] == name), None)
+        if row is None:
+            raise HTTPException(404, "ไม่พบผู้ใช้นี้")
+        return row
+
+    def other_enabled_admin(name: str) -> bool:
+        return any(
+            u["role"] == "admin" and not u["disabled"] and u["username"] != name
+            for u in state.store.list_users()
+        )
+
+    @app.get("/api/users")
+    async def users(user: Admin):
+        return _json([user_row(u) for u in state.store.list_users()])
+
+    @app.post("/api/users/{username}/role", dependencies=[Depends(same_origin)])
+    async def set_user_role(username: str, body: RoleIn, user: Admin):
+        if body.role not in ROLES:
+            raise HTTPException(422, f"role ต้องเป็นหนึ่งใน {', '.join(ROLES)}")
+        target = find_user(username)
+        old = target["role"]
+        if old == body.role:
+            return _json(user_row(target))
+        if old == "admin" and not target["disabled"] and not other_enabled_admin(username):
+            raise HTTPException(409, LAST_ADMIN_TH)
+        try:
+            state.store.set_role(username, body.role)
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
+        audit(user, "role_change", username, {"from": old, "to": body.role})
+        return _json(user_row(find_user(username)))
+
+    @app.post("/api/users/{username}/disabled", dependencies=[Depends(same_origin)])
+    async def set_user_disabled(username: str, body: DisabledIn, user: Admin):
+        target = find_user(username)
+        if bool(target["disabled"]) == body.disabled:
+            return _json(user_row(target))
+        if body.disabled:
+            if target["role"] == "admin" and not other_enabled_admin(username):
+                raise HTTPException(409, LAST_ADMIN_TH)
+            if username == user["username"]:
+                raise HTTPException(409, "ปิดบัญชีตัวเองไม่ได้")
+        try:
+            state.store.set_disabled(username, body.disabled)
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
+        audit(user, "user_disable" if body.disabled else "user_enable", username)
+        return _json(user_row(find_user(username)))
 
     # ---- alerts ----
 
