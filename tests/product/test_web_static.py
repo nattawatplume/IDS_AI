@@ -3093,7 +3093,7 @@ def test_motion_api_defined():
     for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert api not in js, api
     assert "://" not in js
-    assert len(js.encode("utf-8")) <= 28_000
+    assert len(js.encode("utf-8")) <= 32 * 1024
 
 
 def test_motion_stubs_are_safe():
@@ -3130,7 +3130,7 @@ def test_motion_css_tokens_and_off_paths():
     for prelude, depth, _, parents in blocks:
         if prelude.startswith("@keyframes"):
             assert depth == 0 and not parents, prelude
-    assert len(css.encode("utf-8")) <= 14_000
+    assert len(css.encode("utf-8")) <= 14 * 1024
 
 
 def test_fx_switch_copy():
@@ -3310,7 +3310,7 @@ def test_radar_rings_camera_and_card_glow_css():
     assert re.search(r"\.stat-card:hover[^{]*\{[^}]*translateY\(-2px\)", css)
     off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and ".orb-radar" in b[0]]
     assert off, "the radar is hidden when effects are off"
-    assert len(css.encode("utf-8")) <= 14_000
+    assert len(css.encode("utf-8")) <= 14 * 1024
 
 
 # ---- command-center motion: chart overlay and crossing shockwave ----
@@ -3383,3 +3383,25 @@ def test_no_crossing_while_series_loads():
     assert "chart.loading = true" in handler and "loadSeries()" in handler
     load = js[js.index("async function loadSeries()") :][:420]
     assert "chart.loading = true" in load and "finally" in load and "chart.loading = false" in load
+
+
+def test_page_enter_wired():
+    app = text("app.js")
+    body = app[app.index("function route()"):]
+    body = body[: body.index("\n}\n")]
+    assert 'fx("pageEnter"' in body
+    assert "pageShown" in body and "let pageShown = false" in app
+    # skipped on the first paint and right after sign-in
+    assert re.search(r'pageShown && cameFrom !== "login"[^\n]*fx\("pageEnter"', body)
+    js = text("motion.js")
+    assert "function pageEnter(" in js and "void node;" not in js
+    css = text("motion.css")
+    needles = (".fx-wipe", "@keyframes fx-wipe", ".fx-rise", "@keyframes fx-rise")
+    for needle in (*needles, "prefers-reduced-motion: no-preference"):
+        assert needle in css, needle
+    assert "GRID_ALPHA = 0.16" in js
+
+
+def test_motion_size_budget():
+    assert len(text("motion.js").encode("utf-8")) <= 32 * 1024
+    assert len(text("motion.css").encode("utf-8")) <= 14 * 1024

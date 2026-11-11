@@ -11,7 +11,7 @@
 
   var FRAME_MS = 1000 / 30; // one shared loop, at most 30 fps
   var MOODS = { calm: [34, 211, 238], watch: [245, 158, 11], alert: [239, 68, 68] }; // --fx-calm / --fx-watch / --fx-alert
-  var GRID_ALPHA = 0.08; // --fx-grid
+  var GRID_ALPHA = 0.16; // bolder than the --fx-grid token (.08), which stays the CSS base
   var SMALL_W = 640; // below this width half the dots are drawn
 
   var S = {
@@ -723,6 +723,34 @@
 
   // ---------------------------------------------------------------- public API
 
+  function pageEnter(node) {
+    if (S.off || !node || !DOC.body || typeof DOC.createElement !== "function") return;
+    var line = DOC.createElement("div");
+    line.className = "fx-wipe";
+    line.setAttribute("aria-hidden", "true");
+    DOC.body.appendChild(line);
+    G.setTimeout(function () {
+      if (line.parentNode) line.parentNode.removeChild(line);
+    }, 420);
+    var kids = node.children;
+    var rise = [];
+    for (var i = 0; i < kids.length && rise.length < 8; i += 1) {
+      if (!kids[i].hidden) rise.push(kids[i]);
+    }
+    rise.forEach(function (kid, n) {
+      kid.classList.remove("fx-rise");
+      void kid.offsetWidth; // restart the animation when the same page is entered again
+      kid.style.setProperty("--fx-i", String(n));
+      kid.classList.add("fx-rise");
+    });
+    G.setTimeout(function () {
+      rise.forEach(function (kid) {
+        kid.classList.remove("fx-rise");
+        kid.style.removeProperty("--fx-i");
+      });
+    }, 1000);
+  }
+
   var Motion = {
     // opts.off: the user's "ลดเอฟเฟกต์" choice. Reduced motion also keeps everything still.
     init: function (opts) {
@@ -820,9 +848,10 @@
       }
     },
 
+    // a cyan scan line wipes down the page, then the cards rise in one after another
     pageEnter: function (node) {
       try {
-        void node;
+        pageEnter(node);
       } catch (e) {
         /* decoration only */
       }

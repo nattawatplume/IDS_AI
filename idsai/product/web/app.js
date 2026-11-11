@@ -3093,6 +3093,8 @@ function parseRoute() {
   return { name: PAGES[path] ? path : "home" };
 }
 
+let pageShown = false; // false until the first page has been painted
+
 function route() {
   const hash = location.hash || "";
   const target = routeFor(hash);
@@ -3148,6 +3150,9 @@ function route() {
     else if (!$("login-form").hidden) $("login-user").focus();
     fx("loginEnter"); // the camera and its beam start moving
   }
+  // the scan-in wipe: not on the first paint, and not right after the sign-in (it has its own transition)
+  if (pageShown && cameFrom !== "login" && r.name !== "login") fx("pageEnter", $(PAGES[r.name]));
+  pageShown = true;
 }
 
 // ------------------------------------------------------------------ sign-in, user chip

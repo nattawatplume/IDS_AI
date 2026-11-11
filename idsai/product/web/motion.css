@@ -66,13 +66,13 @@ html::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .stat-card::before { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .stat-card::before, .fx-wipe, html:root[data-mood] .orb-ring { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
 }
 
 .fx-off *, .fx-off *::before, .fx-off *::after { animation: none !important; }
-.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring { display: none; }
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off .stat-card::before { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off #cctv-beam { opacity: .3; }
@@ -214,7 +214,19 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
 #card-symbol::before { animation-delay: -2s; }
 #card-health::before { animation-delay: -4s; }
 @keyframes fx-orbit { to { --fx-a: 360deg; } }
-.stat-card:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--fx-now) 60%, white 10%); }
+.stat-card:hover { border-color: color-mix(in srgb, var(--fx-now) 60%, white 10%); }
+@media (prefers-reduced-motion: no-preference) { html:not(.fx-off) .stat-card:hover { transform: translateY(-2px); } }
+
+/* ---- page transition: scan line, then the cards rise ---- */
+.fx-wipe {
+  position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 40; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--fx-calm) 30%, #e6fbff 50%, var(--fx-calm) 70%, transparent);
+  box-shadow: 0 0 14px 2px var(--fx-calm);
+  animation: fx-wipe .3s linear 1 both;
+}
+@keyframes fx-wipe { from { transform: translateY(0); opacity: 1; } to { transform: translateY(100vh); opacity: .2; } }
+.fx-rise { animation: fx-rise .45s cubic-bezier(.2, .7, .2, 1) calc(var(--fx-i, 0) * 40ms) 1 backwards; }
+@keyframes fx-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 720px) {
   .cctv-stage { display: none; }
