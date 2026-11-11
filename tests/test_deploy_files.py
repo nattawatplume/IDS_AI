@@ -179,7 +179,10 @@ def test_readme_hosting_section():
         "neon.tech",
         "DATABASE_URL",
         "Oregon",
-        "viewer",
+        "บัญชีที่สมัครเองได้สิทธิ์ `viewer` เสมอ",
+        "จะถูกเขียนทับรหัสผ่านและสิทธิ์จาก `IDSAI_USERS` ทุกครั้งที่บูต",
+        "การรีสตาร์ตทำให้ทุกคนต้องเข้าสู่ระบบใหม่ แต่บัญชีที่สมัครไว้ยังอยู่",
+        "ถ้าไม่ตั้ง `DATABASE_URL` บัญชีที่สมัครเองจะหายทุกครั้งที่รีสตาร์ต",
         "APP_URL",
         "onrender.com",
         "IDSAI_SPEED",
@@ -200,7 +203,7 @@ def test_readme_hosting_section():
         "ใช้ร่วมกัน",
     ):
         assert want in section
-    for n in range(1, 9):
+    for n in range(1, 11):
         assert f"\n{n}. " in section
     for gone in ("Hugging Face", "HF_TOKEN", "HF_SPACE", "SPACE_URL", "hf.space"):
         assert gone not in section
