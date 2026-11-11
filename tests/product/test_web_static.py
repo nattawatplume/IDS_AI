@@ -3334,7 +3334,7 @@ def test_crossed_up_contract():
     calls = [m.start() for m in re.finditer(r'fx\("chartCross"', js)]
     assert len(calls) == 1
     guard = js[: calls[0]].rstrip().splitlines()[-1]
-    assert guard.lstrip().startswith("if (crossedUp(")  # the only guard before the call
+    assert guard.lstrip().startswith("if (") and "crossedUp(" in guard  # the guard before the call
     assert (
         "chartCross" not in js[js.index("async function loadSeries") : js.index("function plot(")]
     )
@@ -3373,3 +3373,13 @@ def test_chart_overlay_canvas():
     assert any(".fx-off #fx-chart" in b[0] and "display: none" in b[2] for b in blocks)
     own = [b for b in blocks if b[0].strip() == "#fx-chart"]
     assert own and "pointer-events: none" in own[0][2] and "position: absolute" in own[0][2]
+
+
+def test_no_crossing_while_series_loads():
+    js = text("app.js")
+    call = js[js.index('fx("chartCross"') - 120 : js.index('fx("chartCross"')]
+    assert "!chart.loading" in call and "crossedUp(" in call
+    handler = js[js.index('$("symbol-select").addEventListener("change"') :][:700]
+    assert "chart.loading = true" in handler and "loadSeries()" in handler
+    load = js[js.index("async function loadSeries()") :][:420]
+    assert "chart.loading = true" in load and "finally" in load and "chart.loading = false" in load

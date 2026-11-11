@@ -514,6 +514,7 @@
 
   function chartRead(O) {
     var ts = O.api.timeScale();
+    if (O.api.panes().length !== O.ph.length) G.setTimeout(chartLayout, 150, O); // panes added or removed
     var pt = O.latest ? O.latest() : null;
     O.px = null;
     O.py = null;
@@ -541,7 +542,7 @@
           if (typeof d[i].value !== "number") continue;
           var fx0 = ts.timeToCoordinate(d[i].time);
           var fy0 = O.priceSeries.priceToCoordinate(d[i].value);
-          if (fx0 !== null && fy0 !== null) O.fill.push(fx0, fy0);
+          if (fx0 !== null && fy0 !== null) O.fill.push(fx0, fy0 + (O.top[0] || 0));
         }
       }
     }

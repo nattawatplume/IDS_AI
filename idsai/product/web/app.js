@@ -1115,6 +1115,7 @@ const chart = {
   last: {}, // series key -> last plotted time (s)
   priceTimes: [], // sorted times of the price series, for snapping markers
   now: { price: null, f: null }, // latest plotted values, shown while the pointer is away
+  loading: false, // a history load is in flight: the baseline (now.f, tau) may belong to the previous coin
   hover: false, // the pointer is on the chart: the readout follows it, not the stream
 };
 
@@ -1329,7 +1330,19 @@ function setTau(tau) {
   }
 }
 
+// while a history load is in flight the chart still holds the previous coin's baseline, so no crossing is judged
 async function loadSeries() {
+  if (!state.symbol || !chart.api) return;
+  const seq = (chart.loadSeq = (chart.loadSeq || 0) + 1);
+  chart.loading = true;
+  try {
+    await loadSeriesInner();
+  } finally {
+    if (seq === chart.loadSeq) chart.loading = false; // the newest load decides
+  }
+}
+
+async function loadSeriesInner() {
   if (!state.symbol || !chart.api) return;
   const symbol = state.symbol;
   let s;
@@ -1439,7 +1452,7 @@ function onScore(p) {
   const prevF = chart.now.f;
   if (plot("f", chart.f, t, p.F)) {
     chart.fGlow.update({ time: t, value: p.F });
-    if (crossedUp(prevF, p.F, chart.tau)) fx("chartCross", { time: t, value: p.F });
+    if (!chart.loading && crossedUp(prevF, p.F, chart.tau)) fx("chartCross", { time: t, value: p.F });
     if (!chart.hover) renderReadout(null, chart.now.price, chart.now.f);
   }
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);
@@ -3678,6 +3691,7 @@ async function boot() {
   });
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
+    chart.loading = true; // no crossing is judged against the old coin until loadSeries is done
     $("rt-symbol").value = state.symbol;
     $("symbol-name").textContent = state.symbol || "–";
     savePrefs({ symbol: state.symbol });
