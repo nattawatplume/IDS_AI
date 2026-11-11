@@ -255,6 +255,28 @@ function $(id) {
   return document.getElementById(id);
 }
 
+// ---- HUD panels: the frame is CSS (.hud::before/::after); the four corner brackets are spans added here.
+// A <details> keeps them in its summary, because the rest of it is not drawn while it is closed.
+const HUD_CORNERS = ["tl", "tr", "bl", "bb"];
+
+function hudMark(node) {
+  const host = node.tagName === "DETAILS" ? node.querySelector("summary") || node : node;
+  if (host.querySelector(".hud-br")) return node;
+  for (const c of HUD_CORNERS) host.appendChild(el("span", { class: `hud-br ${c}`, "aria-hidden": "true" }));
+  return node;
+}
+
+// the mono strip at the top of a panel: a REC dot and a label (decoration, hidden from screen readers;
+// the label is drawn from data-tag by CSS, so it never joins the text of the page)
+function hudHead(tag, rec = true) {
+  return el(
+    "div",
+    { class: "hud-head", "aria-hidden": "true" },
+    rec ? el("span", { class: "hud-rec" }) : null,
+    el("span", { class: "hud-tag", "data-tag": tag }),
+  );
+}
+
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
@@ -1629,7 +1651,7 @@ function showToast(text, href) {
   const root = $("toast-root");
   if (!root) return;
   while (root.children.length >= TOAST_MAX) root.removeChild(root.firstChild);
-  const toast = el("div", { class: reducedMotion() ? "toast" : "toast slide" });
+  const toast = hudMark(el("div", { class: reducedMotion() ? "toast hud hud-sm" : "toast hud hud-sm slide" }));
   const close = () => toast.remove();
   append(toast, [
     href ? el("a", { class: "toast-text", href, onclick: close }, text) : el("span", { class: "toast-text" }, text),
@@ -1704,9 +1726,9 @@ function renderAlertFilters(all) {
 }
 
 function alertCard(a) {
-  return el(
+  return hudMark(el(
     "a",
-    { class: "card alert-card", href: alertHref(a.alert_id), "data-sev": sevKey(a.severity) },
+    { class: "card hud hud-sm alert-card", href: alertHref(a.alert_id), "data-sev": sevKey(a.severity) },
     el(
       "span",
       { class: "alert-card-main" },
@@ -1724,7 +1746,7 @@ function alertCard(a) {
       verdictChip(latestVerdict(a.feedback)),
       el("span", { class: "alert-card-time" }, fmtThaiTime(a.ts_event_us)),
     ),
-  );
+  ));
 }
 
 // the alerts page: filter chips with counts, then one glass card per alert, newest first
@@ -1840,7 +1862,7 @@ async function showAlert(id) {
     a = await api(`/api/alerts/${encodeURIComponent(id)}`);
   } catch (e) {
     clear(box).appendChild(
-      el("div", { class: "card" }, el("p", { class: "inline-error" }, `เปิดการแจ้งเตือนนี้ไม่ได้ (${e.message})`)),
+      hudMark(el("div", { class: "card hud" }, hudHead("LOG · ALERT DETAIL"), el("p", { class: "inline-error" }, `เปิดการแจ้งเตือนนี้ไม่ได้ (${e.message})`))),
     );
     return;
   }
@@ -1871,9 +1893,10 @@ async function showAlert(id) {
   const facts = ((a.explanation && a.explanation.facts) || []).map(plainFact).filter(Boolean);
   const mini = el("div", { class: "chart-mini" });
   box.appendChild(
-    el(
+    hudMark(el(
       "div",
-      { class: "card detail-top" },
+      { class: "card hud detail-top" },
+      hudHead("LOG · ALERT DETAIL"),
       el(
         "div",
         { class: "detail" },
@@ -1888,7 +1911,7 @@ async function showAlert(id) {
         ),
         el("div", { class: "detail-main" }, el("h3", {}, "ราคาช่วงนั้น แถบสีคือช่วงที่ระบบเตือน"), mini),
       ),
-    ),
+    )),
   );
 
   box.appendChild(
@@ -1898,7 +1921,7 @@ async function showAlert(id) {
       renderAlertCards();
     }),
   );
-  box.appendChild(techDetails(a, tax));
+  box.appendChild(hudMark(techDetails(a, tax)));
   drawDetailChart(mini, a);
 }
 
@@ -1911,7 +1934,7 @@ function techDetails(a, tax) {
   const [w0, w1] = Array.isArray(a.window) ? a.window : [null, null];
   return el(
     "details",
-    { class: "card tech" },
+    { class: "card hud tech" },
     el("summary", {}, "ดูรายละเอียด"),
     el(
       "div",
@@ -2018,12 +2041,13 @@ function techniqueCard(tax, techniqueId) {
 
 // the verdict: three large buttons (analyst and up), the status in this card, and who said what
 function feedbackCard(a, onSaved) {
-  const card = el(
+  const card = hudMark(el(
     "div",
-    { class: "card verdict-card" },
+    { class: "card hud verdict-card" },
+    hudHead("REVIEW · VERDICT"),
     el("h2", { class: "verdict-title" }, "ผลตรวจของคุณ"),
     el("p", { class: "small muted" }, "ดูกราฟและคำอธิบายแล้ว รายการนี้ผิดปกติจริงหรือไม่"),
-  );
+  ));
   const analyst = el("input", {
     type: "text",
     maxlength: "64",
@@ -2428,7 +2452,8 @@ function runCard(run) {
   );
   const card = el(
     "div",
-    { class: "card sim-run" },
+    { class: "card hud sim-run" },
+    hudHead("SIM · RUN"),
     el(
       "div",
       { class: "sim-run-head" },
@@ -2439,6 +2464,7 @@ function runCard(run) {
     note,
     tech,
   );
+  hudMark(card);
   run.card = card;
   run.steps = steps;
   run.note = note;
@@ -2612,7 +2638,7 @@ function resultCard(target, verdict, budget) {
   const card = el(
     "div",
     {
-      class: `card result-card${wide ? " result-wide" : ""}${target.reference ? " result-ref-card" : ""}`,
+      class: `card hud hud-sm result-card${wide ? " result-wide" : ""}${target.reference ? " result-ref-card" : ""}`,
       "data-target": target.id,
       "data-state": st || "reference",
     },
@@ -2627,6 +2653,7 @@ function resultCard(target, verdict, budget) {
           : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
     ),
   );
+  hudMark(card);
   if (wide && isNum(verdict.value)) {
     const pct = Math.round(verdict.value * 100);
     const num = el("span", {}, String(isNum(resultShown[target.id]) ? resultShown[target.id] : pct));
@@ -2688,12 +2715,12 @@ function renderResultCards(box, report, budget) {
 }
 
 function committeeBox(...children) {
-  return el(
+  return hudMark(el(
     "details",
-    { class: "card committee" },
+    { class: "card hud committee" },
     el("summary", {}, "รายละเอียดสำหรับกรรมการ"),
     el("div", { class: "committee-body" }, children),
-  );
+  ));
 }
 
 // the committee's view of the targets: ids, value, CI, n and the goal as the MVP spec states it
@@ -2756,7 +2783,7 @@ async function showEval() {
   clear(box);
   if (evalEmpty(report)) {
     box.appendChild(
-      el("div", { class: "card empty-state" }, el("p", { class: "empty-text" }, "ยังไม่มีผลวัดระบบ เมื่อสร้างรายงานผลแล้วให้เปิดหน้านี้ใหม่")),
+      hudMark(el("div", { class: "card hud empty-state" }, el("p", { class: "empty-text" }, "ยังไม่มีผลวัดระบบ เมื่อสร้างรายงานผลแล้วให้เปิดหน้านี้ใหม่"))),
     );
     box.appendChild(committeeBox(el("p", { class: "small" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่")));
     return;
@@ -3678,6 +3705,7 @@ async function enterApp() {
 }
 
 async function boot() {
+  document.querySelectorAll(".hud").forEach(hudMark);
   window.addEventListener("hashchange", safely(route));
   bindHelp();
   $("menu-tour").addEventListener("click", () => {

@@ -4,26 +4,26 @@
    help drawer) clear the canvases and stop the CSS animations; the mood colour still shows. */
 
 :root {
-  --fx-calm: #22d3ee;
+  --fx-calm: var(--hud-line);
   --fx-watch: #f59e0b;
-  --fx-alert: #ef4444;
-  --fx-grid: rgba(56, 189, 248, .08);
+  --fx-alert: var(--hud-alert);
+  --fx-grid: rgba(0, 229, 255, .08);
   --fx-now: var(--fx-calm);
 }
 html[data-mood="watch"] { --fx-now: var(--fx-watch); }
 html[data-mood="alert"] { --fx-now: var(--fx-alert); }
 
-/* the static mood: a soft wash from the top edge, so the state colour shows even with effects off */
+/* the static mood: a single-colour inner glow along the top edge, so the state colour shows even with effects off */
 html::after {
   content: "";
   position: fixed;
   inset: 0;
   z-index: -1;
   pointer-events: none;
-  background: radial-gradient(90% 46% at 50% 0%, color-mix(in srgb, var(--fx-now) 11%, transparent), transparent 72%);
+  box-shadow: inset 0 70px 90px -70px color-mix(in srgb, var(--fx-now) 24%, transparent);
 }
 
-/* the control-room canvas sits behind everything; the page background is the html gradient */
+/* the control-room canvas sits behind everything; the page background is the flat HUD ground */
 #fx-bg {
   position: fixed;
   top: 0;
@@ -41,7 +41,7 @@ html::after {
   z-index: 70;
   pointer-events: none;
   opacity: 0;
-  box-shadow: inset 0 0 90px 10px rgba(239, 68, 68, .5);
+  box-shadow: inset 0 0 90px 10px rgba(255, 45, 85, .5);
 }
 #fx-edge.is-flash { animation: fx-edge-flash .9s ease-out 1; animation-iteration-count: 1; }
 @keyframes fx-edge-flash { 0% { opacity: 0; } 14% { opacity: 1; } 100% { opacity: 0; } }
@@ -53,20 +53,31 @@ html::after {
   justify-content: space-between;
   gap: 12px;
 }
+.user-menu #menu-fx { position: relative; }
 .user-menu #menu-fx::after {
   content: "";
   flex: none;
   width: 30px;
   height: 16px;
-  border-radius: 999px;
-  background: radial-gradient(circle at 8px 50%, #eef0ff 0 6px, transparent 6.5px), rgba(255, 255, 255, .18);
+  border: 1px solid rgba(0, 229, 255, .45);
+  background: rgba(0, 229, 255, .08);
 }
-.user-menu #menu-fx[aria-pressed="true"]::after {
-  background: radial-gradient(circle at 22px 50%, #070b1a 0 6px, transparent 6.5px), var(--fx-calm);
+.user-menu #menu-fx::before {
+  content: "";
+  position: absolute;
+  right: 17px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  background: var(--hud-text);
+  transform: translate(-14px, -50%);
+  transition: transform .15s;
 }
+.user-menu #menu-fx[aria-pressed="true"]::after { background: var(--fx-calm); }
+.user-menu #menu-fx[aria-pressed="true"]::before { background: var(--hud-bg); transform: translate(0, -50%); }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .stat-card::before, .fx-wipe, html:root[data-mood] .orb-ring { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
 }
@@ -75,10 +86,9 @@ html::after {
    help drawer) keep their behaviour, so turning effects back on replays nothing */
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .fx-wipe, .fx-off .fx-rise, .fx-off .fx-sweep, .fx-off .fx-sweep::after,
 .fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
-.fx-off .login-card button.primary::after, .fx-off .login-line-trace, .fx-off .blob,
-.fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .stat-card::before, .fx-off #hero-cam .cam-led { animation: none !important; }
+.fx-off .login-card button.primary::after, .fx-off .login-line-trace,
+.fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led { animation: none !important; }
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
-.fx-off .stat-card::before { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off #cctv-beam { opacity: .3; }
 
@@ -93,7 +103,7 @@ html::after {
 .cctv-lens-dot { filter: drop-shadow(0 0 3px var(--fx-alert)); }
 .cctv-rec { filter: drop-shadow(0 0 3px var(--fx-alert)); animation: cctv-blink 1s step-end infinite; }
 .cctv-blink { animation: cctv-blink 1s step-end infinite; }
-.cctv-hud { fill: none; stroke: rgba(34, 211, 238, .42); stroke-width: 1.5; stroke-linecap: round; }
+.cctv-hud { fill: none; stroke: rgba(0, 229, 255, .42); stroke-width: 1.5; stroke-linecap: round; }
 .cctv-hud-text text { font: 600 10px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .14em; fill: rgba(186, 230, 253, .78); }
 .cctv-ring { fill: none; stroke: var(--fx-alert); stroke-width: 2; opacity: 0; transform-box: fill-box; transform-origin: center; }
 .cctv-tag text { fill: #fff; font-size: 12px; font-weight: 600; }
@@ -115,8 +125,8 @@ html::after {
 
 /* inputs glow on focus; the submit button has a light sheen passing over it every few seconds */
 .login-card .field > input { transition: border-color .18s, box-shadow .18s; }
-.login-card .field > input:focus { border-color: var(--fx-calm); box-shadow: 0 0 0 3px rgba(34, 211, 238, .14), 0 0 22px rgba(34, 211, 238, .26); }
-.login-card .field > input:focus-visible { outline: 1px solid rgba(34, 211, 238, .7); outline-offset: 1px; }
+.login-card .field > input:focus { border-color: var(--fx-calm); box-shadow: 0 0 0 3px rgba(0, 229, 255, .14), 0 0 22px rgba(0, 229, 255, .26); }
+.login-card .field > input:focus-visible { outline: 1px solid rgba(0, 229, 255, .7); outline-offset: 1px; }
 .login-card button.primary { position: relative; overflow: hidden; }
 .login-card button.primary::after {
   content: "";
@@ -126,7 +136,7 @@ html::after {
   left: 0;
   width: 40%;
   pointer-events: none;
-  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, .34), transparent);
+  background: rgba(255, 255, 255, .22);
   transform: translateX(-140%) skewX(-18deg);
   animation: cctv-sheen 4.4s ease-in-out 1.4s infinite;
 }
@@ -139,7 +149,7 @@ html::after {
   display: grid;
   place-items: center;
   opacity: 0;
-  background: radial-gradient(55% 45% at 50% 46%, rgba(34, 211, 238, .18), transparent 72%), rgba(7, 11, 26, .94);
+  background: rgba(5, 7, 13, .96);
 }
 .fx-verify-box { display: flex; flex-direction: column; align-items: center; gap: 16px; }
 .fx-verify-mark {
@@ -152,14 +162,14 @@ html::after {
   color: var(--fx-calm);
   font-size: 38px;
   line-height: 1;
-  box-shadow: 0 0 34px rgba(34, 211, 238, .45), inset 0 0 18px rgba(34, 211, 238, .2);
+  box-shadow: 0 0 34px rgba(0, 229, 255, .45), inset 0 0 18px rgba(0, 229, 255, .2);
 }
 .fx-verify-text { font-size: 22px; font-weight: 600; letter-spacing: .02em; color: #e6fbff; }
 
 /* ---- hero: the radar sweep (calm) and the red pulse rings (alert) live inside the orb ---- */
 .orb-radar, .orb-ring { position: absolute; inset: 0; border-radius: 50%; pointer-events: none; }
 .orb-radar {
-  background: conic-gradient(from 0deg, transparent 0 66%, rgba(255, 255, 255, .5) 99%, rgba(255, 255, 255, .85) 100%);
+  background: conic-gradient(from 0deg, transparent 0 66%, rgba(255, 255, 255, .7) 100%); /* allow: radar wedge */
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .28), inset 0 0 0 9px transparent, inset 0 0 0 10px rgba(255, 255, 255, .14);
   animation: fx-radar 4s linear infinite;
   will-change: transform;
@@ -177,7 +187,7 @@ html[data-mood="alert"] .orb::after { animation: none; }
 #hero-cam { flex: none; margin-left: auto; overflow: visible; }
 #hero-cam .cam-mount { fill: none; stroke: rgba(186, 230, 253, .5); stroke-width: 3; stroke-linecap: round; }
 #hero-cam .cam-body { fill: rgba(15, 23, 42, .85); stroke: rgba(186, 230, 253, .55); stroke-width: 1.5; }
-#hero-cam .cam-lens { fill: #0b1230; stroke: var(--fx-now); stroke-width: 1.5; }
+#hero-cam .cam-lens { fill: #0b1220; stroke: var(--fx-now); stroke-width: 1.5; }
 #hero-cam .cam-led { fill: var(--fx-now); }
 #hero-cam .cam-beam { fill: var(--fx-alert); opacity: 0; transition: opacity .6s; }
 #hero-cam .cam-head { transform-box: view-box; transform-origin: 52px 20px; transform: rotate(6deg); transition: transform .9s cubic-bezier(.4, 0, .2, 1); }
@@ -195,37 +205,18 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
   left: 0;
   width: 45%;
   pointer-events: none;
-  background: linear-gradient(105deg, transparent, rgba(239, 68, 68, .38), transparent);
+  background: rgba(255, 45, 85, .22);
   animation: fx-sweep 1.2s ease-in-out 1 both;
 }
 @keyframes fx-sweep { from { transform: translateX(-110%) skewX(-18deg); } to { transform: translateX(260%) skewX(-18deg); } }
 
-/* the KPI cards: a thin light travels the border about every 6 s, each card out of phase; hover lifts 2 px */
-@property --fx-a { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
-.stat-card { position: relative; }
-.stat-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  padding: 1px;
-  border-radius: inherit;
-  pointer-events: none;
-  background: conic-gradient(from var(--fx-a), transparent 0 84%, color-mix(in srgb, var(--fx-now) 85%, transparent) 97%, transparent);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
-  animation: fx-orbit 6s linear infinite;
-}
-#card-symbol::before { animation-delay: -2s; }
-#card-health::before { animation-delay: -4s; }
-@keyframes fx-orbit { to { --fx-a: 360deg; } }
-.stat-card:hover { border-color: color-mix(in srgb, var(--fx-now) 60%, white 10%); }
+/* the HUD panels (.hud in styles.css) carry their own frame and brackets; the border glint comes with the panel motion */
 @media (prefers-reduced-motion: no-preference) { html:not(.fx-off) .stat-card:hover { transform: translateY(-2px); } }
 
 /* ---- page transition: scan line, then the cards rise ---- */
 .fx-wipe {
   position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 40; pointer-events: none;
-  background: linear-gradient(90deg, transparent, var(--fx-calm) 30%, #e6fbff 50%, var(--fx-calm) 70%, transparent);
+  background: var(--fx-calm);
   box-shadow: 0 0 14px 2px var(--fx-calm);
   animation: fx-wipe .3s linear 1 both;
 }

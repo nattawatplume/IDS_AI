@@ -10,7 +10,7 @@
   if (!DOC) return; // node (tests): nothing to draw on
 
   var FRAME_MS = 1000 / 30; // one shared loop, at most 30 fps
-  var MOODS = { calm: [34, 211, 238], watch: [245, 158, 11], alert: [239, 68, 68] }; // --fx-calm / --fx-watch / --fx-alert
+  var MOODS = { calm: [0, 229, 255], watch: [245, 158, 11], alert: [255, 45, 85] }; // --fx-calm / --fx-watch / --fx-alert
   var GRID_ALPHA = 0.16; // bolder than the --fx-grid token (.08), which stays the CSS base
   var SMALL_W = 640; // below this width half the dots are drawn
 
@@ -619,7 +619,7 @@
   function drawCross(ctx, O, t, plotW) {
     var X = O.cross;
     var e = Math.max(0, t - X.t0);
-    var red = "239,68,68";
+    var red = "255,45,85";
     if (e > SHOCK_MS + RING_GAP_MS) {
       O.cross = null;
       return;

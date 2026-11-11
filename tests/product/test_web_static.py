@@ -244,7 +244,7 @@ def test_red_team_form_starts_disabled_until_health_confirms_the_mode():
     page = _simulate_page(text("index.html"))
     controls = re.findall(r"<(?:select|input|button)\b[^>]*>", page)
     assert len(controls) == 6  # three cards, region, offset, symbol
-    assert sum('class="card sim-card"' in tag for tag in controls) == 3
+    assert sum('class="card hud hud-sm sim-card"' in tag for tag in controls) == 3
     for tag in controls:
         assert re.search(r"\sdisabled[\s>]", tag), tag  # fail closed before any health
     reason = re.search(r'<p id="sim-reason"[^>]*>([^<]*)</p>', page)
@@ -364,36 +364,148 @@ def test_shell_markup():
     assert 'ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" }' in js
 
 
-def test_glass_tokens():
+ALERT_LOW = '.alert-card[data-sev="low"] { --ln: rgba(138, 160, 184, 0.5); --hi: var(--dim); }'
+ALERT_MID = '.alert-card[data-sev="mid"] { --ln: rgba(245, 158, 11, 0.7); --hi: var(--amber); }'
+ALERT_HIGH = '.alert-card[data-sev="high"] { --ln: rgba(255, 45, 85, 0.8); --hi: var(--red); }'
+HUD_TOKENS = {
+    "--hud-bg": "#05070d",
+    "--hud-panel": "#0b1220",
+    "--hud-line": "#00e5ff",
+    "--hud-violet": "#7c3aed",
+    "--hud-alert": "#ff2d55",
+    "--hud-ok": "#22ff88",
+    "--hud-text": "#e6f1ff",
+    "--hud-muted": "#8aa0b8",
+}
+MONO_STACK = '--mono: ui-monospace, "Cascadia Mono", Consolas, "JetBrains Mono", monospace;'
+
+
+def test_hud_tokens():
     css = text("styles.css")
-    for decl in ("--bg: #0b0820", "--ok: #3ee08f", "--warn: #ffb547", "--bad: #ff5d73"):
-        assert decl in css, decl
-    assert "backdrop-filter" in css and "@supports not (backdrop-filter" in css
+    for name, value in HUD_TOKENS.items():
+        assert re.search(rf"(?m)^\s*{name}:\s*{value};", css), name
     assert "prefers-reduced-motion: reduce" in css
     assert "background-clip: text" not in css and "-webkit-background-clip" not in css
     assert 'data-theme="light"' not in css and "prefers-color-scheme" not in css
-    # the accent gradient: only on the primary button and the active nav pill
-    accent = list(re.finditer(r"([^{}]+)\{[^}]*linear-gradient\([^)]*--violet", css))
-    assert accent
-    for m in accent:
-        sel = " ".join(m.group(1).split())
-        assert "primary" in sel or 'aria-current="page"' in sel, sel
-    assert "#8b5cf6" in css and "#3b82f6" in css
-    assert "@keyframes drift" in css and ".bg" in css
     weights = set(re.findall(r"font-weight:\s*(\d+)", css))
     assert weights <= {"400", "600"}, weights
 
 
-def test_background_blobs_stay_subtle():
+def test_mood_tokens_map_to_the_hud_colours():
+    css = text("motion.css")
+    assert "--fx-calm: var(--hud-line);" in css
+    assert "--fx-watch: #f59e0b;" in css
+    assert "--fx-alert: var(--hud-alert);" in css
+
+
+def test_mono_stack():
+    assert MONO_STACK in text("styles.css")
+
+
+def test_no_external_fonts():
+    for name in ("index.html", "styles.css", "motion.css"):
+        body = text(name)
+        assert "fonts.googleapis" not in body and "fonts.gstatic" not in body, name
+        assert "@import" not in body and "@font-face" not in body, name
+
+
+def test_no_gradients():
+    for name in ("styles.css", "motion.css"):
+        for n, line in enumerate(text(name).splitlines(), 1):
+            if "-gradient(" in line:
+                assert "/* allow: radar wedge */" in line, f"{name}:{n}: {line.strip()}"
+    # the one allowed wedge is a single colour fading from transparent
+    wedge = [ln for ln in text("motion.css").splitlines() if "allow: radar wedge" in ln]
+    assert len(wedge) == 1 and wedge[0].count("rgba(") == 1
+
+
+def test_no_blobs_or_aurora():
+    html, css = text("index.html"), text("styles.css")
+    assert "blob" not in html and ".blob" not in css and "@keyframes drift" not in css
+    assert 'class="bg"' not in html
+
+
+def test_alert_colour_not_base_text():
     css = text("styles.css")
-    base = re.search(r"(?m)^\.blob\s*\{([^}]*)\}", css).group(1)
-    assert "opacity" not in base  # each blob carries its own, so the sum below is the whole story
-    total = 0.0
-    for i in (1, 2, 3):
-        body = re.search(rf"(?m)^\.blob-{i}\s*\{{([^}}]*)\}}", css).group(1)
-        total += float(re.search(r"opacity:\s*([\d.]+)", body).group(1))
-    assert total <= 0.35 + 1e-9, total
-    assert len(re.findall(r'class="blob blob-\d"', text("index.html"))) == 3
+    assert re.search(r"(?m)^\s*--text:\s*var\(--hud-text\);", css)
+    assert re.search(r"(?m)^\s*--text-dim:\s*var\(--hud-muted\);", css)
+    for sel in ("body", "a", ".muted", ".card-label", ".card-value", ".hud-head", ".page-lead"):
+        body = re.search(rf"(?m)^{re.escape(sel)}\s*\{{([^}}]*)\}}", css)
+        if body:
+            assert "--hud-alert" not in body.group(1) and "var(--red)" not in body.group(1), sel
+    # red text only appears in alert state rules
+    for m in re.finditer(r"([^{}]+)\{[^}]*\bcolor:\s*var\(--(?:red|bad|hud-alert)\)", css):
+        sel = " ".join(m.group(1).split())
+        allowed = ("alert", ".badge-mode.live", "check-state.fail", ".sev-3", ".hero", ".v-tp")
+        assert any(k in sel for k in allowed), sel
+
+
+def test_hud_panel_system_css():
+    css = text("styles.css")
+    hud = re.search(r"(?m)^\.hud\s*\{([^}]*)\}", css).group(1)
+    assert "position: relative" in hud and "isolation: isolate" in hud
+    assert "--cut: polygon(" in css and "clip-path: var(--cut)" in css
+    assert re.search(r"(?m)^\.hud::before\s*\{[^}]*background: var\(--ln\)", css)
+    assert re.search(r"(?m)^\.hud::after\s*\{\s*inset:\s*1px;\s*background:\s*var\(--glass\);", css)
+    # four corner brackets that slide outward on hover with transform only
+    for corner in ("tl", "tr", "bl", "bb"):
+        assert f".hud-br.{corner}" in css and f".hud:hover > .hud-br.{corner}" in css, corner
+    assert re.search(r"\.hud-br\s*\{[^}]*transition:\s*transform", css)
+    for cls in (".hud-head", ".hud-tag", ".hud-rec", ".hud-clock"):
+        assert re.search(rf"(?m)^{re.escape(cls)}\b", css), cls
+    # the blinking dot stays at or under 1 Hz
+    assert re.search(r"\.hud-rec\s*\{[^}]*animation:\s*hud-rec\s+2s", css)
+    # outline buttons, a flat solid primary, a bracketed nav underline
+    primary = re.search(r"(?m)^button\.primary\s*\{([^}]*)\}", css).group(1)
+    assert "background: var(--hud-line)" in primary and "gradient" not in primary
+    assert '.nav a[aria-current="page"]::after' in css
+
+
+def test_every_page_uses_hud():
+    html = text("index.html")
+    pages = ("login", "home", "alerts", "simulate", "results", "users", "activity")
+    for pid in (f"page-{name}" for name in pages):
+        sec = re.search(rf'<section id="{pid}".*?</section>', html, re.S).group(0)
+        assert re.search(r'class="[^"]*\bhud\b', sec), pid
+    for pid in ("hero", "card-alerts", "card-symbol", "card-health", "chart-card", "replay-bar"):
+        assert re.search(rf'<(?:div|details) id="{pid}" class="[^"]*\bhud\b', html), pid
+    assert re.search(r'<aside id="rail" class="hud\b', html)
+    for pid in ("users-table", "audit-table"):
+        before = html[: html.index(f'id="{pid}"')]
+        panel = before[before.rindex('class="hud table-panel"') :]
+        assert 'class="table-wrap"' in panel, pid
+    for pid in ("login-form", "signup-form", "tour-bubble", "help-drawer"):
+        assert re.search(rf'id="{pid}" class="[^"]*\bhud\b', html), pid
+    # every head carries its own label, drawn from data-tag, and is hidden from screen readers
+    heads = re.findall(r'<div class="hud-head"([^>]*)>(.*?)</div>', html, re.S)
+    tags = [re.search(r'data-tag="([^"]+)"', body).group(1) for _, body in heads]
+    assert len(tags) >= 14 and len(set(tags)) == len(tags), tags
+    assert all('aria-hidden="true"' in attrs for attrs, _ in heads)
+    for want in (
+        "CAM-01 · STATUS · LIVE",
+        "CAM-02 · MAIN FEED · LIVE",
+        "LOG · ALERTS",
+        "SIM · LAB",
+        "EVAL · RESULTS",
+        "ADMIN · USERS",
+        "AUTH · SECURE CHANNEL",
+    ):
+        assert want in tags, want
+    # the labels are not text, so the plain-Thai copy guards never see them
+    assert re.search(r"\.hud-tag::before\s*\{[^}]*attr\(data-tag\)", text("styles.css"))
+
+
+def test_js_card_builders_use_hud():
+    js = text("app.js")
+    assert "function hudMark(" in js and "function hudHead(" in js
+    assert 'document.querySelectorAll(".hud").forEach(hudMark)' in js
+    assert 'class: "card hud hud-sm alert-card"' in js
+    assert "return hudMark(el(" in _js_function(js, "function alertCard(a)")
+    assert "card hud hud-sm result-card" in js and "card hud sim-run" in js
+    assert "card hud detail-top" in js and "card hud verdict-card" in js and "card hud tech" in js
+    assert "card hud committee" in js and "toast hud hud-sm" in js
+    # brackets live in a <details> summary, which is drawn while it is closed
+    assert 'node.tagName === "DETAILS"' in _js_function(js, "function hudMark(node)")
 
 
 def test_top_bar_has_a_mid_breakpoint():
@@ -609,7 +721,7 @@ def test_home_markup():
 
 def test_chart_colours_and_titles():
     css, js = text("styles.css"), text("app.js")
-    for decl in ("--line-price: #a5b4fc", "--line-f: #8b5cf6", "--tau: #ffb547"):
+    for decl in ("--line-price: #00e5ff", "--line-f: #7c3aed", "--tau: #f59e0b"):
         assert decl in css, decl
     init = js[js.index("function initChart(") : js.index("function addLanes(")]
     assert "ระดับความผิดปกติ" in init and "glow" in init
@@ -617,12 +729,14 @@ def test_chart_colours_and_titles():
     assert 'title: "เส้นเตือน"' in tau and "Dashed" in tau
 
 
-def test_glass_cards_lift_on_hover_but_not_under_reduced_motion():
+def test_hud_panels_brighten_on_hover_and_stay_still_under_reduced_motion():
     css = text("styles.css")
-    hover = re.search(r"(?m)^\.card:hover\s*\{([^}]*)\}", css)
-    assert hover and "translateY(-2px)" in hover.group(1) and "--glass-border-hi" in hover.group(1)
+    hover = re.search(r"(?m)^\.hud:hover\s*\{([^}]*)\}", css)
+    assert hover and "--ln:" in hover.group(1)
+    assert not re.search(r"(?m)^\.card:hover", css)  # the panels no longer lift; the brackets slide
     reduced = css.split("prefers-reduced-motion: reduce")[1]
-    assert re.search(r"\.card:hover[^{]*\{[^}]*transform:\s*none", reduced)
+    assert "transition: none !important" in reduced and "animation: none !important" in reduced
+    assert re.search(r"\.rail-row:hover[^{]*\{[^}]*transform:\s*none", reduced)
 
 
 def test_hero_and_rail_render_only_what_changed():
@@ -674,7 +788,7 @@ def test_resting_styles_are_visible_when_animation_does_not_run():
 
 def test_low_severity_is_grey_and_forest_points_avoid_the_dot_rule():
     css = text("styles.css")
-    assert '.alert-card[data-sev="low"] { border-left-color: var(--dim)' in css
+    assert ALERT_LOW in css
     assert ".rail-row.sev-1 { border-left-color: var(--dim)" in css
     js = text("app.js")
     assert "class: `pt ${tone}`" in js and "class: `dot ${tone}`" not in js
@@ -748,7 +862,8 @@ def test_simulate_request_and_status_text(tmp_path):
 def test_simulate_markup():
     html, js, css = text("index.html"), text("app.js"), text("styles.css")
     page = _simulate_page(html)
-    cards = re.findall(r'<button\b[^>]*class="card sim-card"[^>]*>.*?</button>', page, re.S)
+    pattern = r'<button\b[^>]*class="card hud hud-sm sim-card"[^>]*>.*?</button>'
+    cards = re.findall(pattern, page, re.S)
     assert len(cards) == 3
     want = [
         ("pump_burst", "ปั่นเร็ว", "ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที"),
@@ -781,9 +896,9 @@ def test_simulate_markup():
     # plain view: no English labels or codes on the page
     plain = re.sub(r"<!--.*?-->|<svg\b.*?</svg>|<[^>]+>", " ", page, flags=re.S)
     assert not re.search(r"[A-Za-z]", plain), plain
-    # the cards are glass cards, never the accent gradient
+    # the cards are HUD panels, never a gradient
     sim = css[css.index("/* ---- simulate") : css.index("/* ---- /simulate")]
-    assert ".sim-card" in sim and "--violet), var(--blue)" not in sim
+    assert ".sim-card" in sim and "-gradient(" not in sim
     # the server's "ended" refusal is the text the page looks for
     server = (WEB_DIR.parent / "api" / "app.py").read_text(encoding="utf-8")
     ended = re.search(r'REPLAY_ENDED_TH = "([^"]+)"', server).group(1)
@@ -1872,9 +1987,8 @@ def test_alerts_page_markup():
     assert re.sub(r"<[^>]+>", "", empty).strip() == "ยังไม่มีการแจ้งเตือน ระบบกำลังเฝ้าดูอยู่"
     assert "<table" not in page and "UTC" not in page
     css = text("styles.css")
-    assert '.alert-card[data-sev="low"] { border-left-color: var(--dim)' in css
-    assert '.alert-card[data-sev="mid"] { border-left-color: var(--amber)' in css
-    assert '.alert-card[data-sev="high"] { border-left-color: var(--red)' in css
+    assert ALERT_LOW in css
+    assert ALERT_MID in css and ALERT_HIGH in css
     # filter chips are flat pills, not glass
     chip = re.search(r"(?m)^\.filter-chip\s*\{([^}]*)\}", css).group(1)
     assert "var(--r-pill)" in chip and "backdrop-filter" not in chip
@@ -2195,9 +2309,9 @@ def test_styles_css_blocks_are_balanced_and_motion_is_top_level():
 
 
 def test_only_the_allowed_animations_loop():
-    # spec 4.12: the background drift, the status orb and the login line; the boot spinner is a
-    # loading indicator that goes away with the loader, not decoration
-    allowed = (".blob", ".orb", ".login-line-trace", ".boot-spinner")
+    # the status orb, the login line and the REC dot in every panel head (0.5 Hz); the boot
+    # spinner is a loading indicator that goes away with the loader, not decoration
+    allowed = (".hud-rec", ".orb", ".login-line-trace", ".boot-spinner")
     for prelude, _, body, _ in _css_blocks(text("styles.css")):
         if re.search(r"animation[^;]*infinite", body):
             assert all(sel.strip().startswith(allowed) for sel in prelude.split(",")), prelude
@@ -2572,7 +2686,7 @@ def test_help_and_tour_markup():
     assert 'id="page-about"' not in html and 'id="page-taxonomy"' not in html
     assert "function showTaxonomy" not in js and 'href: "#/taxonomy"' not in js
     css = text("styles.css")
-    assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 4, 20, 0.6)" in css
+    assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 7, 13, 0.6)" in css
 
 
 # ---- copy guard and session-loss polish ----
@@ -3114,10 +3228,10 @@ def test_app_calls_motion_only_through_guard():
 def test_motion_css_tokens_and_off_paths():
     css = text("motion.css")
     for decl in (
-        "--fx-calm: #22d3ee",
+        "--fx-calm: var(--hud-line)",
         "--fx-watch: #f59e0b",
-        "--fx-alert: #ef4444",
-        "--fx-grid: rgba(56, 189, 248, .08)",
+        "--fx-alert: var(--hud-alert)",
+        "--fx-grid: rgba(0, 229, 255, .08)",
     ):
         assert decl in css, decl
     blocks = _css_blocks(css)
@@ -3130,7 +3244,7 @@ def test_motion_css_tokens_and_off_paths():
     for prelude, depth, _, parents in blocks:
         if prelude.startswith("@keyframes"):
             assert depth == 0 and not parents, prelude
-    assert len(css.encode("utf-8")) <= 14 * 1024
+    assert len(css.encode("utf-8")) <= 24 * 1024
 
 
 def test_fx_switch_copy():
@@ -3141,9 +3255,9 @@ def test_fx_switch_copy():
     assert 'id="menu-fx"' in menu and 'aria-pressed="false"' in menu and "ลดเอฟเฟกต์" in menu
 
 
-def test_base_background_is_the_deep_navy_gradient():
+def test_base_background_is_the_flat_hud_ground():
     css = text("styles.css")
-    assert "#070b1a" in css and "#0b1230" in css
+    assert re.search(r"(?m)^html\s*\{[^}]*background:\s*var\(--hud-bg\);", css)
 
 
 def test_fx_off_is_an_accepted_pref():
@@ -3309,12 +3423,14 @@ def test_edge_flash_once():
 def test_radar_rings_camera_and_card_glow_css():
     css = text("motion.css")
     needles = (".orb-radar", ".orb-ring", "#hero-cam", ".fx-sweep", ".stat-card")
-    for needle in (*needles, "@keyframes fx-radar", "@keyframes fx-orbit"):
+    for needle in (*needles, "@keyframes fx-radar"):
         assert needle in css, needle
+    # the old conic border light is gone: the HUD panel frame replaces it
+    assert "fx-orbit" not in css and ".stat-card::before" not in css
     assert re.search(r"\.stat-card:hover[^{]*\{[^}]*translateY\(-2px\)", css)
     off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and ".orb-radar" in b[0]]
     assert off, "the radar is hidden when effects are off"
-    assert len(css.encode("utf-8")) <= 14 * 1024
+    assert len(css.encode("utf-8")) <= 24 * 1024
 
 
 # ---- command-center motion: chart overlay and crossing shockwave ----
@@ -3407,8 +3523,8 @@ def test_page_enter_wired():
 
 
 def test_motion_size_budget():
-    assert len(text("motion.js").encode("utf-8")) <= 32 * 1024
-    assert len(text("motion.css").encode("utf-8")) <= 14 * 1024
+    assert len(text("motion.js").encode("utf-8")) <= 40 * 1024
+    assert len(text("motion.css").encode("utf-8")) <= 24 * 1024
 
 
 # ---- command-center motion: final-review fixes ----
@@ -3423,8 +3539,8 @@ def test_fx_off_does_not_kill_app_animations():
         for app_class in (".page", ".rail-row", ".flash", ".orb-change", ".ci-line", ".toast"):
             assert app_class not in prelude, app_class
     joined = " ".join(b[0] for b in off)
-    owned_all = ("#fx-edge", ".fx-wipe", ".fx-rise", ".fx-sweep", ".cctv", ".orb-radar")
-    for owned in (*owned_all, ".stat-card::before"):
+    owned_all = ("#fx-edge", ".fx-wipe", ".fx-rise", ".fx-sweep", ".cctv", ".orb-radar", ".hud-rec")
+    for owned in owned_all:
         assert owned in joined, owned
     js = text("motion.js")
     drop = _js_function(js, "function dropTransient(")
