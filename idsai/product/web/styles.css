@@ -58,7 +58,11 @@
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 
-html { -webkit-text-size-adjust: 100%; background: var(--bg); }
+/* the base page: a deep navy field (motion.css draws the control-room grid over it) */
+html {
+  -webkit-text-size-adjust: 100%;
+  background: #070b1a linear-gradient(180deg, #070b1a 0%, #0b1230 100%) fixed;
+}
 body {
   margin: 0;
   min-height: 100vh;
@@ -85,7 +89,6 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
   z-index: -1;
   overflow: hidden;
   pointer-events: none;
-  background: var(--bg);
 }
 .blob {
   position: absolute;

@@ -6,8 +6,11 @@
   <meta name="color-scheme" content="dark">
   <title>Market IDS</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="motion.css">
 </head>
 <body>
+  <canvas id="fx-bg" aria-hidden="true"></canvas>
+  <div id="fx-edge" aria-hidden="true"></div>
   <div class="bg" aria-hidden="true"><span class="blob blob-1"></span><span class="blob blob-2"></span><span class="blob blob-3"></span></div>
 
   <div id="boot-loader" class="boot-loader" role="status">
@@ -46,6 +49,7 @@
         <div class="user-menu">
           <a id="menu-activity" href="#/activity" data-route="activity" hidden>กิจกรรม</a>
           <button id="menu-tour" type="button">ดูทัวร์อีกครั้ง</button>
+          <button id="menu-fx" type="button" aria-pressed="false">ลดเอฟเฟกต์</button>
           <button id="btn-logout" type="button">ออกจากระบบ</button>
         </div>
       </details>
@@ -437,5 +441,6 @@
 
   <script src="vendor/lightweight-charts.standalone.production.js"></script>
   <script src="app.js"></script>
+  <script src="motion.js"></script>
 </body>
 </html>

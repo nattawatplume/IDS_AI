@@ -3024,3 +3024,143 @@ def test_audit_filter_lists_server_actions():
     block = text("app.js").split("const AUDIT_ACTIONS = [", 1)[1].split("];", 1)[0]
     for a in ("signup", "role_change", "user_seed", "user_role"):
         assert f'"{a}"' in block
+
+
+# ---- command-center motion: foundation (motion.js / motion.css, the guard, the off switch) ----
+
+MOTION_API = (
+    "init",
+    "setOff",
+    "mood",
+    "loginEnter",
+    "loginLeave",
+    "alertBurst",
+    "chartAttach",
+    "chartCross",
+    "pageEnter",
+)
+
+
+def _fx_body(js: str) -> tuple[str, str]:
+    """(the source of function fx(...), the rest of app.js)."""
+    start = js.index("function fx(")
+    depth, i = 0, js.index("{", start)
+    for j in range(i, len(js)):
+        depth += {"{": 1, "}": -1}.get(js[j], 0)
+        if depth == 0:
+            return js[start : j + 1], js[:start] + js[j + 1 :]
+    raise AssertionError("function fx is not closed")
+
+
+def _js_braces_balanced(src: str) -> bool:
+    """Braces, brackets and parentheses balance outside strings, comments and regex-free code."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"(?m)^\s*//.*$", "", src)
+    src = JS_STRING.sub('""', src)
+    src = re.sub(r"(?m)\s//\s.*$", "", src)
+    pairs, stack = {")": "(", "]": "[", "}": "{"}, []
+    for ch in src:
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in pairs:
+            if not stack or stack.pop() != pairs[ch]:
+                return False
+    return not stack
+
+
+def test_motion_files_linked():
+    html = text("index.html")
+    assert (WEB_DIR / "motion.css").is_file() and (WEB_DIR / "motion.js").is_file()
+    assert html.index('href="styles.css"') < html.index('href="motion.css"')
+    assert html.index('src="app.js"') < html.index('src="motion.js"')
+
+
+def test_fx_elements_hidden_from_screen_readers():
+    html = text("index.html")
+    body_first = re.search(r"<body>\s*(<[^>]+>)", html).group(1)
+    assert 'id="fx-bg"' in body_first and "<canvas" in body_first  # the first child of body
+    for ident in ("fx-bg", "fx-edge"):
+        tag = re.search(rf'<[^>]*\bid="{ident}"[^>]*>', html)
+        assert tag and 'aria-hidden="true"' in tag.group(0), ident
+
+
+def test_motion_api_defined():
+    js = text("motion.js")
+    for name in MOTION_API:
+        assert re.search(rf"\b{name}\b\s*[(:]", js), name
+    for name in ("addLayer", "removeLayer"):
+        assert f"function {name}(" in js, name
+    for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert api not in js, api
+    assert "://" not in js
+    assert len(js.encode("utf-8")) <= 25_000
+
+
+def test_motion_stubs_are_safe_and_login_leave_calls_done():
+    js = text("motion.js")
+    leave = js[js.index("loginLeave") :]
+    assert "done()" in leave[: leave.index("}")], "the loginLeave stub must call done() at once"
+
+
+def test_app_calls_motion_only_through_guard():
+    js = text("app.js")
+    guard, rest = _fx_body(js)
+    assert "try" in guard and "catch" in guard
+    assert "Motion." not in rest.replace("globalThis.Motion", "")  # the one place is fx()
+    for call in ('fx("init"', 'fx("mood"', 'fx("setOff"'):
+        assert call in js, call
+
+
+def test_motion_css_tokens_and_off_paths():
+    css = text("motion.css")
+    for decl in (
+        "--fx-calm: #22d3ee",
+        "--fx-watch: #f59e0b",
+        "--fx-alert: #ef4444",
+        "--fx-grid: rgba(56, 189, 248, .08)",
+    ):
+        assert decl in css, decl
+    blocks = _css_blocks(css)
+    reduced = [b for b in blocks if "prefers-reduced-motion: reduce" in b[0]]
+    assert reduced and all(depth == 0 for _, depth, _, _ in reduced)
+    assert "#fx-bg" in reduced[0][2] and "display: none" in reduced[0][2]
+    off = [b for b in blocks if ".fx-off" in b[0] and "animation: none" in b[2]]
+    assert off, "no .fx-off rule with animation: none"
+    assert any("#fx-bg" in b[0] or "#fx-bg" in b[2] for b in blocks if ".fx-off" in b[0])
+    for prelude, depth, _, parents in blocks:
+        if prelude.startswith("@keyframes"):
+            assert depth == 0 and not parents, prelude
+    assert len(css.encode("utf-8")) <= 12_000
+
+
+def test_fx_switch_copy():
+    html = text("index.html")
+    assert "ลดเอฟเฟกต์" in html
+    menu = html[html.index('class="user-menu"') :]
+    menu = menu[: menu.index("</div>")]
+    assert 'id="menu-fx"' in menu and 'aria-pressed="false"' in menu and "ลดเอฟเฟกต์" in menu
+
+
+def test_base_background_is_the_deep_navy_gradient():
+    css = text("styles.css")
+    assert "#070b1a" in css and "#0b1230" in css
+
+
+def test_fx_off_is_an_accepted_pref():
+    server = (WEB_DIR.parent / "api" / "app.py").read_text(encoding="utf-8")
+    assert re.search(r"fx_off:\s*StrictBool", server)
+
+
+def test_motion_files_have_balanced_braces():
+    css = text("motion.css")
+    _css_blocks(css)  # asserts balance
+    assert _js_braces_balanced(text("motion.js"))
+
+
+def test_motion_js_is_valid_javascript():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    path = str(WEB_DIR / "motion.js")
+    r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

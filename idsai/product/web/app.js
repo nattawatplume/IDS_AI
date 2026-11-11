@@ -568,6 +568,7 @@ function openHelp(where) {
   if (!helpState.open) {
     helpState.returnTo = document.activeElement || null;
     helpState.open = true;
+    fxApply();
     $("help-backdrop").hidden = false;
     drawer.hidden = false;
     flash(drawer, "enter");
@@ -581,6 +582,7 @@ function openHelp(where) {
 function closeHelp() {
   if (!helpState.open) return;
   helpState.open = false;
+  fxApply();
   $("help-drawer").hidden = true;
   $("help-backdrop").hidden = true;
   restoreFocus(helpState.returnTo);
@@ -635,6 +637,7 @@ function startTour() {
   if (tourState.open) return;
   if (helpState.open) closeHelp();
   tourState.open = true;
+  fxApply();
   tourState.returnTo = document.activeElement || null;
   $("tour").hidden = false;
   showTourStep(0);
@@ -650,6 +653,7 @@ function startTour() {
 function closeTour(seen) {
   if (!tourState.open) return;
   tourState.open = false;
+  fxApply();
   $("tour").hidden = true;
   if (seen) markTourDone();
   restoreFocus(tourState.returnTo);
@@ -690,6 +694,56 @@ const PAGE_ORDER = ["#/home", "#/alerts", "#/simulate", "#/results"];
 function reducedMotion() {
   const mm = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null;
   return !!(mm && mm.call(globalThis, "(prefers-reduced-motion: reduce)").matches);
+}
+
+// ------------------------------------------------------------------ command-center motion (motion.js)
+
+const FX_KEY = "idsai.fx_off";
+
+// the only door to motion.js: it does nothing when that file is missing, and a throw never reaches the page
+function fx(name, ...args) {
+  try {
+    globalThis.Motion?.[name]?.(...args);
+  } catch (e) {
+    /* decoration only: the page works without it */
+  }
+  return undefined;
+}
+
+// the "ลดเอฟเฟกต์" choice: the account's pref when auth is on and it has one, this browser's mirror otherwise
+function fxUserOff() {
+  const pref = authOn() ? loadedPrefs().fx_off : undefined;
+  return typeof pref === "boolean" ? pref : storageGet(FX_KEY) === "1";
+}
+
+// the guided tour and the help drawer keep the screen still; the user's choice comes back afterwards
+function fxOff() {
+  return fxUserOff() || tourState.open || helpState.open;
+}
+
+function fxApply() {
+  fx("setOff", fxOff());
+  try {
+    const sw = $("menu-fx");
+    if (sw) sw.setAttribute("aria-pressed", String(fxUserOff()));
+  } catch (e) {
+    /* the switch is only a view of the choice */
+  }
+}
+
+function setFxOff(value) {
+  const v = !!value;
+  storageSet(FX_KEY, v ? "1" : "0");
+  if (authOn()) {
+    state.me.prefs = { ...(state.me.prefs || {}), fx_off: v };
+    savePrefs({ fx_off: v });
+  }
+  fxApply();
+}
+
+// hero level -> background mood: calm, watch (also while the state is still unknown), alert
+function heroMood(level) {
+  return level === "alert" ? "alert" : level === "normal" ? "calm" : "watch";
 }
 
 // count a number up or down to `to`; snaps when motion is reduced
@@ -1009,6 +1063,7 @@ function renderHero() {
     return;
   }
   state.hero = next;
+  fx("mood", heroMood(next.level));
   $("hero").dataset.level = next.level;
   $("hero-title").textContent = next.title;
   const line = clear($("hero-line"));
@@ -3109,6 +3164,7 @@ function adoptMe(me) {
   if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
   renderUserChip();
   applyRoleGates();
+  fxApply(); // the account's choice may differ from this browser's
 }
 
 // whether sign-in is on: true or false once /api/me answers, null when it could not be reached
@@ -3578,6 +3634,8 @@ async function boot() {
     startTour();
   });
   bindLogin();
+  const fxSwitch = $("menu-fx");
+  if (fxSwitch) fxSwitch.addEventListener("click", () => setFxOff(fxSwitch.getAttribute("aria-pressed") !== "true"));
   bindActivity();
   document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
@@ -3601,6 +3659,8 @@ async function boot() {
 
   loadSignupConfig();
   let authEnabled = await loadMe();
+  fx("init", { off: fxOff() }); // motion.js loads right after this file, so it is ready once the first answer is in
+  fxApply();
   for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {
     // no usable answer: keep only the loader up, say why, and ask again with a growing wait
     $("boot-text").textContent = bootRetryText(state.bootError);
@@ -3687,6 +3747,10 @@ if (typeof document !== "undefined") {
     renderHelpTaxonomy,
     startTour,
     endTour,
+    fx,
+    fxUserOff,
+    setFxOff,
+    heroMood,
     // every Thai UI string table: the copy guard in the tests reads these
     copyTables: () => ({
       SEVERITY_TH,

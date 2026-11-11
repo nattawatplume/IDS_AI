@@ -1,0 +1,72 @@
+/* Market IDS: command-center motion styles. Linked after styles.css. Decoration only: transform, opacity
+   and canvas, never layout. Every fx element is aria-hidden in index.html.
+   The off paths (prefers-reduced-motion, and html.fx-off from the "ลดเอฟเฟกต์" switch, the tour or the
+   help drawer) clear the canvases and stop the CSS animations; the mood colour still shows. */
+
+:root {
+  --fx-calm: #22d3ee;
+  --fx-watch: #f59e0b;
+  --fx-alert: #ef4444;
+  --fx-grid: rgba(56, 189, 248, .08);
+  --fx-now: var(--fx-calm);
+}
+html[data-mood="watch"] { --fx-now: var(--fx-watch); }
+html[data-mood="alert"] { --fx-now: var(--fx-alert); }
+
+/* the static mood: a soft wash from the top edge, so the state colour shows even with effects off */
+html::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(90% 46% at 50% 0%, color-mix(in srgb, var(--fx-now) 11%, transparent), transparent 72%);
+}
+
+/* the control-room canvas sits behind everything; the page background is the html gradient */
+#fx-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* the screen-edge flash (filled in with the alert burst): invisible until it is fired */
+#fx-edge {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: inset 0 0 90px 10px rgba(239, 68, 68, .5);
+}
+
+/* the "ลดเอฟเฟกต์" switch in the account menu: a label and a small track */
+.user-menu #menu-fx {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.user-menu #menu-fx::after {
+  content: "";
+  flex: none;
+  width: 30px;
+  height: 16px;
+  border-radius: 999px;
+  background: radial-gradient(circle at 8px 50%, #eef0ff 0 6px, transparent 6.5px), rgba(255, 255, 255, .18);
+}
+.user-menu #menu-fx[aria-pressed="true"]::after {
+  background: radial-gradient(circle at 22px 50%, #070b1a 0 6px, transparent 6.5px), var(--fx-calm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #fx-bg, #fx-edge { display: none; }
+  *, *::before, *::after { animation: none !important; }
+}
+
+.fx-off *, .fx-off *::before, .fx-off *::after { animation: none !important; }
+.fx-off #fx-bg, .fx-off #fx-edge { display: none; }
