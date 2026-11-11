@@ -910,6 +910,23 @@ body.login-mode #ws-banner { display: none; }
 td.detail { max-width: 360px; font-size: 13px; color: var(--dim); overflow-wrap: anywhere; white-space: normal; }
 td.when { white-space: nowrap; }
 
+/* ------------------------------------------------------------------ sign-up and users */
+.signup-title { margin: 0; font-size: 20px; color: var(--text); }
+.login-card .hint { font-size: 12px; color: var(--dim); }
+.link-btn { min-height: 0; padding: 0; border: 0; background: none; color: #c4b5fd; font-size: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.link-btn:hover:not(:disabled) { background: none; color: var(--text); }
+.user-name { font-weight: 600; }
+.user-sub { display: block; }
+.tag { display: inline-block; margin-left: 8px; padding: 0 8px; border-radius: var(--r-pill); background: var(--chip); color: var(--dim); font-size: 12px; line-height: 20px; white-space: nowrap; }
+#users-table td { vertical-align: middle; }
+#users-table tbody tr.gone { opacity: 1; }
+#users-table tbody tr.gone td:first-child, #users-table tbody tr.gone td:last-child { opacity: 0.5; }
+.switch-wrap { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.switch { position: relative; width: 40px; min-height: 0; height: 22px; padding: 0; border-radius: var(--r-pill); background: var(--chip); }
+.switch-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--dim); transition: transform 0.15s, background-color 0.15s; }
+.switch[aria-checked="true"] { background: var(--ok-bg); border-color: rgba(62, 224, 143, 0.5); }
+.switch[aria-checked="true"] .switch-knob { transform: translateX(18px); background: var(--green); }
+
 /* ------------------------------------------------------------------ narrower than 1360 px: the top bar sheds its extras */
 @media (max-width: 1360px) {
   #clock { display: none; }

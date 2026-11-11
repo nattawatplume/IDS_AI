@@ -348,7 +348,7 @@ def test_shell_markup():
     html = text("index.html")
     links = re.findall(r"<a\b([^>]*)>(.*?)</a>", _nav_block(html), re.S)
     labels = [" ".join(re.sub(r"<[^>]+>", " ", body).split()) for _, body in links]
-    assert tuple(labels) == NAV_TH, labels
+    assert tuple(labels) == (*NAV_TH, "ผู้ใช้"), labels  # the last is admin-only, app.js hides it
     for attrs, _ in links:
         assert "data-route=" in attrs
     assert 'id="theme-toggle"' not in html and "data-theme-choice" not in html
@@ -1008,9 +1008,9 @@ def test_login_and_activity_routes_present():
     assert "จำฉันไว้" in html and "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง" not in html  # the server words the error
 
 
-def test_login_page_has_no_signup():
+def test_login_page_has_no_register_or_reset():
     low = (text("index.html") + text("app.js")).lower()
-    for word in ("สมัคร", "sign up", "signup", "sign-up", "register", "ลืมรหัส"):
+    for word in ("sign up", "register", "ลืมรหัส"):  # sign-up exists now, behind /api/auth/config
         assert word not in low, word
 
 
@@ -2946,3 +2946,75 @@ def test_no_dead_css_classes_left():
         assert not re.search(rf'class="[^"]*{cls}', html), cls
         assert not re.search(rf"[\"' ]{cls}[\"' ]", js), cls
     assert "button.selected" not in css and "@keyframes pulse" not in css
+
+
+# ---- self sign-up and the admin users page ----
+
+
+_VOID = ("input", "br", "img", "path", "circle", "rect", "meta", "link")
+
+
+class _Ids(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.nodes: dict[str, tuple[str, dict]] = {}
+        self.stack: list[str] = []
+        self.inside: dict[str, set[str]] = {}
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if "id" in a:
+            self.nodes[a["id"]] = (tag, a)
+            for parent in self.stack:
+                self.inside.setdefault(parent, set()).add(a["id"])
+        if tag not in _VOID:
+            self.stack.append(a.get("id", ""))
+
+    def handle_endtag(self, tag):
+        if self.stack and tag not in _VOID:
+            self.stack.pop()
+
+
+def _ids() -> _Ids:
+    p = _Ids()
+    p.feed(text("index.html"))
+    return p
+
+
+def test_signup_form_present():
+    p = _ids()
+    tag, attrs = p.nodes["signup-form"]
+    assert tag == "form" and "hidden" in attrs
+    assert {"signup-user", "signup-name", "signup-pass", "signup-pass2"} <= p.inside["signup-form"]
+    html = text("index.html")
+    assert "สมัครสมาชิก" in html and "มีบัญชีแล้ว? เข้าสู่ระบบ" in html
+    assert "signup-open" in p.nodes and "signup-back" in p.nodes
+    assert "hidden" in p.nodes["signup-line"][1]  # the link waits for the server's answer
+
+
+def test_signup_link_gated_by_config():
+    js = text("app.js")
+    assert '"/api/auth/config"' in js and "cfg.signup === true" in js
+    assert '$("signup-line").hidden = !open' in js
+    assert "/api/auth/signup" in js
+    # sign-up and sign-in end in the same boot path
+    assert js.count("await completeSignIn(me)") == 2
+
+
+def test_users_page_admin_only():
+    p = _ids()
+    assert p.nodes["nav-users"][1]["data-route"] == "users" and "hidden" in p.nodes["nav-users"][1]
+    assert "<span>ผู้ใช้</span>" in text("index.html")
+    js = text("app.js")
+    assert '$("nav-users").hidden = !can("admin")' in js
+    assert '"/api/users"' in js and "/api/users/${encodeURIComponent(u.username)}/${path}" in js
+    assert "#/users" in js and 'r.name === "users") && !can("admin")' in js
+
+
+def test_signup_client_checks():
+    js = text("app.js")
+    assert "[a-z0-9_.-]{3,32}" in js
+    assert "SIGNUP_MIN_PASS = 10" in js
+    assert "password !== again" in js and "password === username" in js
+    for hint in ("รหัสผ่านสองช่องไม่ตรงกัน", "รหัสผ่านสั้นไป", "ชื่อผู้ใช้ใช้ได้แค่"):
+        assert hint in js, hint
