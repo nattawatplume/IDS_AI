@@ -106,7 +106,7 @@
     if (edge) edge.classList.remove("is-flash");
     var k;
     var sw = DOC.querySelectorAll(".fx-sweep");
-    for (k = 0; k < sw.length; k += 1) sw[k].classList.remove("fx-sweep");
+    for (k = 0; k < sw.length; k += 1) sw[k].remove();
     var ri = DOC.querySelectorAll(".fx-rise");
     for (k = 0; k < ri.length; k += 1) {
       ri[k].classList.remove("fx-rise");
@@ -456,6 +456,17 @@
     node.classList.add(cls);
   }
 
+  // the sweep is its own aria-hidden element inside the card (never the card's ::after, which a .hud
+  // uses for its fill), and it is removed when the one pass is over
+  function addSweep(card) {
+    var old = card.querySelector(".fx-sweep");
+    if (old) old.remove();
+    var sw = DOC.createElement("span");
+    sw.className = "fx-sweep";
+    sw.setAttribute("aria-hidden", "true");
+    card.appendChild(sw);
+  }
+
   function alertBurst(info) {
     void info;
     var now = G.performance && typeof G.performance.now === "function" ? G.performance.now() : Date.now();
@@ -477,12 +488,12 @@
     }
     // the newest card: the first of the alerts page and the first row of the home rail
     var cards = DOC.querySelectorAll("#alerts-list > .alert-card:first-child, #alert-rail > .rail-row:first-child");
-    for (var i = 0; i < cards.length; i += 1) replay(cards[i], "fx-sweep");
+    for (var i = 0; i < cards.length; i += 1) addSweep(cards[i]);
     if (S.sweepTimer) G.clearTimeout(S.sweepTimer);
     S.sweepTimer = G.setTimeout(function () {
       S.sweepTimer = 0;
       var on = DOC.querySelectorAll(".fx-sweep");
-      for (var j = 0; j < on.length; j += 1) on[j].classList.remove("fx-sweep");
+      for (var j = 0; j < on.length; j += 1) on[j].remove();
     }, SWEEP_MS);
   }
 

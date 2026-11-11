@@ -137,10 +137,14 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .hud-br.tr { right: -4px; top: -4px; border-top-width: 2px; border-right-width: 2px; }
 .hud-br.bl { left: -4px; bottom: -4px; border-bottom-width: 2px; border-left-width: 2px; }
 .hud-br.bb { right: -4px; bottom: -4px; border-bottom-width: 2px; border-right-width: 2px; }
-.hud:hover > .hud-br.tl { transform: translate(-4px, -4px); }
-.hud:hover > .hud-br.tr { transform: translate(4px, -4px); }
-.hud:hover > .hud-br.bl { transform: translate(-4px, 4px); }
-.hud:hover > .hud-br.bb { transform: translate(4px, 4px); }
+.hud:hover > .hud-br.tl,
+.hud:hover > summary > .hud-br.tl { transform: translate(-4px, -4px); }
+.hud:hover > .hud-br.tr,
+.hud:hover > summary > .hud-br.tr { transform: translate(4px, -4px); }
+.hud:hover > .hud-br.bl,
+.hud:hover > summary > .hud-br.bl { transform: translate(-4px, 4px); }
+.hud:hover > .hud-br.bb,
+.hud:hover > summary > .hud-br.bb { transform: translate(4px, 4px); }
 .hud:hover { --ln: rgba(0, 229, 255, 0.6); }
 
 /* the header strip: a mono tag, a blinking REC dot (0.5 Hz) and, on live panels, a clock */
@@ -891,7 +895,7 @@ button.primary.play-btn { padding: 0; }
 .rail-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .rail-title { margin: 0 0 8px; }
 .rail-list { display: grid; gap: 8px; }
-.rail-row { display: grid; gap: 4px; min-width: 0; padding: 12px 16px; background: rgba(0, 229, 255, 0.04); border: 1px solid var(--glass-border); border-left: 3px solid var(--amber); border-radius: 0; color: var(--text); overflow-wrap: anywhere; transition: border-color 0.2s, transform 0.2s ease-out; }
+.rail-row { position: relative; display: grid; gap: 4px; min-width: 0; padding: 12px 16px; background: rgba(0, 229, 255, 0.04); border: 1px solid var(--glass-border); border-left: 3px solid var(--amber); border-radius: 0; color: var(--text); overflow-wrap: anywhere; transition: border-color 0.2s, transform 0.2s ease-out; }
 .rail-row:hover { text-decoration: none; border-color: var(--glass-border-hi); transform: translateY(-2px); }
 .rail-row.sev-1 { border-left-color: var(--dim); }
 .rail-row.sev-3 { border-left-color: var(--red); }

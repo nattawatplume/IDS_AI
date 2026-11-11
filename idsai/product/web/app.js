@@ -3760,6 +3760,7 @@ if (typeof document !== "undefined") {
 } else if (typeof module !== "undefined") {
   // node (tests only): the pure helpers
   module.exports = {
+    hudMark,
     snapshotAlerts,
     matchesInjection,
     eligibleForRun,

@@ -1893,6 +1893,68 @@ def _run_dom(tmp_path, reduced, body, *args):
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr + r.stdout
 
 
+HUD_MARK_BODY = r"""
+FakeNode.prototype.querySelector = function (sel) {
+  const hit = walk(this, (n) => n !== this && (sel[0] === "." ? n.classList.contains(sel.slice(1))
+    : n.tagName === sel.toUpperCase()));
+  return hit[0] || null;
+};
+const brackets = (n) => walk(n, (x) => x.classList.contains("hud-br"));
+const box = document.createElement("div");
+box.className = "hud";
+m.hudMark(box);
+m.hudMark(box); // marking twice never adds more
+assert.strictEqual(brackets(box).length, 4);
+const corners = brackets(box).map((b) => b.className.split(" ")[1]);
+assert.deepStrictEqual(corners, ["tl", "tr", "bl", "bb"]);
+assert.ok(brackets(box).every((b) => b.getAttribute("aria-hidden") === "true"));
+const det = document.createElement("details");
+const sum = document.createElement("summary");
+const inner = document.createElement("div");
+det.appendChild(sum);
+det.appendChild(inner);
+m.hudMark(det);
+m.hudMark(det);
+assert.strictEqual(brackets(sum).length, 4);
+assert.strictEqual(brackets(det).length, 4);
+assert.strictEqual(brackets(inner).length, 0);
+console.log("ok");
+"""
+
+
+def test_hud_mark_is_idempotent_and_details_keep_brackets_in_summary(tmp_path):
+    _run_dom(tmp_path, "false", HUD_MARK_BODY)
+
+
+def test_every_hud_tag_is_hidden_from_screen_readers():
+    html = text("index.html")
+    for m in re.finditer(r'<span class="hud-tag"[^>]*>', html):
+        if 'aria-hidden="true"' in m.group(0):
+            continue
+        before = html[: m.start()]
+        head = before[before.rindex('<div class="hud-head"') :]
+        assert 'aria-hidden="true"' in head[: head.index(">")] and "</div>" not in head, m.group(0)
+
+
+def test_sweep_never_draws_on_the_hud_fill():
+    css, js = text("motion.css"), text("motion.js")
+    # a .hud uses ::before/::after for its frame and fill, so no motion rule may restyle them
+    for prelude, _, _, _ in _css_blocks(css):
+        for sel in prelude.split(","):
+            if "::after" in sel or "::before" in sel:
+                assert "hud" not in sel, sel
+    sweep = re.search(r"(?m)^\.fx-sweep\s*\{([^}]*)\}", css).group(1)
+    # its own element, not the card
+    assert "position: absolute" in sweep and "overflow: hidden" in sweep
+    hud = re.search(r"(?m)^\.hud\s*\{([^}]*)\}", text("styles.css")).group(1)
+    assert "overflow" not in hud
+    fn = _js_function(js, "function addSweep(card)")
+    assert "createElement" in fn and "aria-hidden" in fn
+    assert 'classList.add("fx-sweep")' not in js and 'replay(cards[i], "fx-sweep")' not in js
+    # the hover rule reaches brackets inside a <details> summary too
+    assert ".hud:hover > summary > .hud-br.tl" in text("styles.css")
+
+
 def test_filter_alerts(tmp_path):
     _run_dom(tmp_path, "false", FILTER_BODY)
 

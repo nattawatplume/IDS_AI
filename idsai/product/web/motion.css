@@ -196,7 +196,7 @@ html[data-mood="alert"] #hero-cam .cam-beam { opacity: .22; }
 html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end infinite; }
 
 /* the newest alert card: one red light sweep, 1.2 s */
-.fx-sweep { position: relative; overflow: hidden; }
+.fx-sweep { position: absolute; inset: 1px; z-index: 1; overflow: hidden; clip-path: var(--cut); pointer-events: none; }
 .fx-sweep::after {
   content: "";
   position: absolute;
