@@ -19,8 +19,10 @@ calibrated on other normal days (`idsai.eval.experiments.fit_and_calibrate`).
 import argparse
 import json
 import math
+import os
 import re
 import sys
+import time
 from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -31,6 +33,7 @@ import numpy as np
 import polars as pl
 
 from idsai.config import Settings, config_hash, load_settings
+from idsai.data.accounts import build_backend
 
 if TYPE_CHECKING:  # the store pulls in DuckDB: imported only where a command needs it
     from idsai.data.replay import Replayer
@@ -105,6 +108,34 @@ def _app_store(cfg: Settings, db: Path | None = None) -> "Store":
     from idsai.data.store import Store
 
     return Store(cfg.paths.data_dir, db if db is not None else cfg.paths.app_db)
+
+
+ATTACH_TRIES = 3  # Neon may be waking from suspend: retry before giving up
+ATTACH_WAIT_S = 5.0
+
+
+def attach_accounts_from_env(
+    store: "Store", backend_factory: Callable[[str], Any] | None = None
+) -> None:
+    """With DATABASE_URL set, make that Postgres the source of truth for accounts.
+
+    Retries; the final error never carries the URL or the underlying exception text.
+    """
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return
+    factory = backend_factory or build_backend
+    for attempt in range(ATTACH_TRIES):
+        try:
+            backend = factory(url)
+            if backend is None:
+                return
+            store.attach_accounts(backend)
+            return
+        except Exception:  # noqa: BLE001 - psycopg/ImportError text may contain the URL
+            if attempt < ATTACH_TRIES - 1:
+                time.sleep(ATTACH_WAIT_S)
+    raise CliError("เชื่อมต่อฐานข้อมูลบัญชีไม่ได้ (DATABASE_URL)")
 
 
 # ------------------------------------------------------------------ downloads
@@ -1038,6 +1069,7 @@ def _cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
 
     act = args.user_cmd
     with _app_store(cfg) as store:
+        attach_accounts_from_env(store)
 
         def audit(action: str, target: str, detail: dict | None = None) -> None:
             store.add_audit(_now_us(), None, "cli", action, target, detail)
@@ -1055,8 +1087,6 @@ def _cmd_user(args: argparse.Namespace, cfg: Settings) -> int:
                 )
             return 0
         if act == "seed-env":
-            import os
-
             text = os.environ.get("IDSAI_USERS", "")
             if not text.strip():
                 raise CliError("ไม่พบตัวแปร IDSAI_USERS (หรือว่างเปล่า)")
@@ -1140,6 +1170,7 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     host, port = resolve_bind(args, cfg)
     use_auth = auth_enabled(args, cfg)
     with _app_store(cfg) as store:
+        attach_accounts_from_env(store)
         check_serve_auth(host, use_auth, store)
         if args.loop and args.mode == "live":
             raise CliError("--loop ใช้ได้กับโหมด replay เท่านั้น (ไม่ใช้กับ --mode live)")
