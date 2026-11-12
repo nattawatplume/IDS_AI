@@ -109,6 +109,8 @@
     }
     var wp = DOC.querySelectorAll(".fx-wipe");
     for (k = 0; k < wp.length; k += 1) if (wp[k].parentNode) wp[k].parentNode.removeChild(wp[k]);
+    var lp = S.login; // the sign-in scene rests: no lock, no glitch
+    if (lp) loginRest(lp);
   }
 
   function apply(off) {
@@ -354,117 +356,170 @@
     }
   }
 
-  // ---------------------------------------------------------------- login: the CCTV scene
+  // ---------------------------------------------------------------- login: the corner camera, its beam and the lock-on
 
-  var PAN_MS = 3600; // one sweep; there and back is two (the CSS animation cctv-pan, +-18 degrees, alternate)
-  var PAN_DEG = 18;
-  var HIT_DEG = 2; // the beam is on the spike when it is this close, in degrees
   var LEAVE_MS = 620; // the dashboard starts loading here; the fallback below never lets it wait longer
+  var BEAM_HALF = 9; // degrees: half the opening of the red cone
+  var SWEEP_MS = 1500; // the sweep is a sine of t / SWEEP_MS
+  var LOCK_MS = 2000; // the lock holds this long after the beam leaves the spike
+  var LOCK_GLITCH_GAP_MS = 2000; // the brand glitches once per lock: never faster than the alert burst
+  var CAM_PIVOT_X = 110; // the head turns about this point of the camera svg (drawn 1:1 at the page's top-left)
+  var CAM_PIVOT_Y = 70;
+  var CAM_LENS_X = 300;
+  var CAM_LENS_Y = 71;
+  var CAM_MIN_DEG = 6; // the sweep runs from here to just past the spike, so it always crosses the spike
+  var CAM_HEAD_OFFSET = 6; // the head sits this far behind the beam angle (the lens is drawn high on the head)
 
-  function num(el, name) {
-    return Number(el.getAttribute(name)) || 0;
+  // the spike's place on screen is read on enter, on resize or scroll and once the entrance has settled, never per frame
+  function measure(L) {
+    var cam = L.cam.getBoundingClientRect();
+    var box = L.lock.getBoundingClientRect();
+    L.dirty = false;
+    if (!cam.width || !box.width) {
+      L.geo = false; // narrow screen: camera and beam are hidden
+      return;
+    }
+    L.geo = true;
+    L.bx = box.left + box.width / 2;
+    L.by = box.top + box.height / 2;
+    var spike = (Math.atan2(L.by - CAM_LENS_Y, L.bx - CAM_LENS_X) * 180) / Math.PI;
+    L.aMax = Math.max(spike + 14, 32);
   }
 
-  // the angles are fixed by the artwork, so they are read once on enter and again on resize, never per frame
-  function aim(L) {
-    var wrap = L.root.querySelector("#cctv-beam-wrap");
-    var target = L.root.querySelector("#cctv-target");
-    if (!wrap || !target) return;
-    var x = num(wrap, "data-x");
-    var y = num(wrap, "data-y");
-    L.base = num(wrap, "data-a");
-    L.goal = (Math.atan2(num(target, "cy") - y, num(target, "cx") - x) * 180) / Math.PI;
+  // back to the resting scene: no lock, no glitch
+  function loginRest(L) {
+    L.page.classList.remove("is-locked", "is-hit");
+    if (L.brand) L.brand.classList.remove("is-glitch");
+    if (L.status && L.status.textContent !== "NORMAL") L.status.textContent = "NORMAL";
+    L.until = 0;
+    L.was = false;
+  }
+
+  function loginStop(L) {
+    if (L.on) removeLayer(loginDraw);
+    L.on = false;
+  }
+
+  function loginStart(L) {
+    if (L.on || L.leaving || L.page.hidden || DOC.hidden) return;
+    measure(L);
+    if (!L.geo) return;
+    L.on = true;
+    L.t0 = -1;
+    addLayer(loginDraw); // it runs once the loop does (after init, and not while effects are off)
   }
 
   function onLoginResize() {
-    if (S.login) aim(S.login);
-  }
-
-  // the pan angle in degrees, from the CSS animation's own clock (no layout read); null before it runs
-  function panAngle(L, t) {
-    var a = L.anim;
-    if (!a && t >= L.retry) {
-      L.retry = t + 600;
-      try {
-        var list = typeof L.pan.getAnimations === "function" ? L.pan.getAnimations() : [];
-        a = L.anim = list.length ? list[0] : null;
-      } catch (e) {
-        a = L.anim = null;
-      }
-    }
-    var ms = a && a.currentTime != null ? Number(a.currentTime) : NaN;
-    if (!(ms >= 0)) {
-      L.anim = null; // cancelled (effects went off and back on): look it up again
-      return null;
-    }
-    var n = Math.floor(ms / PAN_MS);
-    var p = (ms - n * PAN_MS) / PAN_MS;
-    if (n % 2 === 1) p = 1 - p;
-    L.cycle = Math.floor(n / 2);
-    return -PAN_DEG + 2 * PAN_DEG * ((1 - Math.cos(Math.PI * p)) / 2);
-  }
-
-  function pulse(el, frames, opts) {
-    if (el && typeof el.animate === "function") el.animate(frames, opts);
-  }
-
-  // the beam crosses the spike: it glows, a ring spreads from it and the tag shows for 1.5 s
-  function beamHit(L) {
-    if (L.spike) L.spike.classList.add("is-hit");
-    if (L.hitTimer) G.clearTimeout(L.hitTimer);
-    L.hitTimer = G.setTimeout(function () {
-      L.hitTimer = 0;
-      if (L.spike) L.spike.classList.remove("is-hit");
-    }, 1500);
-    for (var i = 0; i < L.rings.length; i += 1) {
-      pulse(L.rings[i], [{ transform: "scale(.35)", opacity: 0.95 }, { transform: "scale(3.4)", opacity: 0 }], { duration: 950, delay: i * 200, easing: "ease-out" });
-    }
-    pulse(L.tag, [{ opacity: 0 }, { opacity: 1, offset: 0.14 }, { opacity: 1, offset: 0.86 }, { opacity: 0 }], { duration: 1500 });
+    var L = S.login;
+    if (!L) return;
+    L.dirty = true;
+    if (!L.on) loginStart(L); // the window grew past 900 px: the camera comes back
   }
 
   function loginDraw(ctx, t) {
     var L = S.login;
-    if (!L || L.leaving || !L.pan || L.page.hidden) return;
-    var deg = panAngle(L, t);
-    if (deg === null) return;
-    if (Math.abs(L.base + deg - L.goal) < HIT_DEG && L.cycle !== L.hitCycle) {
-      L.hitCycle = L.cycle; // at most one hit per pan cycle
-      beamHit(L);
+    if (!L || !L.on) return;
+    if (L.page.hidden || DOC.hidden || L.leaving) {
+      loginStop(L); // routed away (or the sign-in is leaving): the layer ends here
+      loginRest(L);
+      return;
+    }
+    if (L.dirty) measure(L);
+    if (!L.geo) {
+      loginStop(L);
+      loginRest(L);
+      return;
+    }
+    if (L.t0 < 0) L.t0 = t;
+    var a = CAM_MIN_DEG + (L.aMax - CAM_MIN_DEG) * (0.5 + 0.5 * Math.sin((t - L.t0) / SWEEP_MS));
+    var r = ((a - CAM_HEAD_OFFSET) * Math.PI) / 180;
+    L.head.setAttribute("transform", "rotate(" + (a - CAM_HEAD_OFFSET).toFixed(2) + " " + CAM_PIVOT_X + " " + CAM_PIVOT_Y + ")");
+    var dx = CAM_LENS_X - CAM_PIVOT_X;
+    var dy = CAM_LENS_Y - CAM_PIVOT_Y;
+    var lx = CAM_PIVOT_X + dx * Math.cos(r) - dy * Math.sin(r);
+    var ly = CAM_PIVOT_Y + dx * Math.sin(r) + dy * Math.cos(r);
+    L.beam.style.transform = "translate(" + lx.toFixed(1) + "px," + ly.toFixed(1) + "px)";
+    L.cone.style.transform = "rotate(" + a.toFixed(2) + "deg)";
+    L.e1.style.transform = "rotate(" + (a - BEAM_HALF).toFixed(2) + "deg)";
+    L.e2.style.transform = "rotate(" + (a + BEAM_HALF).toFixed(2) + "deg)";
+    var ang = (Math.atan2(L.by - ly, L.bx - lx) * 180) / Math.PI;
+    var hit = Math.abs(ang - a) < BEAM_HALF - 2;
+    if (hit) L.until = t + LOCK_MS;
+    var lock = t < L.until;
+    if (hit !== L.hit) {
+      L.hit = hit;
+      L.page.classList.toggle("is-hit", hit);
+    }
+    if (lock !== L.was) {
+      L.was = lock;
+      L.page.classList.toggle("is-locked", lock);
+      L.status.textContent = lock ? "ANOMALY" : "NORMAL";
+      if (lock && L.brand && t - L.glitchAt >= LOCK_GLITCH_GAP_MS) {
+        L.glitchAt = t;
+        replay(L.brand, "is-glitch"); // one glitch per lock
+      }
+    }
+    var sec = Math.floor(t / 1000);
+    if (sec !== L.sec) {
+      L.sec = sec;
+      try {
+        L.clock.textContent = new Date().toLocaleTimeString("th-TH", { hour12: false });
+      } catch (e) {
+        /* the clock is decoration */
+      }
     }
   }
 
   function loginEnter() {
-    var root = DOC.getElementById("cctv");
-    if (!root) return;
+    var page = DOC.getElementById("page-login");
+    var cam = DOC.getElementById("login-cam");
+    var head = DOC.getElementById("login-head");
+    var beam = DOC.getElementById("login-beam");
+    var lock = DOC.getElementById("login-lock");
+    if (!page || !cam || !head || !beam || !lock) return;
     var L = S.login;
-    if (!L || L.root !== root) {
+    if (!L || L.page !== page) {
       L = S.login = {
-        root: root,
-        page: DOC.getElementById("page-login") || root,
-        pan: root.querySelector(".cctv-pan"),
-        spike: DOC.getElementById("cctv-spike"),
-        tag: root.querySelector("#cctv-tag"),
-        rings: root.querySelectorAll(".cctv-ring"),
-        base: 0,
-        goal: 0,
-        anim: undefined,
-        retry: 0,
-        cycle: 0,
-        hitCycle: -1,
-        hitTimer: 0,
+        page: page,
+        cam: cam,
+        head: head,
+        beam: beam,
+        cone: beam.querySelector(".cone"),
+        e1: beam.querySelector(".e1"),
+        e2: beam.querySelector(".e2"),
+        lock: lock,
+        brand: DOC.getElementById("login-brand"),
+        status: DOC.getElementById("login-status"),
+        clock: DOC.getElementById("login-clock"),
+        geo: false,
+        dirty: true,
+        bx: 0,
+        by: 0,
+        aMax: 32,
+        t0: -1,
+        until: 0,
+        was: false,
+        hit: false,
+        glitchAt: -1e9,
+        sec: -1,
         leaving: false,
         on: false,
       };
+      if (!L.cone || !L.e1 || !L.e2 || !L.status || !L.clock) {
+        S.login = null;
+        return;
+      }
       G.addEventListener("resize", onLoginResize);
+      G.addEventListener("scroll", onLoginResize, { passive: true });
     }
     L.leaving = false;
-    L.hitCycle = -1;
-    L.anim = undefined;
-    aim(L);
-    if (!L.on) {
-      L.on = true;
-      addLayer(loginDraw); // it runs once the loop does (after init, and not while effects are off)
-    }
+    loginRest(L);
+    L.hit = false;
+    L.dirty = true;
+    loginStart(L);
+    G.setTimeout(function () {
+      L.dirty = true; // the entrance has settled: read the spike's place again
+    }, 1100);
   }
 
   // the "ยืนยันตัวตนแล้ว" overlay, built from nodes (never from markup strings)
@@ -509,8 +564,7 @@
       G.setTimeout(fin, LEAVE_MS + 80); // the guarantee: well inside 900 ms whatever happens next
       if (L) {
         L.leaving = true;
-        if (L.on) removeLayer(loginDraw);
-        L.on = false;
+        loginStop(L);
       }
       var v = verifyOverlay();
       if (typeof v.ov.animate !== "function") {
