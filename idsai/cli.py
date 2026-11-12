@@ -62,6 +62,7 @@ LIVE_CAL_DAYS = 2
 LIVE_STALE_S = 17.5 * 3600  # older pre-roll data leaves the baseline under 6 h of samples
 LIVE_PUBLISHED_LOOKBACK = 5
 LIVE_PREROLL_H = 12  # hours of archive to warm up on (the 512 MB host cannot hold 24 h)
+LIVE_PREROLL_CHUNK_S = 900  # archive read per step: 15 min of every symbol (BTC hours are large)
 LIVE_CHECK_TIMEOUT_S = 20.0
 RESEARCH_CANDIDATE_FACTOR = 2  # normal-day candidates downloaded per day make_split samples
 RESEARCH_CANDIDATE_SPACING = 7  # days between two downloaded candidates of one symbol-period
@@ -997,7 +998,7 @@ def live_preroll_source(
     start = max(now_us - DAY_US, end - LIVE_PREROLL_H * 3600 * S_US)
     if start >= end:
         return None
-    return chunked_archive(store.read_trades, symbols, start, end), end
+    return chunked_archive(store.read_trades, symbols, start, end, LIVE_PREROLL_CHUNK_S), end
 
 
 def cmd_live_prep(args: argparse.Namespace, cfg: Settings) -> int:

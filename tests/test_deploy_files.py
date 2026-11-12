@@ -243,7 +243,7 @@ def test_readme_hosting_section():
         "1–3 นาที",
         "5–20 นาที",
         "ใช้ร่วมกัน",
-        "SOL, DOGE และ PEPE",
+        "BTC, SOL, DOGE และ PEPE",
         "512 MB",
         "10–20 นาที",
         "30 นาที",

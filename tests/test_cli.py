@@ -117,7 +117,7 @@ def test_usage_errors_exit_1(capsys):
 
 
 def test_live_budget_is_per_symbol_day():
-    assert cli.live_budget_per_symbol_day(load_settings()) == pytest.approx(2.0 * 24 / 3)
+    assert cli.live_budget_per_symbol_day(load_settings()) == pytest.approx(2.0 * 24 / 4)
 
 
 # ------------------------------------------------------------------ train
@@ -597,7 +597,7 @@ def test_train_live_uses_the_live_budget_and_dir_and_warns_on_stale_data(
     monkeypatch.setattr(cli, "train_and_save", fake_train_and_save)
     monkeypatch.setattr(cli, "_today", lambda: date(2025, 3, 6))  # newest day is yesterday
     assert cli.main(["--config", str(cfg), "train", "--profile", "live"]) == 0
-    assert seen["budget"] == pytest.approx(16.0) and seen["profile"] == "live"
+    assert seen["budget"] == pytest.approx(12.0) and seen["profile"] == "live"
     assert seen["out"] == s.paths.models_dir / "live"
     assert len(seen["train"]) == 2 and len(seen["cal"]) == 2
     assert "เก่ากว่า" not in capsys.readouterr().err
@@ -704,9 +704,10 @@ def run_events(source) -> list:
     return asyncio.run(main())
 
 
-def test_default_live_universe_is_three_pump_prone_coins():
+def test_default_live_universe_is_btc_and_three_pump_prone_coins():
     s = load_settings()
-    assert s.live.symbols == ["SOLUSDT", "DOGEUSDT", "PEPEUSDT"] and s.live.universe_size == 3
+    assert s.live.symbols == ["BTCUSDT", "SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
+    assert s.live.universe_size == 4
 
 
 def test_live_prep_ingest_takes_the_two_latest_published_days(tmp_path, monkeypatch):

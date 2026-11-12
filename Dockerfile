@@ -17,7 +17,7 @@ RUN uv sync --frozen --no-dev
 ENV PATH=/home/user/app/.venv/bin:$PATH
 
 # Sapienza labels only (hu_pd_logs.tsv is never in the image), then train the demo bundle
-# and the live bundle (SOL, DOGE, PEPE; the last published days). A failed live step does not
+# and the live bundle (BTC, SOL, DOGE, PEPE; the last published days). A failed live step does not
 # fail the build: with no models/live/bundle.json, start.sh falls back to replay.
 RUN idsai labels && idsai demo-pack && mkdir -p models \
     && { { idsai download --split live && idsai train --profile live; } \
