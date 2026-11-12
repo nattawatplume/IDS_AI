@@ -396,6 +396,7 @@
       var root = DOC.documentElement;
       if (isOff()) {
         settleAll();
+        typeEnd();
         if (revealAnim) revealAnim.cancel(); // effects off: the chart shows at once
         tiltReset();
         glitchEnd();
@@ -536,6 +537,69 @@
     revealAnim = anim;
   }
 
+  // ---------------------------------------------------------------- login tagline, typed
+
+  var TYPE_STEP_MS = 38;
+  var typeTimer = 0;
+  var typeFull = null; // the spans' real text, kept while typing
+
+  function typeEnd() {
+    var tag = DOC.getElementById("login-tagline");
+    if (typeTimer) {
+      G.clearInterval(typeTimer);
+      typeTimer = 0;
+    }
+    if (!tag || !typeFull) return;
+    var spans = tag.querySelectorAll("span");
+    for (var i = 0; i < spans.length && i < typeFull.length; i++) spans[i].textContent = typeFull[i];
+    tag.classList.remove("is-typing");
+    tag.removeAttribute("aria-label");
+    tag.style.minHeight = "";
+    typeFull = null;
+  }
+
+  // the words never change: the same text appears one letter at a time, and anything that stops it shows it all
+  function typeTagline() {
+    var tag = DOC.getElementById("login-tagline");
+    var page = DOC.getElementById("page-login");
+    typeEnd();
+    if (!tag || !page || page.hidden || isOff()) return;
+    var spans = tag.querySelectorAll("span");
+    if (!spans.length) return;
+    typeFull = [];
+    for (var i = 0; i < spans.length; i++) typeFull.push(spans[i].textContent);
+    tag.style.minHeight = tag.offsetHeight + "px"; // the line count does not jump while it types
+    tag.setAttribute("aria-label", typeFull.join(" "));
+    tag.classList.add("is-typing");
+    for (var j = 0; j < spans.length; j++) spans[j].textContent = "";
+    var si = 0;
+    var ci = 0;
+    typeTimer = G.setInterval(function () {
+      try {
+        if (isOff() || page.hidden) return typeEnd();
+        ci++;
+        spans[si].textContent = typeFull[si].slice(0, ci);
+        if (ci >= typeFull[si].length) {
+          si++;
+          ci = 0;
+          if (si >= spans.length) typeEnd();
+        }
+      } catch (e) {
+        typeEnd();
+      }
+    }, TYPE_STEP_MS);
+  }
+
+  function typeInit() {
+    var page = DOC.getElementById("page-login");
+    if (!page || typeof G.MutationObserver !== "function") return;
+    new G.MutationObserver(function () {
+      if (page.hidden) typeEnd();
+      else if (!typeTimer && !typeFull) typeTagline();
+    }).observe(page, { attributes: true, attributeFilter: ["hidden"] });
+    if (!page.hidden) typeTagline();
+  }
+
   // ---------------------------------------------------------------- public
 
   M.chartReveal = function () {
@@ -564,6 +628,7 @@
     glintInit();
     wiresInit();
     plexInit();
+    typeInit();
     if (typeof G.MutationObserver === "function") {
       new G.MutationObserver(onRoot).observe(DOC.documentElement, { attributes: true, attributeFilter: ["class", "data-mood"] });
     }

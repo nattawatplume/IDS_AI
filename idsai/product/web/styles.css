@@ -1122,6 +1122,12 @@ td.when { white-space: nowrap; }
   #page-login:not([hidden]) { grid-template-columns: minmax(0, 1fr); align-content: start; gap: 24px; min-height: 0; padding: 32px 4px 0; }
   .login-tagline { margin-top: 12px; font-size: 18px; }
   .login-line { display: none; }
+  /* the form comes first: the brand stays on top, the tagline drops below the forms */
+  .login-hero { display: contents; }
+  .login-brand { order: -1; }
+  .login-mark { width: 32px; height: 32px; }
+  .login-name { font-size: 22px; }
+  .login-tagline { order: 2; }
   .login-card { --px: 24px; --py: 24px; }
   /* results */
   .result-wide { --px: 16px; --py: 16px; }

@@ -1442,7 +1442,7 @@ def test_login_markup():
     assert 'class="login-hero"' in page and "login-card" in page
     assert page.index('class="login-hero"') < page.index('id="login-form"')
     hero = page[page.index('class="login-hero"') : page.index('id="login-form"')]
-    tagline = re.search(r'<p class="login-tagline">(.*?)</p>', hero, re.S)
+    tagline = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', hero, re.S)
     assert tagline and " ".join(re.sub(r"<[^>]+>", "", tagline.group(1)).split()) == (
         "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
     )
@@ -3930,3 +3930,44 @@ def test_chart_draw_in():
     load = _js_function(app, "async function loadSeriesInner(")
     assert 'fx("chartReveal")' in load
     assert 'fx("chartReveal")' not in _js_function(app, "function plot(")
+
+
+# ---- HUD redesign, task 5: login page ----
+
+
+def test_login_hud():
+    html, css, mcss = text("index.html"), text("styles.css"), text("motion.css")
+    start = html.index('<section id="page-login"')
+    page = html[start : html.index("</section>", start)]
+    assert 'data-tag="AUTH · SECURE CHANNEL"' in page
+    assert re.search(r'<form id="login-form" class="[^"]*\bhud\b', page)
+    assert re.search(r'<form id="signup-form" class="[^"]*\bhud\b', page)
+    for ident in (
+        "login-user", "login-pass", "login-remember", "login-submit", "login-error",
+        "signup-form", "signup-user", "signup-name", "signup-pass", "signup-pass2", "signup-error",
+        "signup-line", "signup-open", "signup-back", "cctv-beam", "cctv-rec", "cctv-tag",
+    ):
+        assert f'id="{ident}"' in page, ident
+    assert "-gradient" not in page.lower()
+    assert "-gradient(" not in mcss.replace("conic-gradient(from 0deg, transparent 0 66%", "")
+    assert "-gradient(" not in css
+    assert re.search(r'<svg class="login-mark"[^>]*aria-hidden="true"', page)  # the eye logo
+    assert "login-iris" in page and ".login-iris" in mcss
+    assert "ตรวจพบ" in page
+    assert re.search(r"\.cctv-beam-fill\s*\{[^}]*fill: var\(--fx-alert\)", mcss)
+    # phone: the form comes before the tagline, and the decoration is gone
+    assert ".login-hero { display: contents; }" in css
+
+
+def test_login_typed_tagline():
+    html, hud, mcss = text("index.html"), text("hud.js"), text("motion.css")
+    tag = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', html, re.S)
+    assert tag
+    assert "กล้องวงจรปิดของตลาดคริปโต" in tag.group(1)
+    assert "เตือนเมื่อการซื้อขายผิดปกติทางสถิติ" in tag.group(1)
+    # the markup holds the full text (the fallback); hud.js types it, and off shows it all
+    assert "function typeTagline(" in hud and "function typeEnd(" in hud
+    assert "innerHTML" not in hud
+    assert "if (isOff()) {\n        settleAll();\n        typeEnd();" in hud
+    assert "typeEnd" in _js_function(hud, "function typeTagline(")
+    assert ".fx-off .login-tagline.is-typing::after" in mcss

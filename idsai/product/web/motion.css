@@ -99,7 +99,7 @@ body::after {
    help drawer) keep their behaviour, so turning effects back on replays nothing */
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .fx-wipe, .fx-off .fx-rise, .fx-off .fx-sweep, .fx-off .fx-sweep::after,
 .fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
-.fx-off .login-card button.primary::after, .fx-off .login-line-trace,
+.fx-off .login-card button.primary::after, .fx-off .login-line-trace, .fx-off .login-iris, .fx-off .login-eye-ring, .fx-off .login-tagline.is-typing::after,
 .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led,
 .fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind,
 .fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch { animation: none !important; }
@@ -117,7 +117,16 @@ body::after {
 .cctv-stage .login-line { position: absolute; left: 0; bottom: 0; width: 100%; max-width: none; margin: 0; }
 .cctv { position: absolute; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
 .cctv-pan { transform-box: view-box; transform-origin: 0 0; animation: cctv-pan 3.6s cubic-bezier(.37, 0, .63, 1) infinite alternate; }
-.cctv-beam-a { stop-color: var(--fx-alert); }
+.cctv-beam-fill { fill: var(--fx-alert); fill-opacity: .16; }
+.cctv-part { fill: var(--hud-panel); stroke: rgba(0, 229, 255, .55); stroke-width: 1; }
+.cctv-lens { fill: var(--hud-bg); stroke: var(--fx-alert); stroke-width: 1; }
+.cctv-vent { fill: none; stroke: rgba(0, 229, 255, .3); stroke-linecap: round; }
+.login-mark { color: var(--hud-line); }
+.login-iris { transform-box: view-box; transform-origin: 22px 22px; animation: login-look 5s ease-in-out infinite; }
+.login-eye-ring { transform-box: view-box; transform-origin: 22px 22px; animation: login-spin 14s linear infinite; }
+.login-tagline.is-typing::after { content: ""; display: inline-block; width: .55em; height: 1em; margin-left: 4px; vertical-align: -.12em; background: var(--hud-line); animation: cctv-blink 1s step-end infinite; }
+@keyframes login-look { 0%, 100% { transform: translate(0, 0); } 30% { transform: translate(-3px, 0); } 65% { transform: translate(3px, 1px); } }
+@keyframes login-spin { to { transform: rotate(360deg); } }
 .cctv-beam { animation: cctv-flicker 2.6s ease-in-out infinite alternate; }
 .cctv-lens-dot, .cctv-rec, .cctv-blink { fill: var(--fx-alert); }
 .cctv-lens-dot { filter: drop-shadow(0 0 3px var(--fx-alert)); }
