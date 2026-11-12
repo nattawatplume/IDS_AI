@@ -3874,7 +3874,7 @@ clock += 5000; n = mkNode("0"); M.scramble(n, "7777"); n.textContent = "-"; time
 // a new scramble mid-job ends on the new text
 clock += 5000; n = mkNode("0"); M.scramble(n, "8888"); frames(3); clock += 10; M.scramble(n, "9999"); frames(30); timers.forEach(f => f()); out.replaced = n.textContent;
 console.log(JSON.stringify(out));
-"""
+"""  # noqa: E501
     script = tmp_path / "h.js"
     script.write_text(harness, encoding="utf-8")
     r = subprocess.run([node, str(script), str(WEB_DIR / "hud.js")], capture_output=True, text=True, cwd=tmp_path)
