@@ -17,8 +17,12 @@ RUN uv sync --frozen --no-dev
 ENV PATH=/home/user/app/.venv/bin:$PATH
 
 # Sapienza labels only (hu_pd_logs.tsv is never in the image), then train the demo bundle
-# and the live bundle (SOL, DOGE, PEPE; the last published days).
-RUN idsai labels && idsai demo-pack && idsai download --split live && idsai train --profile live && python deploy/check_no_hu.py data
+# and the live bundle (SOL, DOGE, PEPE; the last published days). A failed live step does not
+# fail the build: with no models/live/bundle.json, start.sh falls back to replay.
+RUN idsai labels && idsai demo-pack && mkdir -p models \
+    && { { idsai download --split live && idsai train --profile live; } \
+         || echo "คำเตือน: สร้างโมเดล live ไม่สำเร็จ เว็บจะเปิดโหมด replay แทน" >&2; } \
+    && python deploy/check_no_hu.py data
 
 # Stage 2: runtime without torch.
 FROM python:3.13-slim AS runtime

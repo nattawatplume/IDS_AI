@@ -145,6 +145,9 @@ def test_dockerfile_two_stages():
     assert build.index("idsai demo-pack") < build.index("idsai download --split live")
     assert build.index("idsai download --split live") < build.index("idsai train --profile live")
     assert "COPY --from=build --chown=user /home/user/app/models" in runtime_of(text)
+    # a failed live build step falls back to replay instead of failing the image
+    assert "mkdir -p models" in build
+    assert "|| echo" in build[build.index("idsai train --profile live") :]
     assert "--no-group train" not in build
     assert "--no-group train" in runtime
     assert "COPY --from=build --chown=user /home/user/app/data" in runtime
