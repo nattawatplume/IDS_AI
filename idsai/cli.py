@@ -17,6 +17,7 @@ calibrated on other normal days (`idsai.eval.experiments.fit_and_calibrate`).
 """
 
 import argparse
+import asyncio
 import json
 import math
 import os
@@ -60,6 +61,8 @@ ALIGN_BINS_S = (-10_800, -3600, -600, -120, 120, 600, 3600, 10_800)
 LIVE_CAL_DAYS = 2
 LIVE_STALE_S = 17.5 * 3600  # older pre-roll data leaves the baseline under 6 h of samples
 LIVE_PUBLISHED_LOOKBACK = 5
+LIVE_PREROLL_H = 12  # hours of archive to warm up on (the 512 MB host cannot hold 24 h)
+LIVE_CHECK_TIMEOUT_S = 20.0
 RESEARCH_CANDIDATE_FACTOR = 2  # normal-day candidates downloaded per day make_split samples
 RESEARCH_CANDIDATE_SPACING = 7  # days between two downloaded candidates of one symbol-period
 # = idsai.eval.experiments.EXPERIMENTS (a test checks it); kept here so `--help` imports no models
@@ -374,6 +377,17 @@ def _last_days(symbols: list[str], end: date, n: int) -> list[tuple[str, date]]:
     return [(s, end - timedelta(days=i)) for s in symbols for i in range(n + 1)]
 
 
+def _ingest_last_days(store: "Store", dl: Any, symbols: list[str], n: int) -> Counts:
+    """The `n` latest published days of every symbol and the D-1 of the first."""
+    end = _today() - timedelta(days=1)
+    c = ingest(store, dl, _last_days(symbols, end, n))
+    if all((s, end) in c.missing_days for s in symbols):
+        # yesterday is not published yet: the window moves back one day
+        first = end - timedelta(days=n)
+        c.add(ingest(store, dl, [(s, first - timedelta(days=1)) for s in symbols]))
+    return c
+
+
 def cmd_download(args: argparse.Namespace, cfg: Settings) -> int:
     dl = make_downloader(cfg)
     try:
@@ -385,17 +399,17 @@ def cmd_download(args: argparse.Namespace, cfg: Settings) -> int:
                 want = research_symdays(cfg, labels)
                 _say(f"ชุดข้อมูลวิจัยต้องใช้ {len(want)} สัญลักษณ์-วัน")
                 c = ingest(store, dl, want)
+            elif args.split == "live":
+                symbols = list(dict.fromkeys(cfg.live.symbols))
+                if not symbols:
+                    raise CliError("live.symbols ใน configs/default.yaml ว่าง: ใส่สัญลักษณ์อย่างน้อย 1 ตัว")
+                c = _ingest_last_days(store, dl, symbols, cfg.live.train_days)
             else:
                 symbols = list(dict.fromkeys(args.symbols))
                 if args.day is not None:
                     c = ingest(store, dl, _with_prev((s, args.day) for s in symbols))
                 else:
-                    end = _today() - timedelta(days=1)
-                    c = ingest(store, dl, _last_days(symbols, end, args.days))
-                    if all((s, end) in c.missing_days for s in symbols):
-                        # yesterday is not published yet: the window moves back one day
-                        first = end - timedelta(days=args.days)
-                        c.add(ingest(store, dl, [(s, first - timedelta(days=1)) for s in symbols]))
+                    c = _ingest_last_days(store, dl, symbols, args.days)
     finally:
         dl.close()
     _say(c.text())
@@ -907,10 +921,8 @@ def prepare_replay(
     return state, lambda: pipeline.run(replayer)
 
 
-def _live_preroll(
-    cfg: Settings, store: "Store", symbols: list[str], now_us: int
-) -> pl.DataFrame | None:
-    """The trailing 24 h of the two most recent published archive days of every symbol."""
+def live_prep_ingest(cfg: Settings, store: "Store", symbols: list[str], now_us: int) -> None:
+    """Download the two most recent published archive days of every symbol (skips stored days)."""
     dl = make_downloader(cfg)
     try:
         for s in symbols:
@@ -923,9 +935,70 @@ def _live_preroll(
                     break
     finally:
         dl.close()
-    frames = [store.read_trades(s, now_us - DAY_US, now_us) for s in symbols]
-    frames = [f for f in frames if f.height]
-    return pl.concat(frames) if frames else None
+
+
+def live_preroll_source(
+    store: "Store", symbols: list[str], now_us: int
+) -> tuple[Any, int] | None:
+    """`(chunked events, end)` of the archive to warm up on, or None if there is nothing to play.
+
+    `end` is `now` or midnight UTC after the newest stored day (a day not yet over has no more),
+    and the window is the `LIVE_PREROLL_H` hours before it, never older than 24 h before `now`.
+    """
+    from idsai.data.live import chunked_archive
+
+    today = _day_of_us(now_us)
+    newest = max((d for s in symbols for d in store.days(s) if d <= today), default=None)
+    if newest is None:
+        return None
+    end = min(now_us, _day_start_us(newest) + DAY_US)
+    start = max(now_us - DAY_US, end - LIVE_PREROLL_H * 3600 * S_US)
+    if start >= end:
+        return None
+    return chunked_archive(store.read_trades, symbols, start, end), end
+
+
+def cmd_live_prep(args: argparse.Namespace, cfg: Settings) -> int:
+    symbols = list(cfg.live.symbols)
+    if not symbols:
+        raise CliError("live.symbols ใน configs/default.yaml ว่าง: ใส่สัญลักษณ์อย่างน้อย 1 ตัว")
+    with _app_store(cfg) as store:
+        live_prep_ingest(cfg, store, symbols, _now_us())
+    _say(f"เตรียมข้อมูลย้อนหลังของโหมดสดเสร็จ: {', '.join(symbols)}")
+    return 0
+
+
+def cmd_live_check(args: argparse.Namespace, cfg: Settings) -> int:
+    """Open the public stream read-only and wait for one trade (nothing is sent)."""
+    from idsai.data.live import LiveTradeSensor
+
+    symbols = list(cfg.live.symbols)
+    if not symbols:
+        raise CliError("live.symbols ใน configs/default.yaml ว่าง: ใส่สัญลักษณ์อย่างน้อย 1 ตัว")
+    try:
+        sensor = LiveTradeSensor(symbols, cfg.live.ws_url)
+    except ValueError as e:
+        raise CliError(f"ค่าตั้งสายข้อมูลสดไม่ถูกต้อง: {e}") from e
+
+    async def first_trade() -> None:
+        try:
+            async with asyncio.timeout(args.timeout):
+                async for kind, _ in sensor:
+                    if kind == "trade":
+                        return
+        finally:
+            await sensor.aclose()
+
+    try:
+        asyncio.run(first_trade())
+    except TimeoutError:
+        raise CliError(
+            f"ต่อสายข้อมูลสดไม่ได้ภายใน {args.timeout:g} วินาที (ไม่ได้รับเทรดเลย) ที่ {cfg.live.ws_url}"
+        ) from None
+    except Exception as e:
+        raise CliError(f"สายข้อมูลสดล้มเหลว: {type(e).__name__}: {e}") from e
+    _say(f"ต่อสายข้อมูลสดได้ รับเทรดแรกแล้ว ({', '.join(symbols)})")
+    return 0
 
 
 def prepare_live(
@@ -945,18 +1018,19 @@ def prepare_live(
     dets, chief, doc = _load(models, cfg)
     symbols = list(doc["symbols"])
     now = _now_us()
-    archive = _live_preroll(cfg, store, symbols, now)
+    live_prep_ingest(cfg, store, symbols, now)
+    pre = live_preroll_source(store, symbols, now)
+    archive, end = (None, None) if pre is None else pre
     _say("ลำดับการอุ่นเครื่องของโหมดสด (นับจากตอนเชื่อมต่อ):")
     _say("  ประมาณ +30 นาที: แถวข้อมูลแรก (ต้องมีข้อมูลครบหน้าต่าง 1800 วินาทีก่อน)")
     _say(
         "  ค่า z ใช้ได้ตั้งแต่แถวแรกถ้าข้อมูลย้อนหลังครอบคลุมอย่างน้อย 6 ชม. ของ 24 ชม. ล่าสุด มิฉะนั้นประมาณ +6.6 ชม."
     )
-    newest = None if archive is None else int(archive["ts_us"].max())
-    if newest is None or now - newest > LIVE_STALE_S * S_US:
+    if end is None or now - end > LIVE_STALE_S * S_US:
         age = (
             "ไม่มีข้อมูลย้อนหลังเลย"
-            if newest is None
-            else (f"ข้อมูลย้อนหลังล่าสุดจบเมื่อ {(now - newest) / 3600 / S_US:.1f} ชม. ก่อน")
+            if end is None
+            else (f"ข้อมูลย้อนหลังล่าสุดจบเมื่อ {(now - end) / 3600 / S_US:.1f} ชม. ก่อน")
         )
         _warn(f"คำเตือน: {age} (เกิน 17.5 ชม.) ค่า z จะยังใช้ไม่ได้จนประมาณ +6.6 ชม. หลังเชื่อมต่อ")
     sensor = LiveTradeSensor(symbols, cfg.live.ws_url)
@@ -1248,6 +1322,16 @@ def _positive(text: str) -> int:
     return n
 
 
+def _positive_float(text: str) -> float:
+    try:
+        x = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"ต้องเป็นตัวเลข: {text!r}") from None
+    if not math.isfinite(x) or x <= 0:
+        raise argparse.ArgumentTypeError(f"ต้องมากกว่า 0: {text}")
+    return x
+
+
 DOWNLOAD_HELP = """\
 --split research: ทุกสัญลักษณ์-วันที่ชุดแบ่งข้อมูลวิจัย (make_split) และ eval ต้องอ่าน
   จากป้ายในเครื่อง (รัน `idsai labels` ก่อน):
@@ -1257,6 +1341,7 @@ DOWNLOAD_HELP = """\
     normal_days_per_symbol x 2 วันที่ห่างจากทุกป้ายของสัญลักษณ์นั้นอย่างน้อย min_gap_days
     เลือกวันที่ใกล้ป้ายที่สุดก่อน (รู้ว่าเหรียญมีการซื้อขายช่วงนั้น) ห่างกันอย่างน้อย 7 วัน
     แต่ละวันพร้อม D-1; make_split จะสุ่มจากวันที่ดาวน์โหลดได้จริง
+--split live: live.symbols x live.train_days วันล่าสุดที่เผยแพร่แล้ว และ D-1 ของวันแรก
 --symbols S --days N: N วันล่าสุดที่เผยแพร่แล้ว (ถึงเมื่อวาน UTC) และ D-1 ของวันแรก
 --symbols S --day D: วัน D และ D-1
 วันที่คลังข้อมูลไม่มี (เช่นเหรียญยังไม่เข้าตลาด) นับว่า "ไม่มี" ไม่ใช่ข้อผิดพลาด
@@ -1291,7 +1376,11 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     g = s.add_mutually_exclusive_group(required=True)
-    g.add_argument("--split", choices=["research"], help="ทุกวันที่ชุดข้อมูลวิจัยต้องใช้")
+    g.add_argument(
+        "--split",
+        choices=["research", "live"],
+        help="research: ทุกวันที่ชุดข้อมูลวิจัยต้องใช้; live: live.train_days วันล่าสุดของ live.symbols",
+    )
     g.add_argument("--symbols", nargs="+", metavar="S", help="สัญลักษณ์ เช่น BTCUSDT ETHUSDT")
     w = s.add_mutually_exclusive_group()
     w.add_argument("--days", type=_positive, metavar="N", help="จำนวนวันล่าสุด (ใช้กับ --symbols)")
@@ -1358,6 +1447,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     from idsai.product.auth import ROLES
 
+    sub.add_parser(
+        "live-prep",
+        help="ดาวน์โหลดข้อมูลย้อนหลังของ live.symbols ไว้อุ่นเครื่องโหมดสด (รันแยกก่อน serve)",
+    )
+
+    s = sub.add_parser(
+        "live-check",
+        help="ตรวจว่าต่อสายข้อมูลสดของ Binance ได้ (อ่านอย่างเดียว) จบด้วย 0 เมื่อได้เทรดแรก",
+    )
+    s.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=LIVE_CHECK_TIMEOUT_S,
+        metavar="S",
+        help="รอเทรดแรกได้นานสุดกี่วินาที (ค่าเริ่มต้น 20)",
+    )
+
     s = sub.add_parser("user", help="จัดการบัญชีผู้ใช้ (รหัสผ่านถามแบบซ่อน ไม่รับทาง argv)")
     us = s.add_subparsers(dest="user_cmd", required=True, metavar="<action>", parser_class=_Parser)
     u = us.add_parser("add", help="สร้างผู้ใช้")
@@ -1387,6 +1493,8 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, Settings], int]] = {
     "report": cmd_report,
     "demo-pack": cmd_demo_pack,
     "serve": cmd_serve,
+    "live-prep": cmd_live_prep,
+    "live-check": cmd_live_check,
     "user": cmd_user,
 }
 
@@ -1402,7 +1510,7 @@ def main(argv: list[str] | None = None) -> int:
         _warn("ใช้คำสั่งไม่ถูกต้อง: --symbols ต้องมี --days N หรือ --day D")
         return 1
     if args.command == "download" and args.split and (args.days or args.day):
-        _warn("ใช้คำสั่งไม่ถูกต้อง: --split research ไม่ใช้ --days / --day")
+        _warn("ใช้คำสั่งไม่ถูกต้อง: --split ไม่ใช้ --days / --day")
         return 1
     try:
         cfg = load_settings(args.config)

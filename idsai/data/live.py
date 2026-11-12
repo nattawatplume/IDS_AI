@@ -38,7 +38,7 @@ import json
 import math
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -51,6 +51,7 @@ from idsai.data.replay import Replayer
 from idsai.data.store import _check_symbol
 
 S_US = 1_000_000
+FILL_YIELD_EVERY = 256  # filled ticks between two yields to the event loop
 ROTATE_S = 23 * 3600  # Binance closes a connection at 24 h
 BACKOFF_FIRST_S = 1
 BACKOFF_MAX_S = 60
@@ -475,12 +476,102 @@ class LiveTradeSensor:
         return min(max((self._next_tick - t) / S_US, MIN_POLL_S), MAX_POLL_S)
 
 
+def chunked_archive(
+    read: Callable[[str, int, int], pl.DataFrame],
+    symbols: list[str],
+    start_us: int,
+    end_us: int,
+    chunk_s: float = 3600,
+) -> AsyncIterator[tuple[str, Any]]:
+    """The events of `Replayer(all trades in [start_us, end_us), speed=0, start_us=start_us)`,
+    without `preroll_done`, holding one chunk (all symbols, `chunk_s` seconds) in memory at a time.
+
+    `read(symbol, a, b)` returns the trades in `[a, b)`. Inner chunk edges are whole seconds, so
+    a chunk's last tick never passes its end. The ticks the Replayer does not emit after a chunk's
+    last trade are filled in up to the next chunk, and only once a later trade exists, since one
+    Replayer stops at the last trade's second + 1 s: trailing quiet seconds get no tick.
+    """
+    if not chunk_s > 0:
+        raise ValueError(f"chunk_s must be > 0, got {chunk_s}")
+    symbols = _check_symbols(symbols)
+    step = max(1, int(chunk_s * S_US))
+    edges = [start_us]
+    k = 1
+    while (edge := (start_us + k * step) // S_US * S_US) < end_us:
+        if edge > edges[-1]:
+            edges.append(edge)
+        k += 1
+    edges.append(end_us)
+    return _chunked(read, symbols, list(zip(edges, edges[1:], strict=False)), start_us)
+
+
+async def _chunked(
+    read: Callable[[str, int, int], pl.DataFrame],
+    symbols: list[str],
+    windows: list[tuple[int, int]],
+    start_us: int,
+) -> AsyncIterator[tuple[str, Any]]:
+    next_tick = start_us // S_US * S_US + S_US
+    since_yield = 0
+    for a, b in windows:
+        if b <= a:
+            continue
+        frames = [f for s in symbols if (f := read(s, a, b)).height]
+        if not frames:
+            await asyncio.sleep(0)
+            continue
+        frame = pl.concat(frames) if len(frames) > 1 else frames[0]
+        del frames
+        while next_tick <= a // S_US * S_US:  # the quiet seconds before this chunk's first one
+            yield "tick", next_tick
+            next_tick += S_US
+            since_yield += 1
+            if since_yield >= FILL_YIELD_EVERY:
+                since_yield = 0
+                await asyncio.sleep(0)
+        replay = aiter(Replayer(frame, speed=0, start_us=a))
+        del frame
+        try:
+            async for kind, payload in replay:
+                if kind == "preroll_done":
+                    continue
+                if kind == "tick":
+                    next_tick = payload + S_US
+                yield kind, payload
+        finally:
+            await replay.aclose()
+
+
+async def _archive_events(
+    archive: pl.DataFrame | AsyncIterable[tuple[str, Any]] | None, symbols: list[str] | None
+) -> AsyncIterator[tuple[str, Any]]:
+    """The archive's events with no `preroll_done`: a frame is replayed, a source passes through."""
+    if archive is None:
+        return
+    if isinstance(archive, pl.DataFrame):
+        if symbols is not None:
+            archive = archive.filter(pl.col("symbol").is_in(symbols))
+        if archive.is_empty():
+            return
+        archive = Replayer(archive, speed=0)
+    events = aiter(archive)
+    try:
+        async for kind, payload in events:
+            if kind != "preroll_done":
+                yield kind, payload
+    finally:
+        aclose = getattr(events, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
 async def warmup_then_live(
-    archive_trades: pl.DataFrame | None, sensor: Any
+    archive_trades: pl.DataFrame | AsyncIterable[tuple[str, Any]] | None, sensor: Any
 ) -> AsyncIterator[tuple[str, Any]]:
     """Warm the features up on an archive, unpublished, then go on with `sensor`.
 
-    The archive plays at max speed with no `preroll_done`, so nothing of it is published. Then
+    The archive is a frame of trades or an async source of events (`chunked_archive`). It plays
+    at max speed with no `preroll_done`, so nothing of it is published. Then
     `("gap", (archive end, sensor start))`, since nothing between them was observed, and the
     sensor's events, whose own first `preroll_done` starts publishing. No archive (or an empty one,
     or none of the sensor's symbols): just the sensor. The sensor connects only after the archive
@@ -494,21 +585,17 @@ async def warmup_then_live(
     """
     events = aiter(sensor)
     symbols = getattr(sensor, "symbols", None)
-    if archive_trades is not None and symbols is not None:
-        archive_trades = archive_trades.filter(pl.col("symbol").is_in(symbols))
     try:
-        if archive_trades is not None and not archive_trades.is_empty():
-            end = None
-            replay = aiter(Replayer(archive_trades, speed=0))
-            try:
-                async for kind, payload in replay:
-                    if kind == "preroll_done":
-                        continue
-                    if kind == "tick":
-                        end = payload
-                    yield kind, payload
-            finally:
-                await replay.aclose()
+        end = None
+        played = aiter(_archive_events(archive_trades, symbols))
+        try:
+            async for kind, payload in played:
+                if kind == "tick":
+                    end = payload
+                yield kind, payload
+        finally:
+            await played.aclose()
+        if end is not None:
             first = await anext(events, None)
             if first is None:
                 return

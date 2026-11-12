@@ -32,9 +32,9 @@ def test_remaining_defaults_match_spec():
     assert s.eval.min_effect == 0.02 and s.eval.hard_negative_k == 20
     assert s.eval.budgets_per_symbol_day == [0.1, 0.5, 2, 10]
     assert s.ae.hidden == 64 and s.ae.bottleneck == 16 and s.ae.train_stride_s == 60
-    assert s.live.symbols == ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
+    assert s.live.symbols == ["SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
     assert s.live.ws_url == "wss://data-stream.binance.vision/stream"
-    assert s.live.budget_per_hour == 2.0 and s.live.universe_size == 5
+    assert s.live.budget_per_hour == 2.0 and s.live.universe_size == 3
     assert s.live.train_days == 7 and s.live.bar_grace_s == 2
     assert s.detectors == ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"]
     assert s.mode in ("replay", "live")
