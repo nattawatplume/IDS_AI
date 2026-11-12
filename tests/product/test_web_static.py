@@ -4090,7 +4090,7 @@ def test_live_clocks_on_live_panels_only():
         assert head and 'class="hud-clock" aria-hidden="true"' in head.group(1), tag
     assert html.count('class="hud-clock"') == 3
     js = text("app.js")
-    assert 'fx("clockSource", () => fmtThaiTime(eventNowUs(), true))' in js
+    assert 'fx("clockSource", () => thaiClock(eventNowUs(), true) ?? "–")' in js
     assert "setInterval" not in _js_function(js, "function renderHero(")
 
 

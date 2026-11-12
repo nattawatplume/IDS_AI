@@ -164,7 +164,8 @@ h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .hud-rec { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--hud-alert); box-shadow: 0 0 6px var(--hud-alert); animation: hud-rec 2s steps(1) infinite; }
 .hud-tag { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hud-tag::before { content: attr(data-tag); }
-.hud-clock { margin-left: auto; color: rgba(138, 160, 184, 0.7); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hero .hud-head { padding-left: 14px; padding-right: 14px; letter-spacing: 0.03em; }
+.hud-clock { margin-left: auto; flex: none; color: rgba(138, 160, 184, 0.7); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hud-flat { margin-bottom: 0; }
 
 /* page-level panels: the title block of a page, and the wrapper of a table */
@@ -1179,10 +1180,10 @@ td.when { white-space: nowrap; }
   100% { stroke-dashoffset: 0; opacity: 0; }
 }
 .flash { animation: glow 0.9s ease-out; }
-/* a panel's own background sits under its fill (::after), so its flash drives the fill instead */
+/* a panel's own background sits under its fill (::after), so the flash is an amber veil on the fill itself */
 .hud.flash { animation: none; }
 .hud.flash::after { animation: hud-flash 0.9s ease-out; }
-@keyframes hud-flash { 0% { background: rgba(245, 158, 11, 0.3); } 100% { background: var(--glass); } }
+@keyframes hud-flash { 0% { box-shadow: inset 0 0 0 999px rgba(245, 158, 11, 0.3); } 100% { box-shadow: inset 0 0 0 999px rgba(245, 158, 11, 0); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }

@@ -3843,7 +3843,7 @@ async function boot() {
 
   loadSignupConfig();
   let authEnabled = await loadMe();
-  fx("clockSource", () => fmtThaiTime(eventNowUs(), true)); // the .hud-clock of the live panels (hud.js ticks it)
+  fx("clockSource", () => thaiClock(eventNowUs(), true) ?? "–"); // the .hud-clock of the live panels (hud.js ticks it)
   fx("init", { off: fxOff() }); // motion.js loads right after this file, so it is ready once the first answer is in
   fxApply();
   for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {
