@@ -140,7 +140,8 @@ def test_app_js_is_valid_javascript():
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
-    r = subprocess.run([node, "--check", str(WEB_DIR / "app.js")], capture_output=True, text=True)
+    cmd = [node, "--check", str(WEB_DIR / "app.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 
 
@@ -244,7 +245,7 @@ def test_red_team_form_starts_disabled_until_health_confirms_the_mode():
     page = _simulate_page(text("index.html"))
     controls = re.findall(r"<(?:select|input|button)\b[^>]*>", page)
     assert len(controls) == 6  # three cards, region, offset, symbol
-    assert sum('class="card sim-card"' in tag for tag in controls) == 3
+    assert sum('class="card hud hud-sm sim-card"' in tag for tag in controls) == 3
     for tag in controls:
         assert re.search(r"\sdisabled[\s>]", tag), tag  # fail closed before any health
     reason = re.search(r'<p id="sim-reason"[^>]*>([^<]*)</p>', page)
@@ -322,7 +323,9 @@ def test_time_to_detect_counts_only_new_alerts(tmp_path):
     script = tmp_path / "ttd.js"
     script.write_text(TTD_JS, encoding="utf-8")
     js = str(WEB_DIR / "app.js")
-    r = subprocess.run([node, str(script), js], capture_output=True, text=True, cwd=tmp_path)
+    r = subprocess.run(
+        [node, str(script), js], capture_output=True, text=True, cwd=tmp_path, timeout=60
+    )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
 
@@ -364,36 +367,148 @@ def test_shell_markup():
     assert 'ROLE_TH = { viewer: "ผู้ชม", analyst: "ผู้วิเคราะห์", admin: "ผู้ดูแล" }' in js
 
 
-def test_glass_tokens():
+ALERT_LOW = '.alert-card[data-sev="low"] { --ln: rgba(138, 160, 184, 0.5); --hi: var(--dim); }'
+ALERT_MID = '.alert-card[data-sev="mid"] { --ln: rgba(245, 158, 11, 0.7); --hi: var(--amber); }'
+ALERT_HIGH = '.alert-card[data-sev="high"] { --ln: rgba(255, 45, 85, 0.8); --hi: var(--red); }'
+HUD_TOKENS = {
+    "--hud-bg": "#05070d",
+    "--hud-panel": "#0b1220",
+    "--hud-line": "#00e5ff",
+    "--hud-violet": "#7c3aed",
+    "--hud-alert": "#ff2d55",
+    "--hud-ok": "#22ff88",
+    "--hud-text": "#e6f1ff",
+    "--hud-muted": "#8aa0b8",
+}
+MONO_STACK = '--mono: ui-monospace, "Cascadia Mono", Consolas, "JetBrains Mono", monospace;'
+
+
+def test_hud_tokens():
     css = text("styles.css")
-    for decl in ("--bg: #0b0820", "--ok: #3ee08f", "--warn: #ffb547", "--bad: #ff5d73"):
-        assert decl in css, decl
-    assert "backdrop-filter" in css and "@supports not (backdrop-filter" in css
+    for name, value in HUD_TOKENS.items():
+        assert re.search(rf"(?m)^\s*{name}:\s*{value};", css), name
     assert "prefers-reduced-motion: reduce" in css
     assert "background-clip: text" not in css and "-webkit-background-clip" not in css
     assert 'data-theme="light"' not in css and "prefers-color-scheme" not in css
-    # the accent gradient: only on the primary button and the active nav pill
-    accent = list(re.finditer(r"([^{}]+)\{[^}]*linear-gradient\([^)]*--violet", css))
-    assert accent
-    for m in accent:
-        sel = " ".join(m.group(1).split())
-        assert "primary" in sel or 'aria-current="page"' in sel, sel
-    assert "#8b5cf6" in css and "#3b82f6" in css
-    assert "@keyframes drift" in css and ".bg" in css
     weights = set(re.findall(r"font-weight:\s*(\d+)", css))
     assert weights <= {"400", "600"}, weights
 
 
-def test_background_blobs_stay_subtle():
+def test_mood_tokens_map_to_the_hud_colours():
+    css = text("motion.css")
+    assert "--fx-calm: var(--hud-line);" in css
+    assert "--fx-watch: #f59e0b;" in css
+    assert "--fx-alert: var(--hud-alert);" in css
+
+
+def test_mono_stack():
+    assert MONO_STACK in text("styles.css")
+
+
+def test_no_external_fonts():
+    for name in ("index.html", "styles.css", "motion.css"):
+        body = text(name)
+        assert "fonts.googleapis" not in body and "fonts.gstatic" not in body, name
+        assert "@import" not in body and "@font-face" not in body, name
+
+
+def test_no_gradients():
+    for name in ("styles.css", "motion.css"):
+        for n, line in enumerate(text(name).splitlines(), 1):
+            if "-gradient(" in line:
+                assert "/* allow: radar wedge */" in line, f"{name}:{n}: {line.strip()}"
+    # the one allowed wedge is a single colour fading from transparent
+    wedge = [ln for ln in text("motion.css").splitlines() if "allow: radar wedge" in ln]
+    assert len(wedge) == 1 and wedge[0].count("rgba(") == 1
+
+
+def test_no_blobs_or_aurora():
+    html, css = text("index.html"), text("styles.css")
+    assert "blob" not in html and ".blob" not in css and "@keyframes drift" not in css
+    assert 'class="bg"' not in html
+
+
+def test_alert_colour_not_base_text():
     css = text("styles.css")
-    base = re.search(r"(?m)^\.blob\s*\{([^}]*)\}", css).group(1)
-    assert "opacity" not in base  # each blob carries its own, so the sum below is the whole story
-    total = 0.0
-    for i in (1, 2, 3):
-        body = re.search(rf"(?m)^\.blob-{i}\s*\{{([^}}]*)\}}", css).group(1)
-        total += float(re.search(r"opacity:\s*([\d.]+)", body).group(1))
-    assert total <= 0.35 + 1e-9, total
-    assert len(re.findall(r'class="blob blob-\d"', text("index.html"))) == 3
+    assert re.search(r"(?m)^\s*--text:\s*var\(--hud-text\);", css)
+    assert re.search(r"(?m)^\s*--text-dim:\s*var\(--hud-muted\);", css)
+    for sel in ("body", "a", ".muted", ".card-label", ".card-value", ".hud-head", ".page-lead"):
+        body = re.search(rf"(?m)^{re.escape(sel)}\s*\{{([^}}]*)\}}", css)
+        if body:
+            assert "--hud-alert" not in body.group(1) and "var(--red)" not in body.group(1), sel
+    # red text only appears in alert state rules
+    for m in re.finditer(r"([^{}]+)\{[^}]*\bcolor:\s*var\(--(?:red|bad|hud-alert)\)", css):
+        sel = " ".join(m.group(1).split())
+        allowed = ("alert", ".badge-mode.live", "check-state.fail", ".sev-3", ".hero", ".v-tp")
+        assert any(k in sel for k in allowed), sel
+
+
+def test_hud_panel_system_css():
+    css = text("styles.css")
+    hud = re.search(r"(?m)^\.hud\s*\{([^}]*)\}", css).group(1)
+    assert "position: relative" in hud and "isolation: isolate" in hud
+    assert "--cut: polygon(" in css and "clip-path: var(--cut)" in css
+    assert re.search(r"(?m)^\.hud::before\s*\{[^}]*background: var\(--ln\)", css)
+    assert re.search(r"(?m)^\.hud::after\s*\{\s*inset:\s*1px;\s*background:\s*var\(--glass\);", css)
+    # four corner brackets that slide outward on hover with transform only
+    for corner in ("tl", "tr", "bl", "bb"):
+        assert f".hud-br.{corner}" in css and f".hud:hover > .hud-br.{corner}" in css, corner
+    assert re.search(r"\.hud-br\s*\{[^}]*transition:\s*transform", css)
+    for cls in (".hud-head", ".hud-tag", ".hud-rec", ".hud-clock"):
+        assert re.search(rf"(?m)^{re.escape(cls)}\b", css), cls
+    # the blinking dot stays at or under 1 Hz
+    assert re.search(r"\.hud-rec\s*\{[^}]*animation:\s*hud-rec\s+2s", css)
+    # outline buttons, a flat solid primary, a bracketed nav underline
+    primary = re.search(r"(?m)^button\.primary\s*\{([^}]*)\}", css).group(1)
+    assert "background: var(--hud-line)" in primary and "gradient" not in primary
+    assert '.nav a[aria-current="page"]::after' in css
+
+
+def test_every_page_uses_hud():
+    html = text("index.html")
+    pages = ("login", "home", "alerts", "simulate", "results", "users", "activity")
+    for pid in (f"page-{name}" for name in pages):
+        sec = re.search(rf'<section id="{pid}".*?</section>', html, re.S).group(0)
+        assert re.search(r'class="[^"]*\bhud\b', sec), pid
+    for pid in ("hero", "card-alerts", "card-symbol", "card-health", "chart-card", "replay-bar"):
+        assert re.search(rf'<(?:div|details) id="{pid}" class="[^"]*\bhud\b', html), pid
+    assert re.search(r'<aside id="rail" class="hud\b', html)
+    for pid in ("users-table", "audit-table"):
+        before = html[: html.index(f'id="{pid}"')]
+        panel = before[before.rindex('class="hud table-panel"') :]
+        assert 'class="table-wrap"' in panel, pid
+    for pid in ("login-form", "signup-form", "tour-bubble", "help-drawer"):
+        assert re.search(rf'id="{pid}" class="[^"]*\bhud\b', html), pid
+    # every head carries its own label, drawn from data-tag, and is hidden from screen readers
+    heads = re.findall(r'<div class="hud-head"([^>]*)>(.*?)</div>', html, re.S)
+    tags = [re.search(r'data-tag="([^"]+)"', body).group(1) for _, body in heads]
+    assert len(tags) >= 14 and len(set(tags)) == len(tags), tags
+    assert all('aria-hidden="true"' in attrs for attrs, _ in heads)
+    for want in (
+        "CAM-01 · STATUS · LIVE",
+        "CAM-02 · MAIN FEED · LIVE",
+        "LOG · ALERTS",
+        "SIM · LAB",
+        "EVAL · RESULTS",
+        "ADMIN · USERS",
+        "AUTH · SECURE CHANNEL",
+    ):
+        assert want in tags, want
+    # the labels are not text, so the plain-Thai copy guards never see them
+    assert re.search(r"\.hud-tag::before\s*\{[^}]*attr\(data-tag\)", text("styles.css"))
+
+
+def test_js_card_builders_use_hud():
+    js = text("app.js")
+    assert "function hudMark(" in js and "function hudHead(" in js
+    assert 'document.querySelectorAll(".hud").forEach(hudMark)' in js
+    assert 'class: "card hud hud-sm alert-card"' in js
+    assert "return hudMark(el(" in _js_function(js, "function alertCard(a)")
+    assert "card hud hud-sm result-card" in js and "card hud sim-run" in js
+    assert "card hud detail-top" in js and "card hud verdict-card" in js and "card hud tech" in js
+    assert "card hud committee" in js and "toast hud hud-sm" in js
+    # brackets live in a <details> summary, which is drawn while it is closed
+    assert 'node.tagName === "DETAILS"' in _js_function(js, "function hudMark(node)")
 
 
 def test_top_bar_has_a_mid_breakpoint():
@@ -526,7 +641,11 @@ def _run_motion(tmp_path, reduced, body):
     script = tmp_path / "motion.js"
     script.write_text(MOTION_JS % (reduced, body), encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
@@ -609,20 +728,24 @@ def test_home_markup():
 
 def test_chart_colours_and_titles():
     css, js = text("styles.css"), text("app.js")
-    for decl in ("--line-price: #a5b4fc", "--line-f: #8b5cf6", "--tau: #ffb547"):
+    for decl in ("--line-price: #00e5ff", "--line-f: #7c3aed", "--tau: #f59e0b"):
         assert decl in css, decl
     init = js[js.index("function initChart(") : js.index("function addLanes(")]
     assert "ระดับความผิดปกติ" in init and "glow" in init
     tau = js[js.index("function setTau(") : js.index("async function loadSeries(")]
-    assert 'title: "เส้นเตือน"' in tau and "Dashed" in tau
+    assert (
+        'title: "เส้นเตือน"' in tau and "lineStyle: LWC.LineStyle ? LWC.LineStyle.Dashed : 2" in tau
+    )
 
 
-def test_glass_cards_lift_on_hover_but_not_under_reduced_motion():
+def test_hud_panels_brighten_on_hover_and_stay_still_under_reduced_motion():
     css = text("styles.css")
-    hover = re.search(r"(?m)^\.card:hover\s*\{([^}]*)\}", css)
-    assert hover and "translateY(-2px)" in hover.group(1) and "--glass-border-hi" in hover.group(1)
+    hover = re.search(r"(?m)^\.hud:hover\s*\{([^}]*)\}", css)
+    assert hover and "--ln:" in hover.group(1)
+    assert not re.search(r"(?m)^\.card:hover", css)  # the panels no longer lift; the brackets slide
     reduced = css.split("prefers-reduced-motion: reduce")[1]
-    assert re.search(r"\.card:hover[^{]*\{[^}]*transform:\s*none", reduced)
+    assert "transition: none !important" in reduced and "animation: none !important" in reduced
+    assert re.search(r"\.rail-row:hover[^{]*\{[^}]*transform:\s*none", reduced)
 
 
 def test_hero_and_rail_render_only_what_changed():
@@ -674,7 +797,7 @@ def test_resting_styles_are_visible_when_animation_does_not_run():
 
 def test_low_severity_is_grey_and_forest_points_avoid_the_dot_rule():
     css = text("styles.css")
-    assert '.alert-card[data-sev="low"] { border-left-color: var(--dim)' in css
+    assert ALERT_LOW in css
     assert ".rail-row.sev-1 { border-left-color: var(--dim)" in css
     js = text("app.js")
     assert "class: `pt ${tone}`" in js and "class: `dot ${tone}`" not in js
@@ -748,7 +871,8 @@ def test_simulate_request_and_status_text(tmp_path):
 def test_simulate_markup():
     html, js, css = text("index.html"), text("app.js"), text("styles.css")
     page = _simulate_page(html)
-    cards = re.findall(r'<button\b[^>]*class="card sim-card"[^>]*>.*?</button>', page, re.S)
+    pattern = r'<button\b[^>]*class="card hud hud-sm sim-card"[^>]*>.*?</button>'
+    cards = re.findall(pattern, page, re.S)
     assert len(cards) == 3
     want = [
         ("pump_burst", "ปั่นเร็ว", "ราคาและปริมาณพุ่งขึ้นในไม่กี่นาที"),
@@ -775,15 +899,13 @@ def test_simulate_markup():
     assert '<option value="test">ช่วงค่าทดสอบ</option>' in adv
     assert '<option value="train">ช่วงค่าฝึก</option>' in adv
     intro = re.search(r'<p class="sim-intro[^"]*">([^<]*)</p>', page).group(1)
-    assert intro == (
-        "ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)"
-    )
+    assert intro == ("ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)")
     # plain view: no English labels or codes on the page
     plain = re.sub(r"<!--.*?-->|<svg\b.*?</svg>|<[^>]+>", " ", page, flags=re.S)
     assert not re.search(r"[A-Za-z]", plain), plain
-    # the cards are glass cards, never the accent gradient
+    # the cards are HUD panels, never a gradient
     sim = css[css.index("/* ---- simulate") : css.index("/* ---- /simulate")]
-    assert ".sim-card" in sim and "--violet), var(--blue)" not in sim
+    assert ".sim-card" in sim and "-gradient(" not in sim
     # the server's "ended" refusal is the text the page looks for
     server = (WEB_DIR.parent / "api" / "app.py").read_text(encoding="utf-8")
     ended = re.search(r'REPLAY_ENDED_TH = "([^"]+)"', server).group(1)
@@ -976,7 +1098,7 @@ def test_ablation_notes_cell_wraps():
 def test_long_explanations_live_on_about():
     html = text("index.html")
     mon = re.search(r'<section id="page-home".*?</section>', html, re.S).group(0)
-    for m in re.finditer(r'<p\b([^>]*)>(.*?)</p>', mon, re.S):
+    for m in re.finditer(r"<p\b([^>]*)>(.*?)</p>", mon, re.S):
         if 'id="chart-info-body"' in m.group(1):
             continue
         assert len(" ".join(m.group(2).split())) <= 120, m.group(2)[:60]
@@ -996,9 +1118,22 @@ def test_login_and_activity_routes_present():
         assert route in html + js, route
     ids = set(re.findall(r'\bid="([\w-]+)"', html))
     for i in (
-        "page-login", "login-form", "login-user", "login-pass", "login-remember", "login-error",
-        "user-chip", "user-name", "user-role", "btn-logout",
-        "page-activity", "audit-body", "audit-user", "audit-action", "audit-more", "audit-empty",
+        "page-login",
+        "login-form",
+        "login-user",
+        "login-pass",
+        "login-remember",
+        "login-error",
+        "user-chip",
+        "user-name",
+        "user-role",
+        "btn-logout",
+        "page-activity",
+        "audit-body",
+        "audit-user",
+        "audit-action",
+        "audit-more",
+        "audit-empty",
     ):
         assert i in ids, i
     assert 'data-route="activity"' in html
@@ -1025,9 +1160,8 @@ def test_activity_renders_audit_fields_as_text_only():
 def test_mutating_buttons_check_can():
     js = text("app.js")
     control = js[js.index("async function control(") : js.index("function bindReplay(")]
-    assert (
-        'can("analyst")' in control
-        and control.index('can("analyst")') < control.index("postJson(")
+    assert 'can("analyst")' in control and control.index('can("analyst")') < control.index(
+        "postJson("
     )
     fb = js[js.index("function feedbackCard(") : js.index("async function drawDetailChart(")]
     assert 'can("analyst")' in fb and fb.index('can("analyst")') < fb.index("postJson(")
@@ -1123,7 +1257,11 @@ def test_prefs_save_is_debounced_and_local_when_auth_is_off(tmp_path):
         encoding="utf-8",
     )
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
@@ -1136,7 +1274,6 @@ def test_auth_off_keeps_todays_flow():
     assert chip and "hidden" in chip.group(0)  # only shown once /api/me says auth is on
     login = re.search(r'<section id="page-login"[^>]*>', html)
     assert login and "hidden" in login.group(0)
-
 
 
 SESSION_LOST_HEAD = r"""
@@ -1186,7 +1323,11 @@ def test_lost_session_routes_to_login_and_ws_4401_stops_reconnecting(tmp_path):
     script = tmp_path / "lost.js"
     script.write_text(SESSION_LOST_HEAD + SESSION_LOST_BODY, encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
     js = text("app.js")
@@ -1203,7 +1344,7 @@ def test_login_form_posts_so_a_credential_never_reaches_the_url():
 
 def test_feedback_form_uses_the_session_user_when_auth_is_on():
     js = text("app.js")
-    body = js[js.index("function feedbackCard"):]
+    body = js[js.index("function feedbackCard") :]
     body = body[: body.index("\n}\n")]
     assert "state.me.username" in body  # the analyst is the signed-in user, not a typed name
     assert "authOn()" in body
@@ -1327,8 +1468,13 @@ def test_login_markup():
     assert 'class="login-hero"' in page and "login-card" in page
     assert page.index('class="login-hero"') < page.index('id="login-form"')
     hero = page[page.index('class="login-hero"') : page.index('id="login-form"')]
-    tagline = re.search(r'<p class="login-tagline">(.*?)</p>', hero, re.S)
-    assert tagline and " ".join(re.sub(r"<[^>]+>", "", tagline.group(1)).split()) == (
+    tagline = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', hero, re.S)
+    visible = (
+        re.sub(r'<span class="sr-only">.*?</span>', "", tagline.group(1), flags=re.S)
+        if tagline
+        else ""
+    )
+    assert tagline and " ".join(re.sub(r"<[^>]+>", "", visible).split()) == (
         "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
     )
     line = re.search(r'<svg class="login-line"[^>]*>', hero)
@@ -1414,7 +1560,11 @@ def test_load_me_tells_unknown_from_auth_off(tmp_path):
     script = tmp_path / "loadme.js"
     script.write_text(SESSION_LOST_HEAD + LOAD_ME_BODY, encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
     js = text("app.js")
@@ -1556,7 +1706,11 @@ def test_hero_and_replay_gates_viewer(tmp_path):
     script = tmp_path / "gates.js"
     script.write_text(GATES_HEAD + GATES_BODY, encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
@@ -1612,6 +1766,7 @@ def test_rail_headline_is_plain_thai(tmp_path, client):
         capture_output=True,
         text=True,
         cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
     js = text("app.js")
@@ -1774,8 +1929,71 @@ def _run_dom(tmp_path, reduced, body, *args):
         text=True,
         encoding="utf-8",
         cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr + r.stdout
+
+
+HUD_MARK_BODY = r"""
+FakeNode.prototype.querySelector = function (sel) {
+  const hit = walk(this, (n) => n !== this && (sel[0] === "." ? n.classList.contains(sel.slice(1))
+    : n.tagName === sel.toUpperCase()));
+  return hit[0] || null;
+};
+const brackets = (n) => walk(n, (x) => x.classList.contains("hud-br"));
+const box = document.createElement("div");
+box.className = "hud";
+m.hudMark(box);
+m.hudMark(box); // marking twice never adds more
+assert.strictEqual(brackets(box).length, 4);
+const corners = brackets(box).map((b) => b.className.split(" ")[1]);
+assert.deepStrictEqual(corners, ["tl", "tr", "bl", "bb"]);
+assert.ok(brackets(box).every((b) => b.getAttribute("aria-hidden") === "true"));
+const det = document.createElement("details");
+const sum = document.createElement("summary");
+const inner = document.createElement("div");
+det.appendChild(sum);
+det.appendChild(inner);
+m.hudMark(det);
+m.hudMark(det);
+assert.strictEqual(brackets(sum).length, 4);
+assert.strictEqual(brackets(det).length, 4);
+assert.strictEqual(brackets(inner).length, 0);
+console.log("ok");
+"""
+
+
+def test_hud_mark_is_idempotent_and_details_keep_brackets_in_summary(tmp_path):
+    _run_dom(tmp_path, "false", HUD_MARK_BODY)
+
+
+def test_every_hud_tag_is_hidden_from_screen_readers():
+    html = text("index.html")
+    for m in re.finditer(r'<span class="hud-tag"[^>]*>', html):
+        if 'aria-hidden="true"' in m.group(0):
+            continue
+        before = html[: m.start()]
+        head = before[before.rindex('<div class="hud-head"') :]
+        assert 'aria-hidden="true"' in head[: head.index(">")] and "</div>" not in head, m.group(0)
+
+
+def test_sweep_never_draws_on_the_hud_fill():
+    css, js = text("motion.css"), text("motion.js")
+    # a .hud uses ::before/::after for its frame and fill, so no motion rule may restyle them
+    for prelude, _, _, _ in _css_blocks(css):
+        for sel in prelude.split(","):
+            if "::after" in sel or "::before" in sel:
+                assert "hud" not in sel, sel
+    sweep = re.search(r"(?m)^\.fx-sweep\s*\{([^}]*)\}", css).group(1)
+    # its own element, not the card
+    assert "position: absolute" in sweep and "overflow: hidden" in sweep
+    hud = re.search(r"(?m)^\.hud\s*\{([^}]*)\}", text("styles.css")).group(1)
+    assert "overflow" not in hud
+    fn = _js_function(js, "function addSweep(card)")
+    assert "createElement" in fn and "aria-hidden" in fn
+    assert 'classList.add("fx-sweep")' not in js and 'replay(cards[i], "fx-sweep")' not in js
+    # the hover rule reaches brackets inside a <details> summary too
+    assert ".hud:hover > summary > .hud-br.tl" in text("styles.css")
 
 
 def test_filter_alerts(tmp_path):
@@ -1872,9 +2090,8 @@ def test_alerts_page_markup():
     assert re.sub(r"<[^>]+>", "", empty).strip() == "ยังไม่มีการแจ้งเตือน ระบบกำลังเฝ้าดูอยู่"
     assert "<table" not in page and "UTC" not in page
     css = text("styles.css")
-    assert '.alert-card[data-sev="low"] { border-left-color: var(--dim)' in css
-    assert '.alert-card[data-sev="mid"] { border-left-color: var(--amber)' in css
-    assert '.alert-card[data-sev="high"] { border-left-color: var(--red)' in css
+    assert ALERT_LOW in css
+    assert ALERT_MID in css and ALERT_HIGH in css
     # filter chips are flat pills, not glass
     chip = re.search(r"(?m)^\.filter-chip\s*\{([^}]*)\}", css).group(1)
     assert "var(--r-pill)" in chip and "backdrop-filter" not in chip
@@ -2195,9 +2412,9 @@ def test_styles_css_blocks_are_balanced_and_motion_is_top_level():
 
 
 def test_only_the_allowed_animations_loop():
-    # spec 4.12: the background drift, the status orb and the login line; the boot spinner is a
-    # loading indicator that goes away with the loader, not decoration
-    allowed = (".blob", ".orb", ".login-line-trace", ".boot-spinner")
+    # the status orb, the login line and the REC dot in every panel head (0.5 Hz); the boot
+    # spinner is a loading indicator that goes away with the loader, not decoration
+    allowed = (".hud-rec", ".orb", ".login-line-trace", ".boot-spinner")
     for prelude, _, body, _ in _css_blocks(text("styles.css")):
         if re.search(r"animation[^;]*infinite", body):
             assert all(sel.strip().startswith(allowed) for sel in prelude.split(",")), prelude
@@ -2480,7 +2697,7 @@ console.log("ok");
 
 def test_tour_step_with_missing_target_centres(tmp_path):
     body = (
-        'const keep = {}; globalThis.window = { localStorage: { getItem: (k) => keep[k] ?? null,'
+        "const keep = {}; globalThis.window = { localStorage: { getItem: (k) => keep[k] ?? null,"
         " setItem: (k, v) => { keep[k] = String(v); } } };\n"
         'm.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });\n'
         + TOUR_MISSING_BODY
@@ -2572,7 +2789,7 @@ def test_help_and_tour_markup():
     assert 'id="page-about"' not in html and 'id="page-taxonomy"' not in html
     assert "function showTaxonomy" not in js and 'href: "#/taxonomy"' not in js
     css = text("styles.css")
-    assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 4, 20, 0.6)" in css
+    assert "#help-drawer" in css and ".tour-spot" in css and "rgba(5, 7, 13, 0.6)" in css
 
 
 # ---- copy guard and session-loss polish ----
@@ -2640,7 +2857,9 @@ def test_default_view_has_no_code_words(tmp_path):
     script = tmp_path / "copy.js"
     script.write_text("globalThis.matchMedia = () => ({ matches: false });" + COPY_DUMP, "utf-8")
     cmd = [node, str(script), str(WEB_DIR / "app.js")]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
+    r = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", cwd=tmp_path, timeout=60
+    )
     assert r.returncode == 0, r.stderr
     tables = json.loads(r.stdout)
     # a new *_TH table must be added to copyTables(), or this guard would not see it
@@ -3024,3 +3243,983 @@ def test_audit_filter_lists_server_actions():
     block = text("app.js").split("const AUDIT_ACTIONS = [", 1)[1].split("];", 1)[0]
     for a in ("signup", "role_change", "user_seed", "user_role"):
         assert f'"{a}"' in block
+
+
+# ---- command-center motion: foundation (motion.js / motion.css, the guard, the off switch) ----
+
+MOTION_API = (
+    "init",
+    "setOff",
+    "mood",
+    "loginEnter",
+    "loginLeave",
+    "alertBurst",
+    "chartAttach",
+    "chartCross",
+    "pageEnter",
+    "ticker",
+    "navTo",
+)
+
+
+def _fx_body(js: str) -> tuple[str, str]:
+    """(the source of function fx(...), the rest of app.js)."""
+    start = js.index("function fx(")
+    depth, i = 0, js.index("{", start)
+    for j in range(i, len(js)):
+        depth += {"{": 1, "}": -1}.get(js[j], 0)
+        if depth == 0:
+            return js[start : j + 1], js[:start] + js[j + 1 :]
+    raise AssertionError("function fx is not closed")
+
+
+def _js_braces_balanced(src: str) -> bool:
+    """Braces, brackets and parentheses balance outside strings, comments and regex-free code."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"(?m)^\s*//.*$", "", src)
+    src = JS_STRING.sub('""', src)
+    src = re.sub(r"(?m)\s//\s.*$", "", src)
+    pairs, stack = {")": "(", "]": "[", "}": "{"}, []
+    for ch in src:
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in pairs:
+            if not stack or stack.pop() != pairs[ch]:
+                return False
+    return not stack
+
+
+def test_motion_files_linked():
+    html = text("index.html")
+    assert (WEB_DIR / "motion.css").is_file() and (WEB_DIR / "motion.js").is_file()
+    assert html.index('href="styles.css"') < html.index('href="motion.css"')
+    assert html.index('src="app.js"') < html.index('src="motion.js"')
+
+
+def test_fx_elements_hidden_from_screen_readers():
+    html = text("index.html")
+    body_first = re.search(r"<body>\s*(<[^>]+>)", html).group(1)
+    assert 'id="fx-bg"' in body_first and "<canvas" in body_first  # the first child of body
+    for ident in ("fx-bg", "fx-edge"):
+        tag = re.search(rf'<[^>]*\bid="{ident}"[^>]*>', html)
+        assert tag and 'aria-hidden="true"' in tag.group(0), ident
+
+
+def test_motion_api_defined():
+    js = text("motion.js")
+    for name in MOTION_API:
+        assert re.search(rf"\b{name}\b\s*[(:]", js), name
+    for name in ("addLayer", "removeLayer"):
+        assert f"function {name}(" in js, name
+    for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert api not in js, api
+    assert "://" not in js
+    assert len(js.encode("utf-8")) <= 40 * 1024
+
+
+def test_motion_stubs_are_safe():
+    js = text("motion.js")
+    for name in ("alertBurst", "chartAttach", "chartCross", "pageEnter"):
+        assert re.search(rf"{name}: function[^{{]*\{{\s*try", js), name  # every method has its try
+
+
+def test_app_calls_motion_only_through_guard():
+    js = text("app.js")
+    guard, rest = _fx_body(js)
+    assert "try" in guard and "catch" in guard
+    assert "Motion." not in rest.replace("globalThis.Motion", "")  # the one place is fx()
+    for call in ('fx("init"', 'fx("mood"', 'fx("setOff"'):
+        assert call in js, call
+
+
+def test_motion_css_tokens_and_off_paths():
+    css = text("motion.css")
+    for decl in (
+        "--fx-calm: var(--hud-line)",
+        "--fx-watch: #f59e0b",
+        "--fx-alert: var(--hud-alert)",
+        "--fx-grid: rgba(0, 229, 255, .08)",
+    ):
+        assert decl in css, decl
+    blocks = _css_blocks(css)
+    reduced = [b for b in blocks if "prefers-reduced-motion: reduce" in b[0]]
+    assert reduced and all(depth == 0 for _, depth, _, _ in reduced)
+    assert "#fx-bg" in reduced[0][2] and "display: none" in reduced[0][2]
+    off = [b for b in blocks if ".fx-off" in b[0] and "animation: none" in b[2]]
+    assert off, "no .fx-off rule with animation: none"
+    assert any("#fx-bg" in b[0] or "#fx-bg" in b[2] for b in blocks if ".fx-off" in b[0])
+    for prelude, depth, _, parents in blocks:
+        if prelude.startswith("@keyframes"):
+            assert depth == 0 and not parents, prelude
+    assert len(css.encode("utf-8")) <= 24 * 1024
+
+
+def test_fx_switch_copy():
+    html = text("index.html")
+    assert "ลดเอฟเฟกต์" in html
+    menu = html[html.index('class="user-menu"') :]
+    menu = menu[: menu.index("</div>")]
+    assert 'id="menu-fx"' in menu and 'aria-pressed="false"' in menu and "ลดเอฟเฟกต์" in menu
+
+
+def test_base_background_is_the_flat_hud_ground():
+    css = text("styles.css")
+    assert re.search(r"(?m)^html\s*\{[^}]*background:\s*var\(--hud-bg\);", css)
+
+
+def test_fx_off_is_an_accepted_pref():
+    server = (WEB_DIR.parent / "api" / "app.py").read_text(encoding="utf-8")
+    assert re.search(r"fx_off:\s*StrictBool", server)
+
+
+def test_motion_files_have_balanced_braces():
+    css = text("motion.css")
+    _css_blocks(css)  # asserts balance
+    assert _js_braces_balanced(text("motion.js"))
+
+
+def test_motion_js_is_valid_javascript():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    path = str(WEB_DIR / "motion.js")
+    r = subprocess.run([node, "--check", path], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+# ---- command-center motion: login CCTV scene ----
+
+
+def _login_hero() -> str:
+    html = text("index.html")
+    page = re.search(r'<section id="page-login"[^>]*>(.*?)</section>', html, re.S).group(1)
+    return page[page.index('class="login-hero"') : page.index('id="login-form"')]
+
+
+def test_login_cctv_markup():
+    hero = _login_hero()
+    cctv = re.search(r'<svg\b[^>]*\bid="cctv"[^>]*>', hero)
+    assert cctv and 'aria-hidden="true"' in cctv.group(0)
+    body = hero[hero.index('id="cctv"') :]
+    body = body[: body.index("</svg>")]
+    for ident in ("cctv-beam", "cctv-rec", "cctv-target", "cctv-tag", "cctv-spike"):
+        assert f'id="{ident}"' in hero, ident
+    tag = re.search(r'<g\b[^>]*\bid="cctv-tag"[^>]*>(.*?)</g>', body, re.S)
+    assert tag and "ตรวจพบ" in re.sub(r"<[^>]+>", "", tag.group(1))
+    assert re.search(r'id="cctv-tag"[^>]*\bopacity="0"', body)  # hidden until the beam hits
+    assert "<img" not in hero and "<ul" not in hero
+    # the camera sits over the sample chart: the existing chart svg is still there
+    assert re.search(r'<svg class="login-line"[^>]*aria-hidden="true"', hero)
+
+
+def test_login_leave_always_continues():
+    js = text("motion.js")
+    start = js.index("function loginLeave(")
+    leave = js[start : js.index("public API")]
+    assert "setTimeout" in leave and "done" in leave
+    assert re.search(r"setTimeout\([^;]*\b(fin|finish|cont)\b", leave), "a timer must call done"
+    assert "catch" in leave
+    app = text("app.js")
+    sign_in = app[app.index("async function completeSignIn(") :]
+    sign_in = sign_in[: sign_in.index("\n}\n")]
+    assert 'fx("loginLeave"' in sign_in and "enterApp()" in sign_in
+    assert "setTimeout" in sign_in  # app.js carries its own fallback if Motion never answers
+
+
+def test_login_enter_called_when_login_shows():
+    app = text("app.js")
+    route = app[app.index("function route()") :]
+    route = route[: route.index("\n}\n")]
+    assert 'fx("loginEnter")' in route
+
+
+def test_verified_copy():
+    assert "ยืนยันตัวตนแล้ว" in text("index.html") + text("motion.js")
+    assert "ตรวจพบ" in text("index.html")
+
+
+def test_login_scene_css():
+    css = text("motion.css")
+    for needle in ("#cctv-beam", ".cctv-rec", ".cctv-pan", "@keyframes cctv-pan", ".login-card"):
+        assert needle in css, needle
+    assert "18deg" in css  # pans +-18 degrees
+    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and "#cctv-beam" in b[0]]
+    assert off, "the beam is dim and still when effects are off"
+    reduced = [b for b in _css_blocks(css) if "prefers-reduced-motion: reduce" in b[0]]
+    assert "#cctv-beam" in reduced[0][2] or any("#cctv-beam" in b[0] for b in _css_blocks(css))
+
+
+def test_login_leave_calls_done_at_once_when_off(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "leave.js"
+    script.write_text(
+        """
+const assert = require("assert");
+const classes = new Set();
+globalThis.document = {
+  hidden: false,
+  documentElement: {
+    classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
+    setAttribute() {},
+  },
+  getElementById: () => null,
+  addEventListener() {},
+};
+globalThis.addEventListener = () => {};
+require(process.argv[2]);
+let n = 0;
+globalThis.Motion.loginLeave(() => { n += 1; });
+assert.strictEqual(n, 1, "done must run at once before init / when off");
+globalThis.Motion.loginLeave(() => { n += 1; throw new Error("done may throw"); });
+assert.strictEqual(n, 2);
+globalThis.Motion.loginEnter();
+globalThis.Motion.loginEnter();
+""",
+        encoding="utf-8",
+    )
+    cmd = [node, str(script), str(WEB_DIR / "motion.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+
+
+# ---- command-center motion: hero radar, alert burst, card glow ----
+
+
+def test_alert_burst_rate_limited():
+    js = text("motion.js")
+    assert "BURST_GAP_MS = 2000" in js
+    start = js.index("function alertBurst(")
+    assert "BURST_GAP_MS" in js[start : start + 600]
+    app = text("app.js")
+    fn = app[app.index("function onAlert(") :]
+    fn = fn[: fn.index("\n}\n")]
+    assert 'fx("alertBurst"' in fn and "severity" in fn[fn.index('fx("alertBurst"') :][:80]
+
+
+def test_hero_radar_markup():
+    html = text("index.html")
+    hero = html[html.index('id="hero"') : html.index('class="home-cards"')]
+    orb = re.search(r'<span id="hero-orb"[^>]*>(.*?)</span>\s*(?=<)', hero, re.S)
+    assert orb is not None
+    assert re.search(r'class="orb-radar"[^>]*aria-hidden="true"', hero)
+    assert hero.index("orb-radar") > hero.index('id="hero-orb"')
+    assert len(re.findall(r'class="orb-ring"[^>]*aria-hidden="true"', hero)) >= 2
+    assert re.search(r'<svg\b[^>]*\bid="hero-cam"[^>]*aria-hidden="true"', hero)
+    assert "<img" not in hero
+
+
+def test_edge_flash_once():
+    css = text("motion.css")
+    blocks = _css_blocks(css)
+    rules = [
+        b
+        for b in blocks
+        if "fx-edge" in b[0] and "animation" in b[2] and b[0][0] != "@" and ".fx-off" not in b[0]
+    ]
+    assert rules, "#fx-edge needs an animation rule"
+    for _, _, body, _ in rules:
+        assert "infinite" not in body
+        assert re.search(r"animation-iteration-count:\s*1\b", body) or re.search(
+            r"animation:[^;]*\s1\s*(;|$)", body
+        )
+    assert "@keyframes fx-edge-flash" in css
+
+
+def test_radar_rings_camera_and_card_glow_css():
+    css = text("motion.css")
+    needles = (".orb-radar", ".orb-ring", "#hero-cam", ".fx-sweep", ".stat-card")
+    for needle in (*needles, "@keyframes fx-radar"):
+        assert needle in css, needle
+    # the old conic border light is gone: the HUD panel frame replaces it
+    assert "fx-orbit" not in css and ".stat-card::before" not in css
+    assert re.search(r"\.stat-card:hover[^{]*\{[^}]*translateY\(-2px\)", css)
+    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and ".orb-radar" in b[0]]
+    assert off, "the radar is hidden when effects are off"
+    assert len(css.encode("utf-8")) <= 24 * 1024
+
+
+# ---- command-center motion: chart overlay and crossing shockwave ----
+
+
+def _js_function(src: str, header: str) -> str:
+    start = src.index(header)
+    depth, i = 0, src.index("{", start)
+    for j in range(i, len(src)):
+        depth += {"{": 1, "}": -1}.get(src[j], 0)
+        if depth == 0:
+            return src[start : j + 1]
+    raise AssertionError(f"{header} is not closed")
+
+
+def test_crossed_up_contract():
+    js = text("app.js")
+    body = _js_function(js, "function crossedUp(prev, cur, limit)")
+    assert "Number.isFinite" in body and "<= limit" in body
+    assert "< cur" in body or "limit < cur" in body
+    calls = [m.start() for m in re.finditer(r'fx\("chartCross"', js)]
+    assert len(calls) == 1
+    guard = js[: calls[0]].rstrip().splitlines()[-1]
+    assert guard.lstrip().startswith("if (") and "crossedUp(" in guard  # the guard before the call
+    assert (
+        "chartCross" not in js[js.index("async function loadSeries") : js.index("function plot(")]
+    )
+    attach = js[js.index('fx("chartAttach"') :][:400]
+    assert "chart.api" in attach and "chart.f" in attach and "limitLine" in attach
+
+
+def test_chart_attach_replaces_previous():
+    js = text("motion.js")
+    body = _js_function(js, "function chartAttach(")
+    assert "chartDetach()" in body and body.index("chartDetach()") < body.index("addLayer(")
+    detach = _js_function(js, "function chartDetach(")
+    assert (
+        "removeLayer(" in detach
+        and "disconnect()" in detach
+        and "unsubscribeVisibleTimeRangeChange" in detach
+    )
+    assert "ResizeObserver" in body and "subscribeVisibleTimeRangeChange" in body
+    cross = _js_function(js, "function chartCross(")
+    assert "alertBurst" in cross and "=== null" in cross  # null coordinates: only the burst
+    draw = _js_function(js, "function chartDraw(")
+    assert (
+        "getBoundingClientRect" not in draw and "offsetWidth" not in draw
+    )  # no layout reads in the loop
+
+
+def test_chart_overlay_canvas():
+    html = text("index.html")
+    tag = re.search(r'<canvas[^>]*id="fx-chart"[^>]*>', html)
+    assert tag and 'aria-hidden="true"' in tag.group(0)
+    assert html.index('id="chart"') < html.index('id="fx-chart"') < html.index('id="chart-empty"')
+    css = text("motion.css")
+    blocks = _css_blocks(css)
+    reduced = [b for b in blocks if "prefers-reduced-motion: reduce" in b[0]]
+    assert "#fx-chart" in reduced[0][2] and "display: none" in reduced[0][2]
+    assert any(".fx-off #fx-chart" in b[0] and "display: none" in b[2] for b in blocks)
+    own = [b for b in blocks if b[0].strip() == "#fx-chart"]
+    assert own and "pointer-events: none" in own[0][2] and "position: absolute" in own[0][2]
+
+
+def test_no_crossing_while_series_loads():
+    js = text("app.js")
+    call = js[js.index('fx("chartCross"') - 120 : js.index('fx("chartCross"')]
+    assert "!chart.loading" in call and "crossedUp(" in call
+    handler = js[js.index('$("symbol-select").addEventListener("change"') :][:700]
+    assert "chart.loading = true" in handler and "loadSeries()" in handler
+    load = js[js.index("async function loadSeries()") :][:420]
+    assert "chart.loading = true" in load and "finally" in load and "chart.loading = false" in load
+
+
+def test_page_enter_wired():
+    app = text("app.js")
+    body = app[app.index("function route()") :]
+    body = body[: body.index("\n}\n")]
+    assert 'fx("pageEnter"' in body
+    assert "pageShown" in body and "let pageShown = false" in app
+    # skipped on the first paint and right after sign-in
+    assert re.search(r'pageShown && cameFrom !== "login"[^\n]*fx\("pageEnter"', body)
+    js = text("motion.js")
+    assert "function pageEnter(" in js and "void node;" not in js
+    css = text("motion.css")
+    needles = (".fx-wipe", "@keyframes fx-wipe", ".fx-rise", "@keyframes fx-rise")
+    for needle in (*needles, "prefers-reduced-motion: no-preference"):
+        assert needle in css, needle
+
+
+def test_motion_size_budget():
+    assert len(text("motion.js").encode("utf-8")) <= 40 * 1024
+    assert len(text("hud.js").encode("utf-8")) <= 40 * 1024
+    assert len(text("motion.css").encode("utf-8")) <= 24 * 1024
+
+
+# ---- command-center motion: final-review fixes ----
+
+
+def test_fx_off_does_not_kill_app_animations():
+    css = text("motion.css")
+    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and "animation: none" in b[2]]
+    assert off
+    for prelude, _, _, _ in off:
+        assert not re.search(r"\.fx-off\s+\*", prelude), "must not target *"
+        for app_class in (".page", ".rail-row", ".flash", ".orb-change", ".ci-line", ".toast"):
+            assert app_class not in prelude, app_class
+    joined = " ".join(b[0] for b in off)
+    owned_all = ("#fx-edge", ".fx-wipe", ".fx-rise", ".fx-sweep", ".cctv", ".orb-radar", ".hud-rec")
+    for owned in owned_all:
+        assert owned in joined, owned
+    js = text("motion.js")
+    drop = _js_function(js, "function dropTransient(")
+    for cls in ("is-flash", "fx-sweep", "fx-rise", "fx-wipe"):
+        assert cls in drop, cls
+    assert "dropTransient()" in _js_function(js, "function apply(")
+    assert '"animationcancel"' in js
+
+
+def test_chart_shockwave_is_rate_limited():
+    js = text("motion.js")
+    cross = _js_function(js, "function chartCross(")
+    assert "S.crossAt" in cross and "BURST_GAP_MS" in cross
+    assert cross.index("BURST_GAP_MS") < cross.index("O.cross =")
+
+
+def test_failed_series_load_resets_the_crossing_baseline():
+    app = text("app.js")
+    inner = _js_function(app, "async function loadSeriesInner(")
+    catch = inner[inner.index("catch (e)") : inner.index("if (symbol !== state.symbol)")]
+    assert "chart.now.f = null" in catch and "setTau(null)" in catch
+    handler = app[app.index('$("symbol-select").addEventListener("change"') :][:700]
+    assert "chart.now.f = null" in handler
+
+
+def test_chart_overlay_stops_drawing_when_hidden():
+    js = text("motion.js")
+    attach = js[js.index("new G.ResizeObserver") :][:700]
+    zero = attach[attach.index("r.width <= 0") :][:260]
+    assert "O.w = 0" in zero and "O.h = 0" in zero and "return" in zero
+    assert "!O.w || !O.h" in _js_function(js, "function chartDraw(")
+
+
+def test_login_beam_returns_after_a_failed_sign_in():
+    js = text("motion.js")
+    leave = _js_function(js, "function loginLeave(")
+    assert "Lg.leaving = false" in leave and "addLayer(loginDraw)" in leave
+
+
+# ---- header: data ticker, CCTV-eye logo, sliding nav indicator ----
+
+TICKER_BODY = r"""
+const empty = m.tickerItems();
+assert.ok(Array.isArray(empty) && empty.length >= 3);
+for (const it of empty) {
+  assert.strictEqual(typeof it.label, "string");
+  assert.strictEqual(typeof it.value, "string");
+  assert.ok(!/NaN|undefined|null/.test(it.label + it.value), JSON.stringify(it));
+}
+const by = (items, l) => items.find((i) => i.label === l);
+assert.strictEqual(by(empty, "MODE").value, "–");
+assert.strictEqual(by(empty, "HEALTH").value, "–");
+assert.strictEqual(by(empty, "ALERTS 24H").value, "–");
+m.setTickerState({
+  mode: "replay",
+  symbols: ["BTCUSDT", "ETHUSDT"],
+  prices: { BTCUSDT: 100.5, ETHUSDT: NaN },
+  health: { overall: "ok" },
+  alertCountKnown: true,
+  alertCount: 3,
+});
+const it = m.tickerItems();
+assert.strictEqual(by(it, "BTCUSDT").value, "100.5");
+assert.strictEqual(by(it, "ETHUSDT").value, "–");
+assert.strictEqual(by(it, "MODE").value, "REPLAY");
+assert.strictEqual(by(it, "HEALTH").value, "OK");
+assert.strictEqual(by(it, "ALERTS 24H").value, "3");
+m.setTickerState({ symbol: "ETHUSDT" });
+assert.strictEqual(by(m.tickerItems(), "ALERTS 24H · ETHUSDT").value, "3");
+for (const i of it) assert.ok(!/NaN|undefined/.test(i.label + i.value));
+"""
+
+
+def test_ticker_items_use_state_only(tmp_path):
+    _run_motion(tmp_path, "false", TICKER_BODY)
+
+
+def test_logo_eye_svg():
+    html = text("index.html")
+    header = re.search(r'<header id="topbar".*?</header>', html, re.S).group(0)
+    svg = re.search(r'<svg[^>]*\sid="logo-eye"[^>]*>.*?</svg>', header, re.S)
+    assert svg, "no svg#logo-eye in the header"
+    assert 'aria-hidden="true"' in svg.group(0).split(">")[0]
+    assert 'id="logo-iris"' in svg.group(0) and 'id="logo-ring"' in svg.group(0)
+    assert "MARKET IDS" in header and 'class="brand-cur"' in header
+    css = text("motion.css")
+    assert 'html[data-mood="alert"]' in css and "logo-" in css
+    styles = text("styles.css")
+    red = re.search(r'html\[data-mood="alert"\] \.brand-mark\s*\{([^}]*)\}', styles)
+    assert red and "var(--hud-alert)" in red.group(1)
+    stare = re.search(r'html\[data-mood="alert"\] \.iris-core\s*\{([^}]*)\}', styles)
+    assert stare and "scale(" in stare.group(1)
+
+
+def test_ticker_reads_state():
+    js = text("app.js")
+    assert "function tickerItems(" in js
+    body = _js_function(js, "function tickerItems(")
+    assert "state." in body and "isNum(" in body and '"–"' in body
+    assert 'fx("ticker"' in js
+    html = text("index.html")
+    strip = re.search(r'<div id="ticker"[^>]*>.*?</div>\s*</div>', html, re.S) or re.search(
+        r'<div id="ticker".*?<header id="topbar"', html, re.S
+    )
+    assert strip and 'aria-hidden="true"' in strip.group(0).split(">")[0]
+    assert not re.search(r"\d+\.\d|\d{3,}", strip.group(0)), "a number in the ticker markup"
+    for sel in (".tk-track", ".tk-group"):
+        assert sel in text("motion.css") or sel in text("styles.css"), sel
+
+
+def test_nav_slider():
+    html = text("index.html")
+    nav = re.search(r'<nav class="nav".*?</nav>', html, re.S).group(0)
+    ind_tag = nav.split('class="nav-ind"')[1].split(">")[0]
+    assert 'class="nav-ind"' in nav and "aria-hidden" in ind_tag
+    ind = re.search(r"(?m)^\.nav-ind\s*\{([^}]*)\}", text("styles.css")).group(1)
+    assert "transform" in ind and "gradient" not in ind
+    js = text("motion.js")
+    assert "translate3d" in js or "translateX" in js
+    assert 'fx("navTo"' in text("app.js")
+    assert ".has-ind" in text("styles.css")  # the static underline is the fallback
+
+
+def test_header_motion_off_paths():
+    css = text("motion.css")
+    off = css.split(".fx-off", 1)[1]
+    for sel in (".brand-cur", "#logo-ring", ".tk-track", ".nav-ind"):
+        assert sel in off, sel
+    reduced = css.split("prefers-reduced-motion: reduce", 1)[1].split("}", 1)[0]
+    for sel in (".nav-ind", ".brand-cur"):
+        assert sel in reduced, sel
+
+
+def test_header_follows_layout_shifts():
+    js, css = text("motion.js"), text("styles.css")
+    assert "ResizeObserver" in js and "requestAnimationFrame(run)" in js
+    assert '".nav"' in js and "function tickerFit(" in js
+    draw = _js_function(js, "function eyeDraw(")
+    assert "navPlace" not in draw and "ResizeObserver" not in draw
+    name = re.search(r"\.brand-name\s*\{([^}]*)\}", css).group(1)
+    assert re.search(r"width:\s*calc\(10ch", name)
+    mcss = text("motion.css")
+    assert ".fx-off .tk-view.is-live .tk-static" in mcss
+    assert ".fx-off .iris-core" in mcss
+
+
+# ---- HUD redesign, task 3: Home layout, tilt, glint, wires, scramble, glitch (hud.js) ----
+
+
+def test_home_grid_asymmetric():
+    css = text("styles.css")
+    block = re.search(r"#page-home:not\(\[hidden\]\)\s*\{([^}]*)\}", css).group(1)
+    areas = re.search(r"grid-template-areas:([^;]*);", block).group(1)
+    rows = re.findall(r'"([^"]+)"', areas)
+    # the chart is the centre column on every row
+    assert rows and all(r.split()[1] == "chart" for r in rows), rows
+    assert "grid-area: chart" in css and "display: contents" in css
+    assert "minmax(0, 2.5fr)" in block  # the centre column is the widest
+    assert "@media (max-width: 1199px)" in css and "@media (max-width: 719px)" in css
+    one = css.split("@media (max-width: 719px)", 1)[1]
+    assert 'grid-template-areas: "hero" "chart"' in one
+
+
+def test_scramble_api():
+    hud, app = text("hud.js"), text("app.js")
+    assert re.search(r"M\.scramble\s*=\s*function", hud)
+    assert re.search(r"M\.scramble\s*=\s*function[^{]*\{\s*try", hud)
+    assert "SCRAMBLE_MS = 400" in hud
+    assert 'fx("scramble"' in app
+    helper = _js_function(app, "function setKpiText(")
+    assert "node.textContent = text" in helper  # the fallback without hud.js
+    assert "setKpiText(box" in app and 'setKpiText($("symbol-price")' in app
+    assert 'src="hud.js"' in text("index.html")
+    html = text("index.html")
+    assert html.index('src="motion.js"') < html.index('src="hud.js"')
+
+
+def test_tilt_pointer_fine():
+    hud = text("hud.js")
+    assert 'matchMedia("(pointer: fine)")' in hud
+    assert "TILT_SMALL = 6" in hud and "TILT_CHART = 2.5" in hud
+    assert "e.buttons" in hud and "selecting()" in hud and "tiltReset" in hud
+    # read once per panel entry, not per move
+    assert "getBoundingClientRect" in _js_function(hud, "function onPointerMove(")
+    # the only other read is the click ripple's, once per click (never per move or per frame)
+    assert hud.count("getBoundingClientRect") == 2 and "getBoundingClientRect" in _js_function(
+        hud, "function ripple("
+    )
+
+
+def test_wires_hidden_decoration():
+    html, hud, mcss = text("index.html"), text("hud.js"), text("motion.css")
+    tag = re.search(r'<svg[^>]*id="home-wires"[^>]*>', html).group(0)
+    assert 'aria-hidden="true"' in tag
+    assert "ResizeObserver" in hud
+    assert "layoutWires" in hud and "getTotalLength" not in hud
+    draw = _js_function(hud, "function drawScramble(")
+    assert "layoutWires" not in draw and "offsetWidth" not in draw
+    assert ".fx-off .hud-wires" in mcss
+    reduced = mcss.split("prefers-reduced-motion: reduce", 1)[1].split("}", 1)[0]
+    assert ".hud-wires" in reduced and ".fx-glint" in reduced
+    off = mcss.split(".fx-off", 1)[1]
+    for sel in (".hud-wire-pulse", ".fx-glint::before", ".hud-glitch"):
+        assert sel in off, sel
+
+
+def test_hud_js_rules():
+    hud = text("hud.js")
+    for api in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert api not in hud, api
+    assert "://" not in hud.replace("http://www.w3.org/2000/svg", "")
+    assert "fx-off" in hud and "removeLayer" in hud and "addLayer" in hud
+
+
+def test_hero_glitch_once_per_alert_transition():
+    hud, mcss = text("hud.js"), text("motion.css")
+    assert "GLITCH_GAP_MS = 2000" in hud
+    assert 'mood === "alert" && !wasAlert' in hud
+    assert "@keyframes hud-glitch" in mcss
+
+
+def test_scramble_fix_round_1():
+    hud, app, mcss = text("hud.js"), text("app.js"), text("motion.css")
+    kpi = _js_function(app, "function renderAlertsKpi(")
+    assert 'box.textContent = "–"' not in kpi and 'setKpiText(box, "–")' in kpi
+    # a job whose node was changed from outside abandons itself instead of writing over it
+    draw = _js_function(hud, "function drawScramble(")
+    assert "job.last" in draw and "abandon(job)" in draw
+    assert "!job.abandoned" in _js_function(hud, "function settle(")
+    # a 1 Hz value must not flicker: snaps stamp the node too and the gap is wide
+    assert "SCRAMBLE_GAP_MS = 3000" in hud
+    sc = _js_function(hud, "function scramble(")
+    snap = sc[sc.index("isOff() ||") : sc.index("var job =")]
+    assert "_hudScrambleAt = t" in snap
+    # screen readers get the final value while it scrambles
+    assert 'setAttribute("aria-label", to)' in sc
+    assert 'removeAttribute("aria-label")' in _js_function(hud, "function settle(")
+    assert "if (isOff()) return" in _js_function(hud, "function layoutWires(")
+    assert "accepted exception to transform/opacity-only" in mcss
+
+
+def test_scramble_behaviour_in_node(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    harness = r"""
+const fs = require("fs"), vm = require("vm");
+let layers = [], timers = [], clock = 0;
+function mkNode(t) { const a = {}; return { textContent: t, setAttribute(k, v) { a[k] = v; }, removeAttribute(k) { delete a[k]; }, a }; }
+const root = { classList: { contains: () => false }, getAttribute: () => null };
+const doc = { documentElement: root, hidden: false, querySelectorAll: () => [], getElementById: () => null,
+  addEventListener() {}, createElement: () => ({ setAttribute() {}, style: { setProperty() {} } }) };
+doc.documentElement.addEventListener = () => {};
+const M = { addLayer: f => layers.push(f), removeLayer: f => { layers = layers.filter(x => x !== f); } };
+const g = { document: doc, Motion: M, performance: { now: () => clock }, setTimeout: (f, ms) => { timers.push(f); return timers.length; },
+  matchMedia: () => ({ matches: false }), addEventListener() {}, getSelection: () => null };
+g.globalThis = g;
+vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), g);
+const out = {};
+function frames(n) { for (let i = 0; i < n; i++) { clock += 50; layers.slice().forEach(f => f(null, clock)); } }
+let n = mkNode("0"); M.scramble = g.Motion.scramble;
+// normal job ends on its text
+M.scramble(n, "1234"); frames(3); out.mid = n.textContent !== "1234"; frames(20); out.normal = n.textContent;
+out.label1 = "aria-label" in n.a;
+// external write mid-job survives (also through the safety timer)
+clock += 5000; n = mkNode("0"); M.scramble(n, "5555"); frames(3); n.textContent = "-"; frames(20); timers.forEach(f => f()); out.external = n.textContent; out.label2 = "aria-label" in n.a;
+// external write before the first frame survives
+clock += 5000; n = mkNode("0"); M.scramble(n, "7777"); n.textContent = "-"; timers.forEach(f => f()); out.early = n.textContent;
+// a new scramble mid-job ends on the new text
+clock += 5000; n = mkNode("0"); M.scramble(n, "8888"); frames(3); clock += 10; M.scramble(n, "9999"); frames(30); timers.forEach(f => f()); out.replaced = n.textContent;
+console.log(JSON.stringify(out));
+"""  # noqa: E501
+    script = tmp_path / "h.js"
+    script.write_text(harness, encoding="utf-8")
+    cmd = [node, str(script), str(WEB_DIR / "hud.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["mid"] is True and out["normal"] == "1234" and out["label1"] is False
+    assert out["external"] == "-" and out["label2"] is False
+    assert out["early"] == "-"
+    assert out["replaced"] == "9999"
+
+
+# ---- HUD redesign, task 4: plexus background and neon chart ----
+
+
+def test_plexus_layer():
+    hud, js, css = text("hud.js"), text("motion.js"), text("motion.css")
+    for const in ("PLEX_MIN = 40", "PLEX_MAX = 70", "PLEX_BEND = 120"):
+        assert const in hud, const
+    assert "PLEX_SMALL_W = 640" in hud and "pointerFine()" in hud
+    assert "addLayer(drawPlexus" in hud.replace("M.addLayer", "addLayer")
+    old_grid = ("perspective grid", "GRID_ALPHA", "seedDots", "createLinearGradient")
+    for old in (*old_grid, "createRadialGradient"):
+        assert old not in js, old
+    assert "Gradient(" not in hud
+    body = _js_function(hud, "function drawPlexus(")
+    assert "getBoundingClientRect" not in body and "offsetWidth" not in body
+    crt = re.search(r"(?m)^body::after\s*\{([^}]*)\}", css)
+    assert crt and "pointer-events: none" in crt.group(1) and "animation" not in crt.group(1)
+    assert "body::after" in css.split("prefers-reduced-motion: reduce")[1].split("}", 1)[0]
+    assert ".fx-off body::after" in css
+
+
+def test_chart_hud_colours():
+    js = text("app.js")
+    colours = _js_function(js, "function chartColors(")
+    assert 'price: cssVar("--hud-line")' in colours
+    assert 'f: cssVar("--hud-violet")' in colours
+    assert 'alert: cssVar("--hud-alert")' in colours
+    point = _js_function(js, "function fPoint(")
+    assert "chart.tau" in point and "color" in point
+    assert "fPoint" in _js_function(js, "function plot(")
+    assert "Array.from(f, fPoint)" in js
+    assert "LWC.LineStyle.Dashed" in _js_function(js, "function setTau(")
+
+
+def test_chart_draw_in():
+    hud, app = text("hud.js"), text("app.js")
+    reveal = _js_function(hud, "function chartReveal(")
+    assert "revealed" in reveal and "isOff()" in reveal and "REVEAL_MS" in hud
+    assert "clipPath" in reveal and "inset(" in reveal
+    assert reveal.index("revealed = true") < reveal.index("isOff()")  # one shot, even when off
+    assert "revealAnim.cancel()" in hud  # effects going off finishes it at once
+    load = _js_function(app, "async function loadSeriesInner(")
+    assert 'fx("chartReveal")' in load
+    assert 'fx("chartReveal")' not in _js_function(app, "function plot(")
+
+
+# ---- HUD redesign, task 5: login page ----
+
+
+def test_login_hud():
+    html, css, mcss = text("index.html"), text("styles.css"), text("motion.css")
+    start = html.index('<section id="page-login"')
+    page = html[start : html.index("</section>", start)]
+    assert 'data-tag="AUTH · SECURE CHANNEL"' in page
+    assert re.search(r'<form id="login-form" class="[^"]*\bhud\b', page)
+    assert re.search(r'<form id="signup-form" class="[^"]*\bhud\b', page)
+    for ident in (
+        "login-user",
+        "login-pass",
+        "login-remember",
+        "login-submit",
+        "login-error",
+        "signup-form",
+        "signup-user",
+        "signup-name",
+        "signup-pass",
+        "signup-pass2",
+        "signup-error",
+        "signup-line",
+        "signup-open",
+        "signup-back",
+        "cctv-beam",
+        "cctv-rec",
+        "cctv-tag",
+    ):
+        assert f'id="{ident}"' in page, ident
+    assert "-gradient" not in page.lower()
+    assert "-gradient(" not in mcss.replace("conic-gradient(from 0deg, transparent 0 66%", "")
+    assert "-gradient(" not in css
+    assert re.search(r'<svg class="login-mark"[^>]*aria-hidden="true"', page)  # the eye logo
+    assert "login-iris" in page and ".login-iris" in mcss
+    assert "ตรวจพบ" in page
+    assert re.search(r"\.cctv-beam-fill\s*\{[^}]*fill: var\(--fx-alert\)", mcss)
+    # phone: the form comes before the tagline, and the decoration is gone
+    assert ".login-hero { display: contents; }" in css
+
+
+def test_login_typed_tagline():
+    html, hud, mcss = text("index.html"), text("hud.js"), text("motion.css")
+    tag = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', html, re.S)
+    assert tag
+    assert "กล้องวงจรปิดของตลาดคริปโต" in tag.group(1)
+    assert "เตือนเมื่อการซื้อขายผิดปกติทางสถิติ" in tag.group(1)
+    # the markup holds the full text (the fallback); hud.js types it, and off shows it all
+    assert "function typeTagline(" in hud and "function typeEnd(" in hud
+    assert "innerHTML" not in hud
+    assert "if (isOff()) {\n        settleAll();\n        typeEnd();" in hud
+    assert "typeEnd" in _js_function(hud, "function typeTagline(")
+    assert ".fx-off .login-tagline.is-typing::after" in mcss
+
+
+# ---- HUD redesign, final-review fixes ----
+
+
+def test_panel_flash_drives_the_fill_not_the_hidden_background():
+    css = text("styles.css")
+    # a .hud paints its fill (::after) over its own background, so the flash animates the fill
+    assert ".hud.flash::after" in css and "animation: hud-flash" in css
+    assert re.search(r"@keyframes hud-flash\s*\{[^}]*rgba\(245, 158, 11", css)
+    assert re.search(r"\.hud\.flash\s*\{\s*animation:\s*none", css)
+    assert 'flash($("card-alerts"))' in text("app.js")
+
+
+def test_login_tagline_has_a_permanent_sr_only_copy():
+    html, hud = text("index.html"), text("hud.js")
+    tag = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', html, re.S)
+    assert tag
+    inner = tag.group(1)
+    full = "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
+    assert f'<span class="sr-only">{full}</span>' in inner
+    assert len(re.findall(r'<span class="tg" aria-hidden="true">', inner)) == 2
+    assert "aria-label" not in tag.group(0)
+    assert "aria-label" not in _js_function(hud, "function typeTagline(") + _js_function(
+        hud, "function typeEnd("
+    )
+    assert ".login-tagline .tg" in text("styles.css")
+
+
+def test_cctv_svg_has_no_stray_whitespace_line():
+    lines = text("index.html").split("\n")
+    assert not [n for n, line in enumerate(lines, 1) if line and not line.strip()]
+
+
+def test_hero_score_meter_markup_and_logic():
+    html, js, css = text("index.html"), text("app.js"), text("styles.css")
+    meter = re.search(r'<div class="hero-meter"[^>]*>', html)
+    assert meter and 'aria-hidden="true"' in meter.group(0)
+    for node in ("hero-meter-read", "hero-meter-fill", "hero-meter-tick"):
+        assert f'id="{node}"' in html
+    body = _js_function(js, "function renderHeroMeter(")
+    assert (
+        "chart.now.f" in body and "chart.tau" in body
+    )  # the real score and limit, nothing invented
+    assert "fmtNum(f, 2)" in body and "fmtNum(tau, 2)" in body  # unknown values read "–"
+    assert "f > tau" in body and '"over"' in body
+    assert "renderHeroMeter();" in _js_function(js, "function renderHero(")
+    assert ".hm-fill.over" in css and "scaleX(" in body  # transform only
+
+
+def test_live_clocks_on_live_panels_only():
+    html = text("index.html")
+    for tag in ("CAM-01 · STATUS · LIVE", "CAM-02 · MAIN FEED · LIVE", "CAM-07 · REPLAY"):
+        head = re.search(
+            rf'<span class="hud-tag" data-tag="{re.escape(tag)}"></span>(.*?)</div>', html
+        )
+        assert head and 'class="hud-clock" aria-hidden="true"' in head.group(1), tag
+    assert html.count('class="hud-clock"') == 3
+    js = text("app.js")
+    assert 'fx("clockSource", () => thaiClock(eventNowUs(), true) ?? "–")' in js
+    assert "setInterval" not in _js_function(js, "function renderHero(")
+
+
+def test_motion_failure_fallback_and_nav_replace():
+    js = text("app.js")
+    assert 'classList.toggle("fx-off", fxOff())' in _js_function(js, "function fxApply(")
+    assert "placeNavMark();" in _js_function(js, "function applyRoleGates(")
+    assert 'fx("navTo"' in _js_function(js, "function placeNavMark(")
+    apply_fn = _js_function(text("motion.js"), "function apply(off)")
+    assert "tickerFit();" in apply_fn.split("} else {")[1]
+
+
+def test_phone_home_has_no_empty_replay_row_and_glow_follows_violet():
+    css = text("styles.css")
+    phone = css.split("@media (max-width: 719px)")[1].split("\n}\n", 1)[0]
+    hidden = (
+        ':has(#replay-bar[hidden]) { grid-template-areas: "hero" "chart" "s1" "s2" "s3" "alerts"; }'
+    )
+    assert hidden in phone
+    assert "--line-f-glow: rgba(124, 58, 237, 0.45)" in css and "167, 139, 250" not in css
+    assert "--hud-violet: #7c3aed" in css
+
+
+def test_glitch_is_slow_enough():
+    mcss = text("motion.css")
+    assert "steps(6)" not in mcss
+    # at most 3 jumps in a second: a 0.8 s run holds each of its stops for 0.4 s
+    anim = re.search(r"\.hud-glitch \{ animation: hud-glitch ([\d.]+)s steps\(1\) 1", mcss)
+    assert anim and float(anim.group(1)) >= 0.7
+    frames = re.search(r"@keyframes hud-glitch \{(.*?)\n\}", mcss, re.S).group(1)
+    assert len(re.findall(r"\d+% \{", frames)) <= 3
+
+
+HUD_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+let layers = [], timers = [], intervals = [], cleared = [], clock = 0, off = false, observers = [];
+const cls = () => { const s = new Set(); return { add: c => s.add(c), remove: c => s.delete(c), contains: c => s.has(c) }; };
+function mk(o) {
+  return Object.assign({ textContent: "", attrs: {}, children: [], l: {}, className: "", classList: cls(), hidden: false, disabled: false,
+    style: { setProperty(k, v) { this[k] = v; }, removeProperty(k) { delete this[k]; } }, offsetHeight: 40,
+    setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; },
+    getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+    appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+    removeChild(c) { this.children = this.children.filter(x => x !== c); c.parentNode = null; return c; },
+    addEventListener(t, f) { (this.l[t] = this.l[t] || []).push(f); },
+    querySelector(sel) { return sel === ":scope > .fx-ripple" ? this.children.find(c => c.className === "fx-ripple") || null : null; },
+    closest() { return this; }, getBoundingClientRect() { return { left: 10, top: 10, width: 100, height: 30 }; } }, o);
+}
+const root = mk({}); root.classList = { contains: c => c === "fx-off" && off, add() {}, remove() {} }; root.getAttribute = () => null;
+const tagA = mk({ textContent: "AAAA" }), tagB = mk({ textContent: "BBBB" });
+const tag = mk({ id: "login-tagline" }); tag.querySelectorAll = sel => (sel === ".tg" ? [tagA, tagB] : []);
+const page = mk({}); const canvas = mk({}); const rec = { bent: 0 };
+const ctx2d = ({ clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillRect() {},
+  quadraticCurveTo() { rec.bent++; }, set strokeStyle(v) {}, set fillStyle(v) {}, set lineWidth(v) {}, set globalAlpha(v) {} });
+canvas.getContext = () => ctx2d;
+const clocks = [mk({ textContent: "-" }), mk({ textContent: "-" })];
+const byId = { "login-tagline": tag, "page-login": page, "fx-bg": canvas };
+const doc = { documentElement: root, hidden: false, getElementById: id => byId[id] || null, createElement: () => mk({}),
+  querySelectorAll: sel => (sel === ".hud-clock" ? clocks : []), addEventListener(t, f) { (doc.l[t] = doc.l[t] || []).push(f); }, l: {} };
+const M = { addLayer: f => layers.push(f), removeLayer: f => { layers = layers.filter(x => x !== f); }, bg: () => ({ w: 400, h: 400, rgb: [0, 229, 255] }) };
+class MO { constructor(f) { this.f = f; observers.push(this); } observe() {} }
+const wl = {};
+const g = { document: doc, Motion: M, performance: { now: () => clock }, matchMedia: q => ({ matches: q.includes("pointer: fine") }),
+  setTimeout: (f, ms) => { timers.push(f); return timers.length; }, clearTimeout() {},
+  setInterval: (f, ms) => { intervals.push(f); return intervals.length; }, clearInterval: id => cleared.push(id),
+  addEventListener(t, f) { (wl[t] = wl[t] || []).push(f); }, getSelection: () => null, getComputedStyle: () => ({ position: "static" }),
+  MutationObserver: MO, Math: Object.assign(Object.create(Math), { random: () => 0.5 }) };
+g.globalThis = g;
+vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), g);
+const fire = () => observers.forEach(o => o.f());
+const out = {};
+// tagline: it types into the aria-hidden spans, never labels the paragraph, and ends on the full text
+out.t0 = [tagA.textContent, tagB.textContent, "aria-label" in tag.attrs];
+intervals[0](); intervals[0](); intervals[0]();
+out.t1 = [tagA.textContent, "aria-label" in tag.attrs];
+off = true; fire();
+out.t2 = [tagA.textContent, tagB.textContent, "aria-label" in tag.attrs];
+off = false;
+// clock: one shared timer, written once a second, static while off
+const before = intervals.length;
+let now = "10:00:00";
+M.clockSource(() => now);
+out.c0 = [clocks[0].textContent, clocks[1].textContent];
+now = "10:00:01"; intervals[intervals.length - 1]();
+out.c1 = clocks[0].textContent;
+off = true; fire(); now = "10:00:02"; intervals[intervals.length - 1]();
+out.c2 = clocks[0].textContent; out.c2cleared = cleared.length > 0;
+off = false;
+out.oneTimer = intervals.length - before;
+// ripple
+const btn = mk({});
+const click = (b, extra) => doc.l.click.forEach(f => f(Object.assign({ target: b, clientX: 60, clientY: 20, detail: 1 }, extra)));
+click(btn);
+const wrap = btn.children[0];
+out.r0 = [btn.children.length, wrap && wrap.className, wrap && wrap.attrs["aria-hidden"], btn.style.position, wrap && wrap.children[0].style.left];
+timers.slice().forEach(f => f());
+out.r1 = [btn.children.length, "position" in btn.style];
+off = true; click(btn); out.r2 = btn.children.length; off = false;
+const dis = mk({ disabled: true }); click(dis); out.r3 = dis.children.length;
+click(btn, { detail: 0 }); out.r4 = btn.children[0].children[0].style.left;
+// plexus: lines bend toward the pointer, and stop bending when the pointer leaves the window
+const draw = layers.find(f => f.name === "drawPlexus");
+wl.pointermove.forEach(f => f({ clientX: 200, clientY: 200, pointerType: "mouse" }));
+rec.bent = 0; draw(ctx2d, 0, 0.03); out.p0 = rec.bent > 0;
+(root.l.mouseleave || []).forEach(f => f());
+rec.bent = 0; draw(ctx2d, 0, 0.03); out.p1 = rec.bent;
+out.pointerleaveOnDoc = !!(doc.l.pointerleave && doc.l.pointerleave.length);
+console.log(JSON.stringify(out));
+"""  # noqa: E501
+
+
+def test_hud_behaviour_in_node(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = tmp_path / "hud_h.js"
+    script.write_text(HUD_HARNESS, encoding="utf-8")
+    cmd = [node, str(script), str(WEB_DIR / "hud.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["t0"] == ["", "", False] and out["t1"][1] is False
+    assert out["t1"][0] not in ("", "AAAA")  # partway through, on the hidden span
+    assert out["t2"] == ["AAAA", "BBBB", False]  # effects off: the whole text at once
+    assert out["c0"] == ["10:00:00", "10:00:00"] and out["c1"] == "10:00:01"
+    assert out["c2"] == "10:00:01" and out["c2cleared"] is True  # off: static
+    assert out["oneTimer"] == 1
+    assert out["r0"][:4] == [1, "fx-ripple", "true", "relative"] and out["r0"][4] == "50px"
+    assert out["r1"] == [0, False]  # removed, and the button's position restored
+    assert out["r2"] == 0 and out["r3"] == 0  # off, and disabled: no ripple
+    assert out["r4"] == "50px"  # a keyboard press ripples from the centre
+    assert out["p0"] is True and out["p1"] == 0 and out["pointerleaveOnDoc"] is False

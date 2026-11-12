@@ -145,6 +145,7 @@ const state = {
   users: [], // the admin Users page rows
   audit: [], // Activity rows already loaded, newest first
   auditDone: false,
+  prices: {}, // symbol -> the last close seen on a bar or in a series (feeds the header ticker)
 };
 
 // ------------------------------------------------------------------ roles + sign-in state
@@ -253,6 +254,28 @@ function clear(node) {
 
 function $(id) {
   return document.getElementById(id);
+}
+
+// ---- HUD panels: the frame is CSS (.hud::before/::after); the four corner brackets are spans added here.
+// A <details> keeps them in its summary, because the rest of it is not drawn while it is closed.
+const HUD_CORNERS = ["tl", "tr", "bl", "bb"];
+
+function hudMark(node) {
+  const host = node.tagName === "DETAILS" ? node.querySelector("summary") || node : node;
+  if (host.querySelector(".hud-br")) return node;
+  for (const c of HUD_CORNERS) host.appendChild(el("span", { class: `hud-br ${c}`, "aria-hidden": "true" }));
+  return node;
+}
+
+// the mono strip at the top of a panel: a REC dot and a label (decoration, hidden from screen readers;
+// the label is drawn from data-tag by CSS, so it never joins the text of the page)
+function hudHead(tag, rec = true) {
+  return el(
+    "div",
+    { class: "hud-head", "aria-hidden": "true" },
+    rec ? el("span", { class: "hud-rec" }) : null,
+    el("span", { class: "hud-tag", "data-tag": tag }),
+  );
 }
 
 function cssVar(name) {
@@ -568,6 +591,7 @@ function openHelp(where) {
   if (!helpState.open) {
     helpState.returnTo = document.activeElement || null;
     helpState.open = true;
+    fxApply();
     $("help-backdrop").hidden = false;
     drawer.hidden = false;
     flash(drawer, "enter");
@@ -581,6 +605,7 @@ function openHelp(where) {
 function closeHelp() {
   if (!helpState.open) return;
   helpState.open = false;
+  fxApply();
   $("help-drawer").hidden = true;
   $("help-backdrop").hidden = true;
   restoreFocus(helpState.returnTo);
@@ -635,6 +660,7 @@ function startTour() {
   if (tourState.open) return;
   if (helpState.open) closeHelp();
   tourState.open = true;
+  fxApply();
   tourState.returnTo = document.activeElement || null;
   $("tour").hidden = false;
   showTourStep(0);
@@ -650,6 +676,7 @@ function startTour() {
 function closeTour(seen) {
   if (!tourState.open) return;
   tourState.open = false;
+  fxApply();
   $("tour").hidden = true;
   if (seen) markTourDone();
   restoreFocus(tourState.returnTo);
@@ -690,6 +717,107 @@ const PAGE_ORDER = ["#/home", "#/alerts", "#/simulate", "#/results"];
 function reducedMotion() {
   const mm = typeof globalThis.matchMedia === "function" ? globalThis.matchMedia : null;
   return !!(mm && mm.call(globalThis, "(prefers-reduced-motion: reduce)").matches);
+}
+
+// ------------------------------------------------------------------ command-center motion (motion.js)
+
+const FX_KEY = "idsai.fx_off";
+
+// the only door to motion.js: it does nothing when that file is missing, and a throw never reaches the page
+function fx(name, ...args) {
+  try {
+    globalThis.Motion?.[name]?.(...args);
+  } catch (e) {
+    /* decoration only: the page works without it */
+  }
+  return undefined;
+}
+
+// a KPI number: it scrambles through random digits and lands on the text (motion.js/hud.js); the plain
+// textContent is the same final value, so a missing or failing file changes nothing but the flicker
+function setKpiText(node, text) {
+  if (!node) return;
+  if (globalThis.Motion && typeof globalThis.Motion.scramble === "function") fx("scramble", node, text);
+  else node.textContent = text;
+}
+
+// ---- the header data ticker: real app state only, "–" for anything not known yet
+const TICKER_MAX_SYMBOLS = 6;
+const TICKER_GAP_MS = 1500; // the strip is decoration: values refresh at most this often
+let tickerTimer = 0;
+let tickerAt = 0;
+
+function tickerItems() {
+  const dash = "–";
+  const word = (x) => (typeof x === "string" && x ? x.toUpperCase() : dash);
+  const items = [{ label: "MODE", value: word(state.mode) }];
+  for (const sym of (state.symbols || []).slice(0, TICKER_MAX_SYMBOLS)) {
+    const p = state.prices ? state.prices[sym] : null;
+    items.push({ label: String(sym), value: isNum(p) ? String(Number(p.toFixed(8))) : dash });
+  }
+  items.push({ label: "HEALTH", value: word(state.health && state.health.overall) });
+  items.push({ label: state.symbol ? `ALERTS 24H · ${state.symbol}` : "ALERTS 24H", value: state.alertCountKnown && isNum(state.alertCount) ? String(state.alertCount) : dash });
+  return items;
+}
+
+function paintTicker() {
+  try {
+    const items = tickerItems();
+    const plain = $("tk-static");
+    if (plain) plain.textContent = items.map((i) => `${i.label} ${i.value}`).join(" · ");
+    fx("ticker", items);
+  } catch (e) {
+    /* decoration only */
+  }
+}
+
+// called from the existing state paths (bar, series, health, alerts); coalesced, so a bar a second costs one repaint per gap
+function tickerRefresh() {
+  if (tickerTimer) return;
+  const wait = Math.max(0, TICKER_GAP_MS - (Date.now() - tickerAt));
+  tickerTimer = setTimeout(() => {
+    tickerTimer = 0;
+    tickerAt = Date.now();
+    paintTicker();
+  }, wait);
+}
+
+// the "ลดเอฟเฟกต์" choice: the account's pref when auth is on and it has one, this browser's mirror otherwise
+function fxUserOff() {
+  const pref = authOn() ? loadedPrefs().fx_off : undefined;
+  return typeof pref === "boolean" ? pref : storageGet(FX_KEY) === "1";
+}
+
+// the guided tour and the help drawer keep the screen still; the user's choice comes back afterwards
+function fxOff() {
+  return fxUserOff() || tourState.open || helpState.open;
+}
+
+function fxApply() {
+  fx("setOff", fxOff());
+  // motion.js missing: the switch must still stop the CSS-only loops, so the class is set here
+  if (!globalThis.Motion) document.documentElement.classList.toggle("fx-off", fxOff());
+  try {
+    const sw = $("menu-fx");
+    if (sw) sw.setAttribute("aria-pressed", String(fxUserOff()));
+  } catch (e) {
+    /* the switch is only a view of the choice */
+  }
+}
+
+function setFxOff(value) {
+  const v = !!value;
+  storageSet(FX_KEY, v ? "1" : "0");
+  if (authOn()) {
+    state.me.prefs = { ...(state.me.prefs || {}), fx_off: v };
+    savePrefs({ fx_off: v });
+  }
+  fxApply();
+}
+
+// hero level -> background mood: calm, watch (also while the state is still unknown), alert
+function heroMood(level) {
+  return level === "alert" ? "alert" : level === "normal" ? "calm" : "watch";
 }
 
 // count a number up or down to `to`; snaps when motion is reduced
@@ -800,6 +928,7 @@ function renderHealth(h) {
   renderBudget();
   renderHero();
   tickInjections(); // the Red-Team card moves with the clock above it
+  tickerRefresh();
 }
 
 // "สุขภาพระบบ": the auditor's overall word, and its checks in Thai behind the card's summary
@@ -877,6 +1006,15 @@ function applySimGates() {
   box.textContent = why;
 }
 
+// the nav underline under the current link (motion.js); a link that appeared or went moves the others
+function placeNavMark() {
+  try {
+    fx("navTo", document.querySelector('.nav a[aria-current="page"]'));
+  } catch (e) {
+    /* decoration only */
+  }
+}
+
 // UI convenience only: the server enforces the role on every route
 function applyRoleGates() {
   const ok = can("analyst");
@@ -900,6 +1038,7 @@ function applyRoleGates() {
   }
   $("menu-activity").hidden = !can("admin");
   $("nav-users").hidden = !can("admin");
+  placeNavMark(); // the Users link changed the row: place the underline again
   renderPlayButton(); // the gate above cleared every title; the play button gets its "(กดแป้นเว้นวรรค)" back
 }
 
@@ -933,7 +1072,7 @@ function renderBudget() {
 function renderAlertsKpi(now = eventNowUs()) {
   const box = $("alerts-count");
   if (!state.symbol || !isNum(now) || !state.alertsLoaded) {
-    box.textContent = "–";
+    setKpiText(box, "–");
     state.alertCount = 0;
     state.alertCountKnown = false;
     return null;
@@ -945,7 +1084,7 @@ function renderAlertsKpi(now = eventNowUs()) {
   const rose = state.alertCountKnown && n > state.alertCount;
   state.alertCount = n;
   if (state.alertsLoaded) state.alertCountKnown = true;
-  tweenNumber(box, n, 0);
+  setKpiText(box, fmtNum(n, 0));
   if (rose) flash($("card-alerts"));
   return n;
 }
@@ -993,8 +1132,30 @@ function heroPending(failed) {
   };
 }
 
+// the hero's score meter: F against the limit τ, both from the chart; "–" and an empty bar when either is unknown
+const METER_HEADROOM = 1.3; // the bar ends 30 % past the limit, so the limit tick sits at ~77 %
+
+function renderHeroMeter() {
+  const read = $("hero-meter-read");
+  const fill = $("hero-meter-fill");
+  const tick = $("hero-meter-tick");
+  if (!read || !fill || !tick) return;
+  const f = chart.now.f;
+  const tau = chart.tau;
+  const haveTau = isNum(tau) && tau > 0;
+  const text = `ระดับ ${fmtNum(f, 2)} / เส้นเตือน ${fmtNum(tau, 2)}`;
+  if (read.textContent !== text) read.textContent = text;
+  const max = haveTau ? tau * METER_HEADROOM : 1;
+  const k = haveTau && isNum(f) ? Math.max(0, Math.min(1, f / max)) : 0;
+  fill.style.transform = `scaleX(${k.toFixed(3)})`; // the bar is scaled, never resized
+  fill.classList.toggle("over", haveTau && isNum(f) && f > tau); // past the limit: the alert colour
+  tick.hidden = !haveTau;
+  if (haveTau) tick.style.left = `${((tau / max) * 100).toFixed(1)}%`;
+}
+
 // runs on every health, score and alert update; writes the DOM only when the sentence changes
 function renderHero() {
+  renderHeroMeter();
   if (!state.health && !isNum(state.lastBarUs) && !state.alertsFailed) return; // no clock yet: keep "กำลังอ่านสถานะ"
   const next = !state.alertsLoaded ? heroPending(state.alertsFailed) : heroStatus({
     nowUs: eventNowUs(),
@@ -1005,6 +1166,7 @@ function renderHero() {
     symbol: state.symbol,
   });
   const prev = state.hero;
+  fx("mood", heroMood(next.level)); // every pass decides the mood, which also ends an alert burst's
   if (prev && prev.level === next.level && prev.title === next.title && prev.line === next.line && prev.alertId === next.alertId) {
     return;
   }
@@ -1060,6 +1222,7 @@ const chart = {
   last: {}, // series key -> last plotted time (s)
   priceTimes: [], // sorted times of the price series, for snapping markers
   now: { price: null, f: null }, // latest plotted values, shown while the pointer is away
+  loading: false, // a history load is in flight: the baseline (now.f, tau) may belong to the previous coin
   hover: false, // the pointer is on the chart: the readout follows it, not the stream
 };
 
@@ -1068,9 +1231,10 @@ function chartColors() {
     bg: cssVar("--panel"),
     text: cssVar("--dim"),
     grid: cssVar("--line"),
-    price: cssVar("--line-price"),
-    f: cssVar("--line-f"),
+    price: cssVar("--hud-line"),
+    f: cssVar("--hud-violet"), // the score; its glow is a wide copy of the same colour
     fGlow: cssVar("--line-f-glow"),
+    alert: cssVar("--hud-alert"), // score above the limit
     tau: cssVar("--tau"),
     shade: cssVar("--shade"),
   };
@@ -1127,7 +1291,7 @@ function initChart() {
   // the glow goes first so the F line draws on top of it; it has no label and no crosshair dot
   chart.fGlow = chart.api.addSeries(
     LWC.LineSeries,
-    lineOptions(c.fGlow, "", { lineWidth: 6, lastValueVisible: false, crosshairMarkerVisible: false }),
+    lineOptions(c.fGlow, "", { lineWidth: 8, lastValueVisible: false, crosshairMarkerVisible: false }),
     1,
   );
   chart.f = chart.api.addSeries(
@@ -1152,6 +1316,19 @@ function initChart() {
   // one chart, one crosshair: it already spans the price, F and layer panes; the readout follows it
   chart.api.subscribeCrosshairMove(onCrosshair);
   renderReadout(null, chart.now.price, chart.now.f);
+  // the overlay (scan line, live-point ring, crossing shockwave); the limit line is looked up when it is
+  // drawn, because setTau() creates it again whenever the limit changes
+  fx("chartAttach", chart.api, chart.f, {
+    limitLine: chart.tauLine,
+    getLimit: () => chart.tauLine,
+    priceSeries: chart.price,
+    latest: () => ({ time: chart.last.f, value: chart.now.f }),
+  });
+}
+
+// the score went from at or below the limit to above it: true only when all three are real numbers
+function crossedUp(prev, cur, limit) {
+  return Number.isFinite(prev) && Number.isFinite(cur) && Number.isFinite(limit) && prev <= limit && limit < cur;
 }
 
 function addLanes() {
@@ -1204,7 +1381,7 @@ function renderReadout(time, price, f) {
 
 function renderSymbolPrice() {
   const p = chart.now.price;
-  $("symbol-price").textContent = `ราคาล่าสุด ${isNum(p) ? fmtNum(p, 8) : "–"}`;
+  setKpiText($("symbol-price"), `ราคาล่าสุด ${isNum(p) ? fmtNum(p, 8) : "–"}`);
 }
 
 function onCrosshair(param) {
@@ -1242,6 +1419,13 @@ function lastTime(data) {
   return data.length ? data[data.length - 1].time : -Infinity;
 }
 
+// a score point above the limit is drawn in the alert colour (the segment that ends on it)
+function fPoint(pt) {
+  if (!isNum(chart.tau) || !isNum(pt.value) || pt.value <= chart.tau) return pt;
+  chart.alertColor ||= cssVar("--hud-alert");
+  return { ...pt, color: chart.alertColor };
+}
+
 function setTau(tau) {
   if (!chart.f) return;
   chart.tau = isNum(tau) ? tau : null;
@@ -1261,7 +1445,19 @@ function setTau(tau) {
   }
 }
 
+// while a history load is in flight the chart still holds the previous coin's baseline, so no crossing is judged
 async function loadSeries() {
+  if (!state.symbol || !chart.api) return;
+  const seq = (chart.loadSeq = (chart.loadSeq || 0) + 1);
+  chart.loading = true;
+  try {
+    await loadSeriesInner();
+  } finally {
+    if (seq === chart.loadSeq) chart.loading = false; // the newest load decides
+  }
+}
+
+async function loadSeriesInner() {
   if (!state.symbol || !chart.api) return;
   const symbol = state.symbol;
   let s;
@@ -1269,6 +1465,8 @@ async function loadSeries() {
     s = await api(`/api/series?symbol=${encodeURIComponent(symbol)}`);
   } catch (e) {
     console.warn("series:", e.message);
+    chart.now.f = null; // the old coin's baseline must not judge the next coin
+    setTau(null);
     return;
   }
   if (symbol !== state.symbol) return; // the picker moved on meanwhile
@@ -1277,21 +1475,24 @@ async function loadSeries() {
   chart.price.setData(price);
   chart.priceTimes = price.filter((p) => "value" in p).map((p) => p.time);
   chart.last = { price: lastTime(price) };
+  setTau(s.tau); // before the score is plotted: the points above it are coloured
   const f = seriesData(times, s.F || []);
-  chart.f.setData(f);
+  chart.f.setData(Array.from(f, fPoint));
   chart.fGlow.setData(f);
   chart.last.f = lastTime(f);
   chart.now = { price: lastValue(price), f: lastValue(f) };
+  if (isNum(chart.now.price)) state.prices[symbol] = chart.now.price;
+  tickerRefresh();
   for (const [key] of LANES) {
     if (!chart.lanes[key]) continue;
     const d = seriesData(times, s[key] || []);
     chart.lanes[key].setData(d);
     chart.last[key] = lastTime(d);
   }
-  setTau(s.tau);
   renderReadout(null, chart.now.price, chart.now.f);
   renderSymbolPrice();
   $("chart-empty").hidden = price.length > 0;
+  if (price.length) fx("chartReveal"); // the lines draw in once, on the first full load (hud.js)
   renderMarkers();
   renderHero();
 }
@@ -1345,7 +1546,7 @@ function plot(key, series, t, value) {
   if (!series || !isNum(value) || !isNum(t)) return false;
   const last = chart.last[key] ?? -Infinity;
   if (t <= last) return false; // stale (e.g. after a seek): dropped on purpose
-  series.update({ time: t, value });
+  series.update(key === "f" ? fPoint({ time: t, value }) : { time: t, value });
   chart.last[key] = t;
   if (key === "price" || key === "f") chart.now[key] = value;
   return true;
@@ -1356,6 +1557,10 @@ function onBar(bar) {
   const closeUs = bar.t_us + S_US;
   if (!isNum(state.lastBarUs) || closeUs > state.lastBarUs) state.lastBarUs = closeUs;
   if (state.mode === "live") $("clock").textContent = fmtThaiTime(state.lastBarUs, true);
+  if (typeof bar.symbol === "string" && isNum(bar.close)) {
+    state.prices[bar.symbol] = bar.close;
+    tickerRefresh();
+  }
   if (bar.symbol !== state.symbol || !chart.api) return;
   const t = toSec(closeUs); // a bar closes at t_us + 1 s, where its score row ends
   if (plot("price", chart.price, t, bar.close)) {
@@ -1368,8 +1573,10 @@ function onBar(bar) {
 function onScore(p) {
   if (!p || p.symbol !== state.symbol || !chart.api || !isNum(p.t_end_us)) return;
   const t = toSec(p.t_end_us);
+  const prevF = chart.now.f;
   if (plot("f", chart.f, t, p.F)) {
     chart.fGlow.update({ time: t, value: p.F });
+    if (!chart.loading && crossedUp(prevF, p.F, chart.tau)) fx("chartCross", { time: t, value: p.F });
     if (!chart.hover) renderReadout(null, chart.now.price, chart.now.f);
   }
   for (const [key] of LANES) plot(key, chart.lanes[key], t, p[key]);
@@ -1506,6 +1713,7 @@ function alertsChanged() {
   renderBudget();
   renderHero();
   checkInjections();
+  tickerRefresh();
 }
 
 function onAlert(data) {
@@ -1533,7 +1741,10 @@ function onAlert(data) {
   const fresh = !state.alerts.has(data.alert_id); // an update of a known alert is not a new one
   state.alerts.set(data.alert_id, data);
   alertsChanged();
-  if (fresh) showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
+  if (fresh) {
+    showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
+    fx("alertBurst", { severity: data.severity }); // after the render, so the newest card is in place
+  }
 }
 
 // a toast in the top right for TOAST_MS; at most TOAST_MAX at once, the oldest makes room
@@ -1541,7 +1752,7 @@ function showToast(text, href) {
   const root = $("toast-root");
   if (!root) return;
   while (root.children.length >= TOAST_MAX) root.removeChild(root.firstChild);
-  const toast = el("div", { class: reducedMotion() ? "toast" : "toast slide" });
+  const toast = hudMark(el("div", { class: reducedMotion() ? "toast hud hud-sm" : "toast hud hud-sm slide" }));
   const close = () => toast.remove();
   append(toast, [
     href ? el("a", { class: "toast-text", href, onclick: close }, text) : el("span", { class: "toast-text" }, text),
@@ -1616,9 +1827,9 @@ function renderAlertFilters(all) {
 }
 
 function alertCard(a) {
-  return el(
+  return hudMark(el(
     "a",
-    { class: "card alert-card", href: alertHref(a.alert_id), "data-sev": sevKey(a.severity) },
+    { class: "card hud hud-sm alert-card", href: alertHref(a.alert_id), "data-sev": sevKey(a.severity) },
     el(
       "span",
       { class: "alert-card-main" },
@@ -1636,7 +1847,7 @@ function alertCard(a) {
       verdictChip(latestVerdict(a.feedback)),
       el("span", { class: "alert-card-time" }, fmtThaiTime(a.ts_event_us)),
     ),
-  );
+  ));
 }
 
 // the alerts page: filter chips with counts, then one glass card per alert, newest first
@@ -1752,7 +1963,7 @@ async function showAlert(id) {
     a = await api(`/api/alerts/${encodeURIComponent(id)}`);
   } catch (e) {
     clear(box).appendChild(
-      el("div", { class: "card" }, el("p", { class: "inline-error" }, `เปิดการแจ้งเตือนนี้ไม่ได้ (${e.message})`)),
+      hudMark(el("div", { class: "card hud" }, hudHead("LOG · ALERT DETAIL"), el("p", { class: "inline-error" }, `เปิดการแจ้งเตือนนี้ไม่ได้ (${e.message})`))),
     );
     return;
   }
@@ -1783,9 +1994,10 @@ async function showAlert(id) {
   const facts = ((a.explanation && a.explanation.facts) || []).map(plainFact).filter(Boolean);
   const mini = el("div", { class: "chart-mini" });
   box.appendChild(
-    el(
+    hudMark(el(
       "div",
-      { class: "card detail-top" },
+      { class: "card hud detail-top" },
+      hudHead("LOG · ALERT DETAIL"),
       el(
         "div",
         { class: "detail" },
@@ -1800,7 +2012,7 @@ async function showAlert(id) {
         ),
         el("div", { class: "detail-main" }, el("h3", {}, "ราคาช่วงนั้น แถบสีคือช่วงที่ระบบเตือน"), mini),
       ),
-    ),
+    )),
   );
 
   box.appendChild(
@@ -1810,7 +2022,7 @@ async function showAlert(id) {
       renderAlertCards();
     }),
   );
-  box.appendChild(techDetails(a, tax));
+  box.appendChild(hudMark(techDetails(a, tax)));
   drawDetailChart(mini, a);
 }
 
@@ -1823,7 +2035,7 @@ function techDetails(a, tax) {
   const [w0, w1] = Array.isArray(a.window) ? a.window : [null, null];
   return el(
     "details",
-    { class: "card tech" },
+    { class: "card hud tech" },
     el("summary", {}, "ดูรายละเอียด"),
     el(
       "div",
@@ -1930,12 +2142,13 @@ function techniqueCard(tax, techniqueId) {
 
 // the verdict: three large buttons (analyst and up), the status in this card, and who said what
 function feedbackCard(a, onSaved) {
-  const card = el(
+  const card = hudMark(el(
     "div",
-    { class: "card verdict-card" },
+    { class: "card hud verdict-card" },
+    hudHead("REVIEW · VERDICT"),
     el("h2", { class: "verdict-title" }, "ผลตรวจของคุณ"),
     el("p", { class: "small muted" }, "ดูกราฟและคำอธิบายแล้ว รายการนี้ผิดปกติจริงหรือไม่"),
-  );
+  ));
   const analyst = el("input", {
     type: "text",
     maxlength: "64",
@@ -2340,7 +2553,8 @@ function runCard(run) {
   );
   const card = el(
     "div",
-    { class: "card sim-run" },
+    { class: "card hud sim-run" },
+    hudHead("SIM · RUN"),
     el(
       "div",
       { class: "sim-run-head" },
@@ -2351,6 +2565,7 @@ function runCard(run) {
     note,
     tech,
   );
+  hudMark(card);
   run.card = card;
   run.steps = steps;
   run.note = note;
@@ -2524,7 +2739,7 @@ function resultCard(target, verdict, budget) {
   const card = el(
     "div",
     {
-      class: `card result-card${wide ? " result-wide" : ""}${target.reference ? " result-ref-card" : ""}`,
+      class: `card hud hud-sm result-card${wide ? " result-wide" : ""}${target.reference ? " result-ref-card" : ""}`,
       "data-target": target.id,
       "data-state": st || "reference",
     },
@@ -2539,6 +2754,7 @@ function resultCard(target, verdict, budget) {
           : el("span", { class: "result-ref" }, "วิธีเปรียบเทียบ"),
     ),
   );
+  hudMark(card);
   if (wide && isNum(verdict.value)) {
     const pct = Math.round(verdict.value * 100);
     const num = el("span", {}, String(isNum(resultShown[target.id]) ? resultShown[target.id] : pct));
@@ -2600,12 +2816,12 @@ function renderResultCards(box, report, budget) {
 }
 
 function committeeBox(...children) {
-  return el(
+  return hudMark(el(
     "details",
-    { class: "card committee" },
+    { class: "card hud committee" },
     el("summary", {}, "รายละเอียดสำหรับกรรมการ"),
     el("div", { class: "committee-body" }, children),
-  );
+  ));
 }
 
 // the committee's view of the targets: ids, value, CI, n and the goal as the MVP spec states it
@@ -2668,7 +2884,7 @@ async function showEval() {
   clear(box);
   if (evalEmpty(report)) {
     box.appendChild(
-      el("div", { class: "card empty-state" }, el("p", { class: "empty-text" }, "ยังไม่มีผลวัดระบบ เมื่อสร้างรายงานผลแล้วให้เปิดหน้านี้ใหม่")),
+      hudMark(el("div", { class: "card hud empty-state" }, el("p", { class: "empty-text" }, "ยังไม่มีผลวัดระบบ เมื่อสร้างรายงานผลแล้วให้เปิดหน้านี้ใหม่"))),
     );
     box.appendChild(committeeBox(el("p", { class: "small" }, "ยังไม่มีรายงานผลการประเมิน · รัน uv run idsai report แล้วเปิดหน้านี้ใหม่")));
     return;
@@ -3007,6 +3223,8 @@ function parseRoute() {
   return { name: PAGES[path] ? path : "home" };
 }
 
+let pageShown = false; // false until the first page has been painted
+
 function route() {
   const hash = location.hash || "";
   const target = routeFor(hash);
@@ -3037,6 +3255,7 @@ function route() {
   state.route = r.name;
   document.body.classList.toggle("login-mode", r.name === "login");
   $("topbar").hidden = r.name === "login"; // the sign-in page carries its own logo
+  $("ticker").hidden = r.name === "login";
   const chip = $("user-chip");
   if (chip) chip.open = false;
   if (r.name !== "alert") destroyDetailChart();
@@ -3046,6 +3265,8 @@ function route() {
     if (a.dataset.route === tab) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   }
+  fx("navTo", document.querySelector('.nav a[aria-current="page"]')); // the underline slides to the current link
+  tickerRefresh();
   if (r.name === "home") {
     initChart();
   } else if (r.name === "alert") {
@@ -3060,7 +3281,11 @@ function route() {
     applyFramedHint(window, $("login-framed"), $("login-framed-link"));
     if (cameFrom !== "login") showAuthForm("login"); // a lost session lands on sign-in, not on a half-filled sign-up
     else if (!$("login-form").hidden) $("login-user").focus();
+    fx("loginEnter"); // the camera and its beam start moving
   }
+  // the scan-in wipe: not on the first paint, and not right after the sign-in (it has its own transition)
+  if (pageShown && cameFrom !== "login" && r.name !== "login") fx("pageEnter", $(PAGES[r.name]));
+  pageShown = true;
 }
 
 // ------------------------------------------------------------------ sign-in, user chip
@@ -3109,6 +3334,7 @@ function adoptMe(me) {
   if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
   renderUserChip();
   applyRoleGates();
+  fxApply(); // the account's choice may differ from this browser's
 }
 
 // whether sign-in is on: true or false once /api/me answers, null when it could not be reached
@@ -3145,8 +3371,20 @@ function showView(view) {
 async function completeSignIn(me) {
   const next = parseRoute().next || DEFAULT_ROUTE;
   adoptMe({ ...me, auth_enabled: true });
-  location.hash = next;
-  await enterApp();
+  // the "ยืนยันตัวตนแล้ว" moment (motion.js) comes first; the boot continues from it, and from this
+  // timer when motion.js is missing or never answers
+  await new Promise((resolve, reject) => {
+    let ran = false;
+    const cont = () => {
+      if (ran) return;
+      ran = true;
+      location.hash = next;
+      enterApp().then(resolve, reject);
+    };
+    fx("loginLeave", cont);
+    if (globalThis.Motion) setTimeout(cont, 900);
+    else cont();
+  });
 }
 
 // ------------------------------------------------------------------ sign-up
@@ -3571,6 +3809,7 @@ async function enterApp() {
 }
 
 async function boot() {
+  document.querySelectorAll(".hud").forEach(hudMark);
   window.addEventListener("hashchange", safely(route));
   bindHelp();
   $("menu-tour").addEventListener("click", () => {
@@ -3578,6 +3817,8 @@ async function boot() {
     startTour();
   });
   bindLogin();
+  const fxSwitch = $("menu-fx");
+  if (fxSwitch) fxSwitch.addEventListener("click", () => setFxOff(fxSwitch.getAttribute("aria-pressed") !== "true"));
   bindActivity();
   document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
@@ -3589,6 +3830,7 @@ async function boot() {
   });
   $("symbol-select").addEventListener("change", (ev) => {
     state.symbol = ev.target.value;
+    chart.loading = true; chart.now.f = null; // old coin's baseline
     $("rt-symbol").value = state.symbol;
     $("symbol-name").textContent = state.symbol || "–";
     savePrefs({ symbol: state.symbol });
@@ -3601,6 +3843,9 @@ async function boot() {
 
   loadSignupConfig();
   let authEnabled = await loadMe();
+  fx("clockSource", () => thaiClock(eventNowUs(), true) ?? "–"); // the .hud-clock of the live panels (hud.js ticks it)
+  fx("init", { off: fxOff() }); // motion.js loads right after this file, so it is ready once the first answer is in
+  fxApply();
   for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {
     // no usable answer: keep only the loader up, say why, and ask again with a growing wait
     $("boot-text").textContent = bootRetryText(state.bootError);
@@ -3620,6 +3865,7 @@ if (typeof document !== "undefined") {
 } else if (typeof module !== "undefined") {
   // node (tests only): the pure helpers
   module.exports = {
+    hudMark,
     snapshotAlerts,
     matchesInjection,
     eligibleForRun,
@@ -3687,6 +3933,12 @@ if (typeof document !== "undefined") {
     renderHelpTaxonomy,
     startTour,
     endTour,
+    fx,
+    fxUserOff,
+    setFxOff,
+    heroMood,
+    tickerItems,
+    setTickerState: (o) => Object.assign(state, o),
     // every Thai UI string table: the copy guard in the tests reads these
     copyTables: () => ({
       SEVERITY_TH,

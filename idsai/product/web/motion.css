@@ -1,0 +1,323 @@
+/* Market IDS: command-center motion styles. Linked after styles.css. Decoration only: transform, opacity
+   and canvas, never layout. Every fx element is aria-hidden in index.html.
+   The off paths (prefers-reduced-motion, and html.fx-off from the "ลดเอฟเฟกต์" switch, the tour or the
+   help drawer) clear the canvases and stop the CSS animations; the mood colour still shows. */
+
+:root {
+  --fx-calm: var(--hud-line);
+  --fx-watch: #f59e0b;
+  --fx-alert: var(--hud-alert);
+  --fx-grid: rgba(0, 229, 255, .08);
+  --fx-now: var(--fx-calm);
+}
+html[data-mood="watch"] { --fx-now: var(--fx-watch); }
+html[data-mood="alert"] { --fx-now: var(--fx-alert); }
+
+/* the static mood: a single-colour inner glow along the top edge, so the state colour shows even with effects off */
+html::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  box-shadow: inset 0 70px 90px -70px color-mix(in srgb, var(--fx-now) 24%, transparent);
+}
+
+/* the control-room canvas sits behind everything; the page background is the flat HUD ground */
+#fx-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* faint CRT scanlines over the page: a static pattern, one dark hairline in four, hidden when effects are off */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='4' height='1' fill='%23000' fill-opacity='.18'/%3E%3C/svg%3E");
+}
+
+/* the screen-edge flash (filled in with the alert burst): invisible until it is fired */
+#fx-edge {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: inset 0 0 90px 10px rgba(255, 45, 85, .5);
+}
+#fx-edge.is-flash { animation: fx-edge-flash .9s ease-out 1; animation-iteration-count: 1; }
+@keyframes fx-edge-flash { 0% { opacity: 0; } 14% { opacity: 1; } 100% { opacity: 0; } }
+
+/* the "ลดเอฟเฟกต์" switch in the account menu: a label and a small track */
+.user-menu #menu-fx {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.user-menu #menu-fx { position: relative; }
+.user-menu #menu-fx::after {
+  content: "";
+  flex: none;
+  width: 30px;
+  height: 16px;
+  border: 1px solid rgba(0, 229, 255, .45);
+  background: rgba(0, 229, 255, .08);
+}
+.user-menu #menu-fx::before {
+  content: "";
+  position: absolute;
+  right: 17px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  background: var(--hud-text);
+  transform: translate(-14px, -50%);
+  transition: transform .15s;
+}
+.user-menu #menu-fx[aria-pressed="true"]::after { background: var(--fx-calm); }
+.user-menu #menu-fx[aria-pressed="true"]::before { background: var(--hud-bg); transform: translate(0, -50%); }
+
+@media (prefers-reduced-motion: reduce) {
+  #fx-bg, #fx-edge, #fx-chart, body::after, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires, .fx-ripple { display: none; }
+  #cctv-beam { opacity: .3; }
+  *, *::before, *::after { animation: none !important; }
+  .iris-core, .brand-mark { transition: none; }
+  .tk-track { display: none; }
+  .tk-view.is-live .tk-static { display: block; }
+}
+
+/* only what motion owns is stopped: the app's own one-shot animations (page enter, rail rows, flash, toasts,
+   help drawer) keep their behaviour, so turning effects back on replays nothing */
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .fx-wipe, .fx-off .fx-rise, .fx-off .fx-sweep, .fx-off .fx-sweep::after,
+.fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
+.fx-off .login-card button.primary::after, .fx-off .login-line-trace, .fx-off .login-iris, .fx-off .login-eye-ring, .fx-off .login-tagline.is-typing::after,
+.fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led,
+.fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind,
+.fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch, .fx-off .fx-ripple i { animation: none !important; }
+.fx-off .fx-glint, .fx-off .hud-wires, .fx-off .fx-ripple { display: none; }
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off body::after, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
+.fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
+.fx-off .nav-ind, .fx-off .brand-cur, .fx-off .tk-group + .tk-group, .fx-off .tk-rep { display: none; }
+.fx-off .iris-core, .fx-off .brand-mark { transition: none; }
+.fx-off .tk-track { display: none; }
+.fx-off .tk-view.is-live .tk-static { display: block; }
+.fx-off #cctv-beam { opacity: .3; }
+
+/* ---- login: the CCTV camera over the sample chart ---- */
+.cctv-stage { position: relative; width: 100%; max-width: 520px; aspect-ratio: 520 / 260; margin-top: 20px; }
+.cctv-stage .login-line { position: absolute; left: 0; bottom: 0; width: 100%; max-width: none; margin: 0; }
+.cctv { position: absolute; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
+.cctv-pan { transform-box: view-box; transform-origin: 0 0; animation: cctv-pan 3.6s cubic-bezier(.37, 0, .63, 1) infinite alternate; }
+.cctv-beam-fill { fill: var(--fx-alert); fill-opacity: .16; }
+.cctv-part { fill: var(--hud-panel); stroke: rgba(0, 229, 255, .55); stroke-width: 1; }
+.cctv-lens { fill: var(--hud-bg); stroke: var(--fx-alert); stroke-width: 1; }
+.cctv-vent { fill: none; stroke: rgba(0, 229, 255, .3); stroke-linecap: round; }
+.login-mark { color: var(--hud-line); }
+.login-iris { transform-box: view-box; transform-origin: 22px 22px; animation: login-look 5s ease-in-out infinite; }
+.login-eye-ring { transform-box: view-box; transform-origin: 22px 22px; animation: login-spin 14s linear infinite; }
+.login-tagline.is-typing::after { content: ""; display: inline-block; width: .55em; height: 1em; margin-left: 4px; vertical-align: -.12em; background: var(--hud-line); animation: cctv-blink 1s step-end infinite; }
+@keyframes login-look { 0%, 100% { transform: translate(0, 0); } 30% { transform: translate(-3px, 0); } 65% { transform: translate(3px, 1px); } }
+@keyframes login-spin { to { transform: rotate(360deg); } }
+.cctv-beam { animation: cctv-flicker 2.6s ease-in-out infinite alternate; }
+.cctv-lens-dot, .cctv-rec, .cctv-blink { fill: var(--fx-alert); }
+.cctv-lens-dot { filter: drop-shadow(0 0 3px var(--fx-alert)); }
+.cctv-rec { filter: drop-shadow(0 0 3px var(--fx-alert)); animation: cctv-blink 1s step-end infinite; }
+.cctv-blink { animation: cctv-blink 1s step-end infinite; }
+.cctv-hud { fill: none; stroke: rgba(0, 229, 255, .42); stroke-width: 1.5; stroke-linecap: round; }
+.cctv-hud-text text { font: 600 10px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .14em; fill: rgba(186, 230, 253, .78); }
+.cctv-ring { fill: none; stroke: var(--fx-alert); stroke-width: 2; opacity: 0; transform-box: fill-box; transform-origin: center; }
+.cctv-tag text { fill: #fff; font-size: 12px; font-weight: 600; }
+.login-line-spike { fill: none; stroke: transparent; stroke-width: 3; transition: stroke .25s, filter .35s; }
+.login-line-spike.is-hit { stroke: #fecaca; filter: drop-shadow(0 0 5px var(--fx-alert)) drop-shadow(0 0 14px var(--fx-alert)); transition-duration: .08s; }
+
+@keyframes cctv-pan { from { transform: rotate(-18deg); } to { transform: rotate(18deg); } }
+@keyframes cctv-flicker { from { opacity: .82; } to { opacity: 1; } }
+@keyframes cctv-blink { from, 50% { opacity: 1; } 50.01%, to { opacity: .12; } }
+@keyframes cctv-rise { from { opacity: 0; transform: translate3d(0, 14px, 0); } to { opacity: 1; transform: none; } }
+@keyframes cctv-card-in { from { opacity: 0; transform: translate3d(34px, 0, 0) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes cctv-sheen { 0% { transform: translateX(-140%) skewX(-18deg); } 36%, 100% { transform: translateX(340%) skewX(-18deg); } }
+
+/* the entrance: the hero lines rise one after another, the card slides in from the side */
+#page-login:not([hidden]) .login-brand { animation: cctv-rise .6s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .login-tagline { animation: cctv-rise .6s .12s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .cctv-stage { animation: cctv-rise .7s .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .login-card:not([hidden]) { animation: cctv-card-in .7s .1s cubic-bezier(.2, .8, .2, 1) backwards; }
+
+/* inputs glow on focus; the submit button has a light sheen passing over it every few seconds */
+.login-card .field > input { transition: border-color .18s, box-shadow .18s; }
+.login-card .field > input:focus { border-color: var(--fx-calm); box-shadow: 0 0 0 3px rgba(0, 229, 255, .14), 0 0 22px rgba(0, 229, 255, .26); }
+.login-card .field > input:focus-visible { outline: 1px solid rgba(0, 229, 255, .7); outline-offset: 1px; }
+.login-card button.primary { position: relative; overflow: hidden; }
+.login-card button.primary::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  pointer-events: none;
+  background: rgba(255, 255, 255, .22);
+  transform: translateX(-140%) skewX(-18deg);
+  animation: cctv-sheen 4.4s ease-in-out 1.4s infinite;
+}
+
+/* "ยืนยันตัวตนแล้ว": the sign-in overlay (built by motion.js) */
+#fx-verify {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  background: rgba(5, 7, 13, .96);
+}
+.fx-verify-box { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.fx-verify-mark {
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  border: 2px solid var(--fx-calm);
+  color: var(--fx-calm);
+  font-size: 38px;
+  line-height: 1;
+  box-shadow: 0 0 34px rgba(0, 229, 255, .45), inset 0 0 18px rgba(0, 229, 255, .2);
+}
+.fx-verify-text { font-size: 22px; font-weight: 600; letter-spacing: .02em; color: #e6fbff; }
+
+/* ---- hero: the radar sweep (calm) and the red pulse rings (alert) live inside the orb ---- */
+.orb-radar, .orb-ring { position: absolute; inset: 0; border-radius: 50%; pointer-events: none; }
+.orb-radar {
+  background: conic-gradient(from 0deg, transparent 0 66%, rgba(255, 255, 255, .7) 100%); /* allow: radar wedge */
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .28), inset 0 0 0 9px transparent, inset 0 0 0 10px rgba(255, 255, 255, .14);
+  animation: fx-radar 4s linear infinite;
+  will-change: transform;
+}
+.orb-ring { display: none; border: 2px solid var(--fx-alert); opacity: 0; }
+html[data-mood="alert"] .orb-radar { display: none; }
+html[data-mood="alert"] .orb-ring { display: block; animation: fx-ring 3.6s ease-out infinite; }
+html[data-mood="alert"] .orb-ring:nth-of-type(3) { animation-delay: 1.2s; }
+html[data-mood="alert"] .orb-ring:nth-of-type(4) { animation-delay: 2.4s; }
+html[data-mood="alert"] .orb::after { animation: none; }
+@keyframes fx-radar { to { transform: rotate(360deg); } }
+@keyframes fx-ring { 0% { transform: scale(1); opacity: .85; } 70%, 100% { transform: scale(3); opacity: 0; } }
+
+/* the small camera: it idles, and turns toward the chart (below) when the mood is alert */
+#hero-cam { flex: none; margin-left: auto; overflow: visible; }
+#hero-cam .cam-mount { fill: none; stroke: rgba(186, 230, 253, .5); stroke-width: 3; stroke-linecap: round; }
+#hero-cam .cam-body { fill: rgba(15, 23, 42, .85); stroke: rgba(186, 230, 253, .55); stroke-width: 1.5; }
+#hero-cam .cam-lens { fill: #0b1220; stroke: var(--fx-now); stroke-width: 1.5; }
+#hero-cam .cam-led { fill: var(--fx-now); }
+#hero-cam .cam-beam { fill: var(--fx-alert); opacity: 0; transition: opacity .6s; }
+#hero-cam .cam-head { transform-box: view-box; transform-origin: 52px 20px; transform: rotate(6deg); transition: transform .9s cubic-bezier(.4, 0, .2, 1); }
+html[data-mood="alert"] #hero-cam .cam-head { transform: rotate(-34deg); }
+html[data-mood="alert"] #hero-cam .cam-beam { opacity: .22; }
+html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end infinite; }
+
+/* the newest alert card: one red light sweep, 1.2 s */
+.fx-sweep { position: absolute; inset: 1px; z-index: 1; overflow: hidden; clip-path: var(--cut); pointer-events: none; }
+.fx-sweep::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 45%;
+  pointer-events: none;
+  background: rgba(255, 45, 85, .22);
+  animation: fx-sweep 1.2s ease-in-out 1 both;
+}
+@keyframes fx-sweep { from { transform: translateX(-110%) skewX(-18deg); } to { transform: translateX(260%) skewX(-18deg); } }
+
+/* the HUD panels (.hud in styles.css) carry their own frame and brackets; hud.js adds the border glint,
+   the wires, the tilt (inline transform) and the title glitch */
+.fx-glint { position: absolute; inset: 0; z-index: -1; overflow: hidden; clip-path: var(--cut); pointer-events: none; }
+.fx-glint::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 54px;
+  height: 3000px;
+  margin: -1500px 0 0 -27px;
+  background: var(--hi);
+  opacity: 0;
+  animation: fx-glint 7s linear var(--gd, 1.4s) infinite;
+}
+@keyframes fx-glint {
+  0% { transform: rotate(0); opacity: 0; }
+  2% { opacity: 1; }
+  26% { transform: rotate(180deg); opacity: 1; }
+  27%, 100% { transform: rotate(180deg); opacity: 0; }
+}
+.hud-wires { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.hud-wire { fill: none; stroke: rgba(0, 229, 255, .3); stroke-width: 1; transition: stroke .3s; }
+.hud-wire-node { fill: var(--fx-calm); transition: fill .3s; }
+/* accepted exception to transform/opacity-only: stroke-dashoffset on at most 6 short paths */
+.hud-wire-pulse {
+  fill: none;
+  stroke: var(--fx-calm);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 10px calc(var(--len, 100) * 1px);
+  stroke-dashoffset: 10px;
+  animation: hud-pulse var(--dur, 4s) linear var(--dl, 0s) infinite;
+}
+@keyframes hud-pulse {
+  0% { stroke-dashoffset: 10px; }
+  55%, 100% { stroke-dashoffset: calc(var(--len, 100) * -1px); }
+}
+html[data-mood="alert"] .hud-wire { stroke: rgba(255, 45, 85, .55); }
+html[data-mood="alert"] .hud-wire-node { fill: var(--fx-alert); }
+html[data-mood="alert"] .hud-wire-pulse { stroke: var(--fx-alert); }
+.hud-glitch { animation: hud-glitch .8s steps(1) 1; } /* two jumps and a rest: under 3 changes a second */
+@keyframes hud-glitch {
+  0% { transform: translateX(-3px); text-shadow: 3px 0 var(--fx-calm), -3px 0 var(--fx-alert); }
+  50% { transform: translateX(3px); text-shadow: -4px 0 var(--fx-calm), 4px 0 var(--fx-alert); }
+  100% { transform: none; text-shadow: none; }
+}
+@media (prefers-reduced-motion: no-preference) { html:not(.fx-off) .stat-card:hover { transform: translateY(-2px); } }
+
+/* ---- page transition: scan line, then the cards rise ---- */
+.fx-wipe {
+  position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 40; pointer-events: none;
+  background: var(--fx-calm);
+  box-shadow: 0 0 14px 2px var(--fx-calm);
+  animation: fx-wipe .3s linear 1 both;
+}
+@keyframes fx-wipe { from { transform: translateY(0); opacity: 1; } to { transform: translateY(100vh); opacity: .2; } }
+.fx-rise { animation: fx-rise .45s cubic-bezier(.2, .7, .2, 1) calc(var(--fx-i, 0) * 40ms) 1 backwards; }
+@keyframes fx-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 720px) {
+  .cctv-stage { display: none; }
+  #hero-cam { display: none; }
+}
+
+/* ---- main chart overlay: scan line, live-point ring, crossing shockwave (drawn on this canvas) ---- */
+#chart { position: relative; }
+#fx-chart { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+
+/* ---- header: the logo's cursor and scan ring, the data ticker, the sliding nav underline ---- */
+html:not(.fx-off) .brand-cur { display: inline-block; animation: fx-cur 1s steps(1) infinite; }
+@keyframes fx-cur { 50% { opacity: 0; } }
+#logo-ring { transform-box: fill-box; transform-origin: center; animation: fx-ring-spin 24s linear infinite; }
+html[data-mood="alert"] #logo-ring { animation-duration: 6s; }
+@keyframes fx-ring-spin { to { transform: rotate(360deg); } }
+.tk-track { animation: fx-tk var(--tk-dur, 60s) linear infinite; }
+@keyframes fx-tk { to { transform: translate3d(-50%, 0, 0); } }
+
+/* ---- click ripple on buttons and chips: a clipped layer, one circle that grows and fades (transform and opacity only) ---- */
+.fx-ripple { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; pointer-events: none; }
+.fx-ripple i { position: absolute; left: 0; top: 0; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: currentColor; opacity: .35; transform: scale(0); animation: fx-ripple .55s cubic-bezier(.2, .7, .2, 1) 1 forwards; }
+@keyframes fx-ripple { to { transform: scale(var(--rs, 14)); opacity: 0; } }
