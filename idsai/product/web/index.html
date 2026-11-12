@@ -107,7 +107,7 @@
           </svg>
           <h1 class="login-name">Market IDS</h1>
         </div>
-        <p class="login-tagline" id="login-tagline"><span>กล้องวงจรปิดของตลาดคริปโต</span> <span>เตือนเมื่อการซื้อขายผิดปกติทางสถิติ</span></p>
+        <p class="login-tagline" id="login-tagline"><span class="sr-only">กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ</span><span class="tg" aria-hidden="true">กล้องวงจรปิดของตลาดคริปโต</span> <span class="tg" aria-hidden="true">เตือนเมื่อการซื้อขายผิดปกติทางสถิติ</span></p>
         <div class="cctv-stage">
           <svg class="login-line" viewBox="0 0 520 170" fill="none" aria-hidden="true" focusable="false">
             <path class="login-line-limit" d="M0 64H520"/>
@@ -134,7 +134,6 @@
                   <rect class="cctv-part" x="40" y="-9" width="11" height="18"/>
                   <ellipse class="cctv-lens" cx="52" cy="0" rx="3.4" ry="7.6"/>
                   <circle cx="53" cy="0" r="1.7" class="cctv-lens-dot"/>
-                  
                   <circle id="cctv-rec" class="cctv-rec" cx="-17" cy="-3" r="2.3"/>
                 </g>
               </g>
@@ -206,7 +205,7 @@
     <section id="page-home" class="page" hidden>
       <svg id="home-wires" class="hud-wires" aria-hidden="true" focusable="false"></svg>
       <div id="hero" class="card hud hero">
-        <div class="hud-head" aria-hidden="true"><span class="hud-rec"></span><span class="hud-tag" data-tag="CAM-01 · STATUS · LIVE"></span></div>
+        <div class="hud-head" aria-hidden="true"><span class="hud-rec"></span><span class="hud-tag" data-tag="CAM-01 · STATUS · LIVE"></span><span class="hud-clock" aria-hidden="true">–</span></div>
         <div class="hero-body">
         <span id="hero-orb" class="orb wait" aria-hidden="true"><span class="orb-radar" aria-hidden="true"></span><span class="orb-ring" aria-hidden="true"></span><span class="orb-ring" aria-hidden="true"></span><span class="orb-ring" aria-hidden="true"></span></span>
         <div class="hero-text" role="status" aria-live="polite">
@@ -223,6 +222,7 @@
           </g>
         </svg>
         </div>
+        <div class="hero-meter" aria-hidden="true"><span id="hero-meter-read" class="hero-meter-read">ระดับ – / เส้นเตือน –</span><span class="hero-meter-bar"><span id="hero-meter-fill" class="hm-fill"></span><span id="hero-meter-tick" class="hm-tick" hidden></span></span></div>
       </div>
 
       <div class="home-cards">
@@ -259,7 +259,7 @@
       <div class="home-body">
         <div class="home-main">
           <div id="chart-card" class="card hud chart-card">
-            <div class="hud-head" aria-hidden="true"><span class="hud-rec"></span><span class="hud-tag" data-tag="CAM-02 · MAIN FEED · LIVE"></span></div>
+            <div class="hud-head" aria-hidden="true"><span class="hud-rec"></span><span class="hud-tag" data-tag="CAM-02 · MAIN FEED · LIVE"></span><span class="hud-clock" aria-hidden="true">–</span></div>
             <div class="chart-head">
               <h2 class="card-title">ราคาและระดับความผิดปกติ</h2>
               <span id="readout" class="readout small">–</span>
@@ -281,7 +281,7 @@
 
         <div class="home-side">
           <div id="replay-bar" class="card hud replay-bar" hidden>
-            <div class="hud-head" aria-hidden="true"><span class="hud-rec"></span><span class="hud-tag" data-tag="CAM-07 · REPLAY"></span></div>
+            <div class="hud-head" aria-hidden="true"><span class="hud-rec"></span><span class="hud-tag" data-tag="CAM-07 · REPLAY"></span><span class="hud-clock" aria-hidden="true">–</span></div>
             <div class="replay-top">
               <button id="btn-play" type="button" class="primary play-btn" aria-label="หยุดชั่วคราว" title="หยุดชั่วคราว (กดแป้นเว้นวรรค)">❚❚</button>
               <div class="replay-now">

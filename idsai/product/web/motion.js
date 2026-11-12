@@ -125,6 +125,7 @@
       size();
       start();
       navPlace();
+      tickerFit(); // the strip was built while hidden (width 0): fill it now
     }
   }
 

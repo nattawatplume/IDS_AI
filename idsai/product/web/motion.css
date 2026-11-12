@@ -87,7 +87,7 @@ body::after {
 .user-menu #menu-fx[aria-pressed="true"]::before { background: var(--hud-bg); transform: translate(0, -50%); }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, #fx-chart, body::after, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, body::after, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires, .fx-ripple { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
   .iris-core, .brand-mark { transition: none; }
@@ -102,8 +102,8 @@ body::after {
 .fx-off .login-card button.primary::after, .fx-off .login-line-trace, .fx-off .login-iris, .fx-off .login-eye-ring, .fx-off .login-tagline.is-typing::after,
 .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led,
 .fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind,
-.fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch { animation: none !important; }
-.fx-off .fx-glint, .fx-off .hud-wires { display: none; }
+.fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch, .fx-off .fx-ripple i { animation: none !important; }
+.fx-off .fx-glint, .fx-off .hud-wires, .fx-off .fx-ripple { display: none; }
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off body::after, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off .nav-ind, .fx-off .brand-cur, .fx-off .tk-group + .tk-group, .fx-off .tk-rep { display: none; }
@@ -280,11 +280,10 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
 html[data-mood="alert"] .hud-wire { stroke: rgba(255, 45, 85, .55); }
 html[data-mood="alert"] .hud-wire-node { fill: var(--fx-alert); }
 html[data-mood="alert"] .hud-wire-pulse { stroke: var(--fx-alert); }
-.hud-glitch { animation: hud-glitch .65s steps(6) 1; }
+.hud-glitch { animation: hud-glitch .8s steps(1) 1; } /* two jumps and a rest: under 3 changes a second */
 @keyframes hud-glitch {
   0% { transform: translateX(-3px); text-shadow: 3px 0 var(--fx-calm), -3px 0 var(--fx-alert); }
-  33% { transform: translateX(3px); text-shadow: -4px 0 var(--fx-calm), 4px 0 var(--fx-alert); }
-  66% { transform: translateX(-2px); text-shadow: 2px 0 var(--fx-calm), -2px 0 var(--fx-alert); }
+  50% { transform: translateX(3px); text-shadow: -4px 0 var(--fx-calm), 4px 0 var(--fx-alert); }
   100% { transform: none; text-shadow: none; }
 }
 @media (prefers-reduced-motion: no-preference) { html:not(.fx-off) .stat-card:hover { transform: translateY(-2px); } }
@@ -317,3 +316,8 @@ html[data-mood="alert"] #logo-ring { animation-duration: 6s; }
 @keyframes fx-ring-spin { to { transform: rotate(360deg); } }
 .tk-track { animation: fx-tk var(--tk-dur, 60s) linear infinite; }
 @keyframes fx-tk { to { transform: translate3d(-50%, 0, 0); } }
+
+/* ---- click ripple on buttons and chips: a clipped layer, one circle that grows and fades (transform and opacity only) ---- */
+.fx-ripple { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; pointer-events: none; }
+.fx-ripple i { position: absolute; left: 0; top: 0; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: currentColor; opacity: .35; transform: scale(0); animation: fx-ripple .55s cubic-bezier(.2, .7, .2, 1) 1 forwards; }
+@keyframes fx-ripple { to { transform: scale(var(--rs, 14)); opacity: 0; } }

@@ -140,7 +140,8 @@ def test_app_js_is_valid_javascript():
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed")
-    r = subprocess.run([node, "--check", str(WEB_DIR / "app.js")], capture_output=True, text=True)
+    cmd = [node, "--check", str(WEB_DIR / "app.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 
 
@@ -322,7 +323,9 @@ def test_time_to_detect_counts_only_new_alerts(tmp_path):
     script = tmp_path / "ttd.js"
     script.write_text(TTD_JS, encoding="utf-8")
     js = str(WEB_DIR / "app.js")
-    r = subprocess.run([node, str(script), js], capture_output=True, text=True, cwd=tmp_path)
+    r = subprocess.run(
+        [node, str(script), js], capture_output=True, text=True, cwd=tmp_path, timeout=60
+    )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
 
@@ -638,7 +641,11 @@ def _run_motion(tmp_path, reduced, body):
     script = tmp_path / "motion.js"
     script.write_text(MOTION_JS % (reduced, body), encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
@@ -726,7 +733,9 @@ def test_chart_colours_and_titles():
     init = js[js.index("function initChart(") : js.index("function addLanes(")]
     assert "ระดับความผิดปกติ" in init and "glow" in init
     tau = js[js.index("function setTau(") : js.index("async function loadSeries(")]
-    assert 'title: "เส้นเตือน"' in tau and "Dashed" in tau
+    assert (
+        'title: "เส้นเตือน"' in tau and "lineStyle: LWC.LineStyle ? LWC.LineStyle.Dashed : 2" in tau
+    )
 
 
 def test_hud_panels_brighten_on_hover_and_stay_still_under_reduced_motion():
@@ -890,9 +899,7 @@ def test_simulate_markup():
     assert '<option value="test">ช่วงค่าทดสอบ</option>' in adv
     assert '<option value="train">ช่วงค่าฝึก</option>' in adv
     intro = re.search(r'<p class="sim-intro[^"]*">([^<]*)</p>', page).group(1)
-    assert intro == (
-        "ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)"
-    )
+    assert intro == ("ใส่เหตุการณ์ปั่นจำลองลงในข้อมูลย้อนหลัง แล้วดูว่าระบบจับได้เร็วแค่ไหน (ไม่แตะข้อมูลจริง)")
     # plain view: no English labels or codes on the page
     plain = re.sub(r"<!--.*?-->|<svg\b.*?</svg>|<[^>]+>", " ", page, flags=re.S)
     assert not re.search(r"[A-Za-z]", plain), plain
@@ -1091,7 +1098,7 @@ def test_ablation_notes_cell_wraps():
 def test_long_explanations_live_on_about():
     html = text("index.html")
     mon = re.search(r'<section id="page-home".*?</section>', html, re.S).group(0)
-    for m in re.finditer(r'<p\b([^>]*)>(.*?)</p>', mon, re.S):
+    for m in re.finditer(r"<p\b([^>]*)>(.*?)</p>", mon, re.S):
         if 'id="chart-info-body"' in m.group(1):
             continue
         assert len(" ".join(m.group(2).split())) <= 120, m.group(2)[:60]
@@ -1111,9 +1118,22 @@ def test_login_and_activity_routes_present():
         assert route in html + js, route
     ids = set(re.findall(r'\bid="([\w-]+)"', html))
     for i in (
-        "page-login", "login-form", "login-user", "login-pass", "login-remember", "login-error",
-        "user-chip", "user-name", "user-role", "btn-logout",
-        "page-activity", "audit-body", "audit-user", "audit-action", "audit-more", "audit-empty",
+        "page-login",
+        "login-form",
+        "login-user",
+        "login-pass",
+        "login-remember",
+        "login-error",
+        "user-chip",
+        "user-name",
+        "user-role",
+        "btn-logout",
+        "page-activity",
+        "audit-body",
+        "audit-user",
+        "audit-action",
+        "audit-more",
+        "audit-empty",
     ):
         assert i in ids, i
     assert 'data-route="activity"' in html
@@ -1140,9 +1160,8 @@ def test_activity_renders_audit_fields_as_text_only():
 def test_mutating_buttons_check_can():
     js = text("app.js")
     control = js[js.index("async function control(") : js.index("function bindReplay(")]
-    assert (
-        'can("analyst")' in control
-        and control.index('can("analyst")') < control.index("postJson(")
+    assert 'can("analyst")' in control and control.index('can("analyst")') < control.index(
+        "postJson("
     )
     fb = js[js.index("function feedbackCard(") : js.index("async function drawDetailChart(")]
     assert 'can("analyst")' in fb and fb.index('can("analyst")') < fb.index("postJson(")
@@ -1238,7 +1257,11 @@ def test_prefs_save_is_debounced_and_local_when_auth_is_off(tmp_path):
         encoding="utf-8",
     )
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
@@ -1251,7 +1274,6 @@ def test_auth_off_keeps_todays_flow():
     assert chip and "hidden" in chip.group(0)  # only shown once /api/me says auth is on
     login = re.search(r'<section id="page-login"[^>]*>', html)
     assert login and "hidden" in login.group(0)
-
 
 
 SESSION_LOST_HEAD = r"""
@@ -1301,7 +1323,11 @@ def test_lost_session_routes_to_login_and_ws_4401_stops_reconnecting(tmp_path):
     script = tmp_path / "lost.js"
     script.write_text(SESSION_LOST_HEAD + SESSION_LOST_BODY, encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
     js = text("app.js")
@@ -1318,7 +1344,7 @@ def test_login_form_posts_so_a_credential_never_reaches_the_url():
 
 def test_feedback_form_uses_the_session_user_when_auth_is_on():
     js = text("app.js")
-    body = js[js.index("function feedbackCard"):]
+    body = js[js.index("function feedbackCard") :]
     body = body[: body.index("\n}\n")]
     assert "state.me.username" in body  # the analyst is the signed-in user, not a typed name
     assert "authOn()" in body
@@ -1443,7 +1469,12 @@ def test_login_markup():
     assert page.index('class="login-hero"') < page.index('id="login-form"')
     hero = page[page.index('class="login-hero"') : page.index('id="login-form"')]
     tagline = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', hero, re.S)
-    assert tagline and " ".join(re.sub(r"<[^>]+>", "", tagline.group(1)).split()) == (
+    visible = (
+        re.sub(r'<span class="sr-only">.*?</span>', "", tagline.group(1), flags=re.S)
+        if tagline
+        else ""
+    )
+    assert tagline and " ".join(re.sub(r"<[^>]+>", "", visible).split()) == (
         "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
     )
     line = re.search(r'<svg class="login-line"[^>]*>', hero)
@@ -1529,7 +1560,11 @@ def test_load_me_tells_unknown_from_auth_off(tmp_path):
     script = tmp_path / "loadme.js"
     script.write_text(SESSION_LOST_HEAD + LOAD_ME_BODY, encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
     js = text("app.js")
@@ -1671,7 +1706,11 @@ def test_hero_and_replay_gates_viewer(tmp_path):
     script = tmp_path / "gates.js"
     script.write_text(GATES_HEAD + GATES_BODY, encoding="utf-8")
     r = subprocess.run(
-        [node, str(script), str(WEB_DIR / "app.js")], capture_output=True, text=True, cwd=tmp_path
+        [node, str(script), str(WEB_DIR / "app.js")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
 
@@ -1727,6 +1766,7 @@ def test_rail_headline_is_plain_thai(tmp_path, client):
         capture_output=True,
         text=True,
         cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr
     js = text("app.js")
@@ -1889,6 +1929,7 @@ def _run_dom(tmp_path, reduced, body, *args):
         text=True,
         encoding="utf-8",
         cwd=tmp_path,
+        timeout=60,
     )
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr + r.stdout
 
@@ -2656,7 +2697,7 @@ console.log("ok");
 
 def test_tour_step_with_missing_target_centres(tmp_path):
     body = (
-        'const keep = {}; globalThis.window = { localStorage: { getItem: (k) => keep[k] ?? null,'
+        "const keep = {}; globalThis.window = { localStorage: { getItem: (k) => keep[k] ?? null,"
         " setItem: (k, v) => { keep[k] = String(v); } } };\n"
         'm.setMe({ username: "local", role: "admin", auth_enabled: false, prefs: {} });\n'
         + TOUR_MISSING_BODY
@@ -2816,7 +2857,9 @@ def test_default_view_has_no_code_words(tmp_path):
     script = tmp_path / "copy.js"
     script.write_text("globalThis.matchMedia = () => ({ matches: false });" + COPY_DUMP, "utf-8")
     cmd = [node, str(script), str(WEB_DIR / "app.js")]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
+    r = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", cwd=tmp_path, timeout=60
+    )
     assert r.returncode == 0, r.stderr
     tables = json.loads(r.stdout)
     # a new *_TH table must be added to copyTables(), or this guard would not see it
@@ -3340,7 +3383,7 @@ def test_motion_js_is_valid_javascript():
     if node is None:
         pytest.skip("node is not installed")
     path = str(WEB_DIR / "motion.js")
-    r = subprocess.run([node, "--check", path], capture_output=True, text=True)
+    r = subprocess.run([node, "--check", path], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 
 
@@ -3437,7 +3480,7 @@ globalThis.Motion.loginEnter();
         encoding="utf-8",
     )
     cmd = [node, str(script), str(WEB_DIR / "motion.js")]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
 
 
@@ -3571,7 +3614,7 @@ def test_no_crossing_while_series_loads():
 
 def test_page_enter_wired():
     app = text("app.js")
-    body = app[app.index("function route()"):]
+    body = app[app.index("function route()") :]
     body = body[: body.index("\n}\n")]
     assert 'fx("pageEnter"' in body
     assert "pageShown" in body and "let pageShown = false" in app
@@ -3632,7 +3675,7 @@ def test_failed_series_load_resets_the_crossing_baseline():
 
 def test_chart_overlay_stops_drawing_when_hidden():
     js = text("motion.js")
-    attach = js[js.index("new G.ResizeObserver"):][:700]
+    attach = js[js.index("new G.ResizeObserver") :][:700]
     zero = attach[attach.index("r.width <= 0") :][:260]
     assert "O.w = 0" in zero and "O.h = 0" in zero and "return" in zero
     assert "!O.w || !O.h" in _js_function(js, "function chartDraw(")
@@ -3691,7 +3734,7 @@ def test_logo_eye_svg():
     assert 'id="logo-iris"' in svg.group(0) and 'id="logo-ring"' in svg.group(0)
     assert "MARKET IDS" in header and 'class="brand-cur"' in header
     css = text("motion.css")
-    assert "html[data-mood=\"alert\"]" in css and "logo-" in css
+    assert 'html[data-mood="alert"]' in css and "logo-" in css
     styles = text("styles.css")
     red = re.search(r'html\[data-mood="alert"\] \.brand-mark\s*\{([^}]*)\}', styles)
     assert red and "var(--hud-alert)" in red.group(1)
@@ -3789,7 +3832,10 @@ def test_tilt_pointer_fine():
     assert "e.buttons" in hud and "selecting()" in hud and "tiltReset" in hud
     # read once per panel entry, not per move
     assert "getBoundingClientRect" in _js_function(hud, "function onPointerMove(")
-    assert hud.count("getBoundingClientRect") == 1
+    # the only other read is the click ripple's, once per click (never per move or per frame)
+    assert hud.count("getBoundingClientRect") == 2 and "getBoundingClientRect" in _js_function(
+        hud, "function ripple("
+    )
 
 
 def test_wires_hidden_decoration():
@@ -3834,7 +3880,7 @@ def test_scramble_fix_round_1():
     # a 1 Hz value must not flicker: snaps stamp the node too and the gap is wide
     assert "SCRAMBLE_GAP_MS = 3000" in hud
     sc = _js_function(hud, "function scramble(")
-    snap = sc[sc.index("isOff() ||"): sc.index("var job =")]
+    snap = sc[sc.index("isOff() ||") : sc.index("var job =")]
     assert "_hudScrambleAt = t" in snap
     # screen readers get the final value while it scrambles
     assert 'setAttribute("aria-label", to)' in sc
@@ -3877,7 +3923,7 @@ console.log(JSON.stringify(out));
     script = tmp_path / "h.js"
     script.write_text(harness, encoding="utf-8")
     cmd = [node, str(script), str(WEB_DIR / "hud.js")]
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path)
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path, timeout=60)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["mid"] is True and out["normal"] == "1234" and out["label1"] is False
@@ -3894,7 +3940,7 @@ def test_plexus_layer():
     for const in ("PLEX_MIN = 40", "PLEX_MAX = 70", "PLEX_BEND = 120"):
         assert const in hud, const
     assert "PLEX_SMALL_W = 640" in hud and "pointerFine()" in hud
-    assert 'addLayer(drawPlexus' in hud.replace("M.addLayer", "addLayer")
+    assert "addLayer(drawPlexus" in hud.replace("M.addLayer", "addLayer")
     old_grid = ("perspective grid", "GRID_ALPHA", "seedDots", "createLinearGradient")
     for old in (*old_grid, "createRadialGradient"):
         assert old not in js, old
@@ -3917,7 +3963,7 @@ def test_chart_hud_colours():
     assert "chart.tau" in point and "color" in point
     assert "fPoint" in _js_function(js, "function plot(")
     assert "Array.from(f, fPoint)" in js
-    assert "Dashed" in js
+    assert "LWC.LineStyle.Dashed" in _js_function(js, "function setTau(")
 
 
 def test_chart_draw_in():
@@ -3943,9 +3989,23 @@ def test_login_hud():
     assert re.search(r'<form id="login-form" class="[^"]*\bhud\b', page)
     assert re.search(r'<form id="signup-form" class="[^"]*\bhud\b', page)
     for ident in (
-        "login-user", "login-pass", "login-remember", "login-submit", "login-error",
-        "signup-form", "signup-user", "signup-name", "signup-pass", "signup-pass2", "signup-error",
-        "signup-line", "signup-open", "signup-back", "cctv-beam", "cctv-rec", "cctv-tag",
+        "login-user",
+        "login-pass",
+        "login-remember",
+        "login-submit",
+        "login-error",
+        "signup-form",
+        "signup-user",
+        "signup-name",
+        "signup-pass",
+        "signup-pass2",
+        "signup-error",
+        "signup-line",
+        "signup-open",
+        "signup-back",
+        "cctv-beam",
+        "cctv-rec",
+        "cctv-tag",
     ):
         assert f'id="{ident}"' in page, ident
     assert "-gradient" not in page.lower()
@@ -3971,3 +4031,195 @@ def test_login_typed_tagline():
     assert "if (isOff()) {\n        settleAll();\n        typeEnd();" in hud
     assert "typeEnd" in _js_function(hud, "function typeTagline(")
     assert ".fx-off .login-tagline.is-typing::after" in mcss
+
+
+# ---- HUD redesign, final-review fixes ----
+
+
+def test_panel_flash_drives_the_fill_not_the_hidden_background():
+    css = text("styles.css")
+    # a .hud paints its fill (::after) over its own background, so the flash animates the fill
+    assert ".hud.flash::after" in css and "animation: hud-flash" in css
+    assert re.search(r"@keyframes hud-flash\s*\{[^}]*rgba\(245, 158, 11", css)
+    assert re.search(r"\.hud\.flash\s*\{\s*animation:\s*none", css)
+    assert 'flash($("card-alerts"))' in text("app.js")
+
+
+def test_login_tagline_has_a_permanent_sr_only_copy():
+    html, hud = text("index.html"), text("hud.js")
+    tag = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', html, re.S)
+    assert tag
+    inner = tag.group(1)
+    full = "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
+    assert f'<span class="sr-only">{full}</span>' in inner
+    assert len(re.findall(r'<span class="tg" aria-hidden="true">', inner)) == 2
+    assert "aria-label" not in tag.group(0)
+    assert "aria-label" not in _js_function(hud, "function typeTagline(") + _js_function(
+        hud, "function typeEnd("
+    )
+    assert ".login-tagline .tg" in text("styles.css")
+
+
+def test_cctv_svg_has_no_stray_whitespace_line():
+    lines = text("index.html").split("\n")
+    assert not [n for n, line in enumerate(lines, 1) if line and not line.strip()]
+
+
+def test_hero_score_meter_markup_and_logic():
+    html, js, css = text("index.html"), text("app.js"), text("styles.css")
+    meter = re.search(r'<div class="hero-meter"[^>]*>', html)
+    assert meter and 'aria-hidden="true"' in meter.group(0)
+    for node in ("hero-meter-read", "hero-meter-fill", "hero-meter-tick"):
+        assert f'id="{node}"' in html
+    body = _js_function(js, "function renderHeroMeter(")
+    assert (
+        "chart.now.f" in body and "chart.tau" in body
+    )  # the real score and limit, nothing invented
+    assert "fmtNum(f, 2)" in body and "fmtNum(tau, 2)" in body  # unknown values read "–"
+    assert "f > tau" in body and '"over"' in body
+    assert "renderHeroMeter();" in _js_function(js, "function renderHero(")
+    assert ".hm-fill.over" in css and "scaleX(" in body  # transform only
+
+
+def test_live_clocks_on_live_panels_only():
+    html = text("index.html")
+    for tag in ("CAM-01 · STATUS · LIVE", "CAM-02 · MAIN FEED · LIVE", "CAM-07 · REPLAY"):
+        head = re.search(
+            rf'<span class="hud-tag" data-tag="{re.escape(tag)}"></span>(.*?)</div>', html
+        )
+        assert head and 'class="hud-clock" aria-hidden="true"' in head.group(1), tag
+    assert html.count('class="hud-clock"') == 3
+    js = text("app.js")
+    assert 'fx("clockSource", () => fmtThaiTime(eventNowUs(), true))' in js
+    assert "setInterval" not in _js_function(js, "function renderHero(")
+
+
+def test_motion_failure_fallback_and_nav_replace():
+    js = text("app.js")
+    assert 'classList.toggle("fx-off", fxOff())' in _js_function(js, "function fxApply(")
+    assert "placeNavMark();" in _js_function(js, "function applyRoleGates(")
+    assert 'fx("navTo"' in _js_function(js, "function placeNavMark(")
+    apply_fn = _js_function(text("motion.js"), "function apply(off)")
+    assert "tickerFit();" in apply_fn.split("} else {")[1]
+
+
+def test_phone_home_has_no_empty_replay_row_and_glow_follows_violet():
+    css = text("styles.css")
+    phone = css.split("@media (max-width: 719px)")[1].split("\n}\n", 1)[0]
+    hidden = (
+        ':has(#replay-bar[hidden]) { grid-template-areas: "hero" "chart" "s1" "s2" "s3" "alerts"; }'
+    )
+    assert hidden in phone
+    assert "--line-f-glow: rgba(124, 58, 237, 0.45)" in css and "167, 139, 250" not in css
+    assert "--hud-violet: #7c3aed" in css
+
+
+def test_glitch_is_slow_enough():
+    mcss = text("motion.css")
+    assert "steps(6)" not in mcss
+    # at most 3 jumps in a second: a 0.8 s run holds each of its stops for 0.4 s
+    anim = re.search(r"\.hud-glitch \{ animation: hud-glitch ([\d.]+)s steps\(1\) 1", mcss)
+    assert anim and float(anim.group(1)) >= 0.7
+    frames = re.search(r"@keyframes hud-glitch \{(.*?)\n\}", mcss, re.S).group(1)
+    assert len(re.findall(r"\d+% \{", frames)) <= 3
+
+
+HUD_HARNESS = r"""
+const fs = require("fs"), vm = require("vm");
+let layers = [], timers = [], intervals = [], cleared = [], clock = 0, off = false, observers = [];
+const cls = () => { const s = new Set(); return { add: c => s.add(c), remove: c => s.delete(c), contains: c => s.has(c) }; };
+function mk(o) {
+  return Object.assign({ textContent: "", attrs: {}, children: [], l: {}, className: "", classList: cls(), hidden: false, disabled: false,
+    style: { setProperty(k, v) { this[k] = v; }, removeProperty(k) { delete this[k]; } }, offsetHeight: 40,
+    setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; },
+    getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+    appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+    removeChild(c) { this.children = this.children.filter(x => x !== c); c.parentNode = null; return c; },
+    addEventListener(t, f) { (this.l[t] = this.l[t] || []).push(f); },
+    querySelector(sel) { return sel === ":scope > .fx-ripple" ? this.children.find(c => c.className === "fx-ripple") || null : null; },
+    closest() { return this; }, getBoundingClientRect() { return { left: 10, top: 10, width: 100, height: 30 }; } }, o);
+}
+const root = mk({}); root.classList = { contains: c => c === "fx-off" && off, add() {}, remove() {} }; root.getAttribute = () => null;
+const tagA = mk({ textContent: "AAAA" }), tagB = mk({ textContent: "BBBB" });
+const tag = mk({ id: "login-tagline" }); tag.querySelectorAll = sel => (sel === ".tg" ? [tagA, tagB] : []);
+const page = mk({}); const canvas = mk({}); const rec = { bent: 0 };
+const ctx2d = ({ clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillRect() {},
+  quadraticCurveTo() { rec.bent++; }, set strokeStyle(v) {}, set fillStyle(v) {}, set lineWidth(v) {}, set globalAlpha(v) {} });
+canvas.getContext = () => ctx2d;
+const clocks = [mk({ textContent: "-" }), mk({ textContent: "-" })];
+const byId = { "login-tagline": tag, "page-login": page, "fx-bg": canvas };
+const doc = { documentElement: root, hidden: false, getElementById: id => byId[id] || null, createElement: () => mk({}),
+  querySelectorAll: sel => (sel === ".hud-clock" ? clocks : []), addEventListener(t, f) { (doc.l[t] = doc.l[t] || []).push(f); }, l: {} };
+const M = { addLayer: f => layers.push(f), removeLayer: f => { layers = layers.filter(x => x !== f); }, bg: () => ({ w: 400, h: 400, rgb: [0, 229, 255] }) };
+class MO { constructor(f) { this.f = f; observers.push(this); } observe() {} }
+const wl = {};
+const g = { document: doc, Motion: M, performance: { now: () => clock }, matchMedia: q => ({ matches: q.includes("pointer: fine") }),
+  setTimeout: (f, ms) => { timers.push(f); return timers.length; }, clearTimeout() {},
+  setInterval: (f, ms) => { intervals.push(f); return intervals.length; }, clearInterval: id => cleared.push(id),
+  addEventListener(t, f) { (wl[t] = wl[t] || []).push(f); }, getSelection: () => null, getComputedStyle: () => ({ position: "static" }),
+  MutationObserver: MO, Math: Object.assign(Object.create(Math), { random: () => 0.5 }) };
+g.globalThis = g;
+vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), g);
+const fire = () => observers.forEach(o => o.f());
+const out = {};
+// tagline: it types into the aria-hidden spans, never labels the paragraph, and ends on the full text
+out.t0 = [tagA.textContent, tagB.textContent, "aria-label" in tag.attrs];
+intervals[0](); intervals[0](); intervals[0]();
+out.t1 = [tagA.textContent, "aria-label" in tag.attrs];
+off = true; fire();
+out.t2 = [tagA.textContent, tagB.textContent, "aria-label" in tag.attrs];
+off = false;
+// clock: one shared timer, written once a second, static while off
+const before = intervals.length;
+let now = "10:00:00";
+M.clockSource(() => now);
+out.c0 = [clocks[0].textContent, clocks[1].textContent];
+now = "10:00:01"; intervals[intervals.length - 1]();
+out.c1 = clocks[0].textContent;
+off = true; fire(); now = "10:00:02"; intervals[intervals.length - 1]();
+out.c2 = clocks[0].textContent; out.c2cleared = cleared.length > 0;
+off = false;
+out.oneTimer = intervals.length - before;
+// ripple
+const btn = mk({});
+const click = (b, extra) => doc.l.click.forEach(f => f(Object.assign({ target: b, clientX: 60, clientY: 20, detail: 1 }, extra)));
+click(btn);
+const wrap = btn.children[0];
+out.r0 = [btn.children.length, wrap && wrap.className, wrap && wrap.attrs["aria-hidden"], btn.style.position, wrap && wrap.children[0].style.left];
+timers.slice().forEach(f => f());
+out.r1 = [btn.children.length, "position" in btn.style];
+off = true; click(btn); out.r2 = btn.children.length; off = false;
+const dis = mk({ disabled: true }); click(dis); out.r3 = dis.children.length;
+click(btn, { detail: 0 }); out.r4 = btn.children[0].children[0].style.left;
+// plexus: lines bend toward the pointer, and stop bending when the pointer leaves the window
+const draw = layers.find(f => f.name === "drawPlexus");
+wl.pointermove.forEach(f => f({ clientX: 200, clientY: 200, pointerType: "mouse" }));
+rec.bent = 0; draw(ctx2d, 0, 0.03); out.p0 = rec.bent > 0;
+(root.l.mouseleave || []).forEach(f => f());
+rec.bent = 0; draw(ctx2d, 0, 0.03); out.p1 = rec.bent;
+out.pointerleaveOnDoc = !!(doc.l.pointerleave && doc.l.pointerleave.length);
+console.log(JSON.stringify(out));
+"""  # noqa: E501
+
+
+def test_hud_behaviour_in_node(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = tmp_path / "hud_h.js"
+    script.write_text(HUD_HARNESS, encoding="utf-8")
+    cmd = [node, str(script), str(WEB_DIR / "hud.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["t0"] == ["", "", False] and out["t1"][1] is False
+    assert out["t1"][0] not in ("", "AAAA")  # partway through, on the hidden span
+    assert out["t2"] == ["AAAA", "BBBB", False]  # effects off: the whole text at once
+    assert out["c0"] == ["10:00:00", "10:00:00"] and out["c1"] == "10:00:01"
+    assert out["c2"] == "10:00:01" and out["c2cleared"] is True  # off: static
+    assert out["oneTimer"] == 1
+    assert out["r0"][:4] == [1, "fx-ripple", "true", "relative"] and out["r0"][4] == "50px"
+    assert out["r1"] == [0, False]  # removed, and the button's position restored
+    assert out["r2"] == 0 and out["r3"] == 0  # off, and disabled: no ripple
+    assert out["r4"] == "50px"  # a keyboard press ripples from the centre
+    assert out["p0"] is True and out["p1"] == 0 and out["pointerleaveOnDoc"] is False

@@ -795,6 +795,8 @@ function fxOff() {
 
 function fxApply() {
   fx("setOff", fxOff());
+  // motion.js missing: the switch must still stop the CSS-only loops, so the class is set here
+  if (!globalThis.Motion) document.documentElement.classList.toggle("fx-off", fxOff());
   try {
     const sw = $("menu-fx");
     if (sw) sw.setAttribute("aria-pressed", String(fxUserOff()));
@@ -1004,6 +1006,15 @@ function applySimGates() {
   box.textContent = why;
 }
 
+// the nav underline under the current link (motion.js); a link that appeared or went moves the others
+function placeNavMark() {
+  try {
+    fx("navTo", document.querySelector('.nav a[aria-current="page"]'));
+  } catch (e) {
+    /* decoration only */
+  }
+}
+
 // UI convenience only: the server enforces the role on every route
 function applyRoleGates() {
   const ok = can("analyst");
@@ -1027,6 +1038,7 @@ function applyRoleGates() {
   }
   $("menu-activity").hidden = !can("admin");
   $("nav-users").hidden = !can("admin");
+  placeNavMark(); // the Users link changed the row: place the underline again
   renderPlayButton(); // the gate above cleared every title; the play button gets its "(กดแป้นเว้นวรรค)" back
 }
 
@@ -1120,8 +1132,30 @@ function heroPending(failed) {
   };
 }
 
+// the hero's score meter: F against the limit τ, both from the chart; "–" and an empty bar when either is unknown
+const METER_HEADROOM = 1.3; // the bar ends 30 % past the limit, so the limit tick sits at ~77 %
+
+function renderHeroMeter() {
+  const read = $("hero-meter-read");
+  const fill = $("hero-meter-fill");
+  const tick = $("hero-meter-tick");
+  if (!read || !fill || !tick) return;
+  const f = chart.now.f;
+  const tau = chart.tau;
+  const haveTau = isNum(tau) && tau > 0;
+  const text = `ระดับ ${fmtNum(f, 2)} / เส้นเตือน ${fmtNum(tau, 2)}`;
+  if (read.textContent !== text) read.textContent = text;
+  const max = haveTau ? tau * METER_HEADROOM : 1;
+  const k = haveTau && isNum(f) ? Math.max(0, Math.min(1, f / max)) : 0;
+  fill.style.transform = `scaleX(${k.toFixed(3)})`; // the bar is scaled, never resized
+  fill.classList.toggle("over", haveTau && isNum(f) && f > tau); // past the limit: the alert colour
+  tick.hidden = !haveTau;
+  if (haveTau) tick.style.left = `${((tau / max) * 100).toFixed(1)}%`;
+}
+
 // runs on every health, score and alert update; writes the DOM only when the sentence changes
 function renderHero() {
+  renderHeroMeter();
   if (!state.health && !isNum(state.lastBarUs) && !state.alertsFailed) return; // no clock yet: keep "กำลังอ่านสถานะ"
   const next = !state.alertsLoaded ? heroPending(state.alertsFailed) : heroStatus({
     nowUs: eventNowUs(),
@@ -3809,6 +3843,7 @@ async function boot() {
 
   loadSignupConfig();
   let authEnabled = await loadMe();
+  fx("clockSource", () => fmtThaiTime(eventNowUs(), true)); // the .hud-clock of the live panels (hud.js ticks it)
   fx("init", { off: fxOff() }); // motion.js loads right after this file, so it is ready once the first answer is in
   fxApply();
   for (let attempt = 0; bootView(state.me, authEnabled) === "loading"; attempt += 1) {

@@ -24,7 +24,7 @@
   var TILT_BIG_H = 520;
   var TILT_SEL = "main .hud:not(.hud-sm):not(.toast)";
   var GLITCH_GAP_MS = 2000; // the same floor as the alert burst
-  var GLITCH_MS = 650;
+  var GLITCH_MS = 800;
   var WIRE_PAIRS = [
     ["hero", "chart-card", 0, 0.16],
     ["card-alerts", "chart-card", 1, 0.4],
@@ -401,6 +401,7 @@
         tiltReset();
         glitchEnd();
       } else if (wires && !wires.firstChild) scheduleWires(); // effects came back: draw the wires again
+      clockSync();
       var mood = root.getAttribute("data-mood") || "calm";
       if (mood !== lastMood) {
         var wasAlert = lastMood === "alert";
@@ -511,9 +512,12 @@
       },
       { passive: true },
     );
-    DOC.addEventListener("pointerleave", function () {
+    // the pointer left the window: pointerleave never fires on document, mouseleave on <html> does
+    function plexLeave() {
       plex.mx = plex.my = -9999;
-    });
+    }
+    DOC.documentElement.addEventListener("mouseleave", plexLeave, { passive: true });
+    G.addEventListener("blur", plexLeave);
   }
 
   // ---------------------------------------------------------------- chart draw-in (first full load only)
@@ -550,10 +554,9 @@
       typeTimer = 0;
     }
     if (!tag || !typeFull) return;
-    var spans = tag.querySelectorAll("span");
+    var spans = tag.querySelectorAll(".tg");
     for (var i = 0; i < spans.length && i < typeFull.length; i++) spans[i].textContent = typeFull[i];
     tag.classList.remove("is-typing");
-    tag.removeAttribute("aria-label");
     tag.style.minHeight = "";
     typeFull = null;
   }
@@ -564,12 +567,11 @@
     var page = DOC.getElementById("page-login");
     typeEnd();
     if (!tag || !page || page.hidden || isOff()) return;
-    var spans = tag.querySelectorAll("span");
+    var spans = tag.querySelectorAll(".tg"); // the sr-only copy holds the full text for assistive tech; these are aria-hidden
     if (!spans.length) return;
     typeFull = [];
     for (var i = 0; i < spans.length; i++) typeFull.push(spans[i].textContent);
     tag.style.minHeight = tag.offsetHeight + "px"; // the line count does not jump while it types
-    tag.setAttribute("aria-label", typeFull.join(" "));
     tag.classList.add("is-typing");
     for (var j = 0; j < spans.length; j++) spans[j].textContent = "";
     var si = 0;
@@ -600,11 +602,107 @@
     if (!page.hidden) typeTagline();
   }
 
+  // ---------------------------------------------------------------- live clock (.hud-clock)
+
+  var clockFn = null; // the app's provider: returns the text to show (its own event/replay time)
+  var clockTimer = 0;
+
+  // one shared timer, once a second, writing the same text to every clock; a hidden tab or effects off do nothing
+  function clockTick(force) {
+    if (!clockFn || (!force && (DOC.hidden || isOff()))) return;
+    var text = String(clockFn());
+    var list = DOC.querySelectorAll(".hud-clock");
+    for (var i = 0; i < list.length; i += 1) if (list[i].textContent !== text) list[i].textContent = text;
+  }
+
+  function clockSync() {
+    if (clockFn && !isOff()) {
+      if (!clockTimer) clockTimer = G.setInterval(guardTick, 1000);
+      guardTick();
+    } else if (clockTimer) {
+      G.clearInterval(clockTimer); // off: the clock stays as it was, static
+      clockTimer = 0;
+    }
+  }
+
+  function guardTick() {
+    try {
+      clockTick(false);
+    } catch (e) {
+      /* decoration only */
+    }
+  }
+
+  // ---------------------------------------------------------------- click ripple (buttons and chips)
+
+  var RIPPLE_MS = 650;
+
+  function ripple(e) {
+    if (isOff()) return;
+    var t = e.target && e.target.closest ? e.target.closest("button, .chip") : null;
+    if (!t || t.disabled || t.getAttribute("aria-disabled") === "true") return;
+    var r = t.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    var old = t.querySelector(":scope > .fx-ripple");
+    if (old) old.parentNode.removeChild(old);
+    var x = e.detail === 0 ? r.width / 2 : e.clientX - r.left; // a keyboard press has no pointer: from the centre
+    var y = e.detail === 0 ? r.height / 2 : e.clientY - r.top;
+    var far = Math.sqrt(Math.max(x, r.width - x) * Math.max(x, r.width - x) + Math.max(y, r.height - y) * Math.max(y, r.height - y));
+    var wrap = DOC.createElement("span");
+    wrap.className = "fx-ripple";
+    wrap.setAttribute("aria-hidden", "true");
+    var dot = DOC.createElement("i");
+    dot.style.left = x + "px";
+    dot.style.top = y + "px";
+    dot.style.setProperty("--rs", ((far * 2) / 10 + 1).toFixed(1));
+    wrap.appendChild(dot);
+    var moved = false;
+    if (G.getComputedStyle(t).position === "static") {
+      t.style.position = "relative"; // the layer is positioned against the button
+      moved = true;
+    }
+    t.appendChild(wrap);
+    var done = false;
+    function end() {
+      if (done) return;
+      done = true;
+      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
+      if (moved && !t.querySelector(":scope > .fx-ripple")) t.style.removeProperty("position");
+    }
+    dot.addEventListener("animationend", end);
+    G.setTimeout(end, RIPPLE_MS + 150);
+  }
+
+  function rippleInit() {
+    DOC.addEventListener(
+      "click",
+      function (e) {
+        try {
+          ripple(e);
+        } catch (err) {
+          /* decoration only */
+        }
+      },
+      { passive: true },
+    );
+  }
+
   // ---------------------------------------------------------------- public
 
   M.chartReveal = function () {
     try {
       chartReveal();
+    } catch (e) {
+      /* decoration only */
+    }
+  };
+
+  // the app hands over one function that returns the clock text; hud.js ticks it once a second
+  M.clockSource = function (fn) {
+    try {
+      clockFn = typeof fn === "function" ? fn : null;
+      clockTick(true); // show it now, even while effects are off: the clock is then static
+      clockSync();
     } catch (e) {
       /* decoration only */
     }
@@ -629,6 +727,7 @@
     wiresInit();
     plexInit();
     typeInit();
+    rippleInit();
     if (typeof G.MutationObserver === "function") {
       new G.MutationObserver(onRoot).observe(DOC.documentElement, { attributes: true, attributeFilter: ["class", "data-mood"] });
     }

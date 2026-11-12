@@ -59,7 +59,7 @@
   --panel: rgba(0, 0, 0, 0);
   --line-price: #00e5ff;
   --line-f: #7c3aed;
-  --line-f-glow: rgba(167, 139, 250, 0.45);
+  --line-f-glow: rgba(124, 58, 237, 0.45); /* --hud-violet at .45 alpha (the chart wants a plain rgba string) */
   --line-l1: #8aa0b8;
   --line-l2: #5f7a96;
   --line-l3: #3f5670;
@@ -844,6 +844,14 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
 .hero-line { margin: 8px 0 0; font-size: 17px; color: var(--dim); }
 .hero-line a { color: var(--text); text-decoration: underline; text-decoration-color: rgba(255, 255, 255, 0.35); text-underline-offset: 4px; }
 .hero-line a:hover { text-decoration-color: currentColor; }
+/* the score against the limit: a thin bar, the limit as a tick, red past it (values from the chart, never invented) */
+.hero-meter { display: flex; align-items: center; gap: 14px; margin-top: 18px; }
+.hero-meter-read { flex: none; font-size: 12px; line-height: 1; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hero-meter-bar { position: relative; flex: 1; max-width: 360px; height: 6px; border: 1px solid rgba(0, 229, 255, 0.25); }
+.hm-fill { position: absolute; inset: 0; background: var(--hud-violet); box-shadow: 0 0 8px var(--hud-violet); transform: scaleX(0); transform-origin: 0 50%; transition: transform 0.45s cubic-bezier(0.2, 0.8, 0.2, 1), background-color 0.2s; }
+.hm-fill.over { background: var(--hud-alert); box-shadow: 0 0 8px var(--hud-alert); }
+.hm-tick { position: absolute; top: -5px; bottom: -5px; width: 1px; background: var(--dim); }
+.hm-tick[hidden] { display: none; }
 
 .orb { position: relative; flex: none; width: 48px; height: 48px; border-radius: 50%; background: var(--dim); color: var(--dim); }
 .orb.normal { background: var(--ok); color: var(--ok); box-shadow: 0 0 24px rgba(34, 255, 136, 0.5); }
@@ -900,6 +908,7 @@ details.notes-box summary { cursor: pointer; font-size: 13px; color: var(--dim);
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas: "hero" "chart" "s1" "s2" "s3" "alerts" "replay";
   }
+  #page-home:not([hidden]):has(#replay-bar[hidden]) { grid-template-areas: "hero" "chart" "s1" "s2" "s3" "alerts"; }
   #chart-card .chart { min-height: 360px; }
   #chart-card .chart.lanes { min-height: 520px; }
 }
@@ -1008,7 +1017,7 @@ body.login-mode #ws-banner { display: none; }
 .login-name { margin: 0; font-size: 28px; }
 .login-tagline { margin: 16px 0 0; max-width: 520px; font-size: 24px; line-height: 1.45; }
 /* a phrase per line: Thai has no spaces inside a phrase, so a free wrap splits words like ผิด|ปกติ */
-.login-tagline span { display: inline-block; }
+.login-tagline .tg { display: inline-block; }
 .login-line { display: block; width: 100%; max-width: 520px; height: auto; margin-top: 32px; overflow: visible; filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.55)); }
 .login-line path { stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .login-line-limit { stroke: rgba(255, 45, 85, 0.45); stroke-width: 1; stroke-dasharray: 4 6; }
@@ -1170,6 +1179,10 @@ td.when { white-space: nowrap; }
   100% { stroke-dashoffset: 0; opacity: 0; }
 }
 .flash { animation: glow 0.9s ease-out; }
+/* a panel's own background sits under its fill (::after), so its flash drives the fill instead */
+.hud.flash { animation: none; }
+.hud.flash::after { animation: hud-flash 0.9s ease-out; }
+@keyframes hud-flash { 0% { background: rgba(245, 158, 11, 0.3); } 100% { background: var(--glass); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
