@@ -11,8 +11,6 @@
 
   var FRAME_MS = 1000 / 30; // one shared loop, at most 30 fps
   var MOODS = { calm: [0, 229, 255], watch: [245, 158, 11], alert: [255, 45, 85] }; // --fx-calm / --fx-watch / --fx-alert
-  var GRID_ALPHA = 0.16; // bolder than the --fx-grid token (.08), which stays the CSS base
-  var SMALL_W = 640; // below this width half the dots are drawn
 
   var S = {
     off: true, // the effective state: the request or reduced motion
@@ -27,9 +25,6 @@
     ctx: null,
     w: 0,
     h: 0,
-    dots: [],
-    scanAt: 0,
-    scanFrom: -1,
     resizeTimer: 0,
     started: false,
   };
@@ -139,19 +134,6 @@
 
   // ---------------------------------------------------------------- background canvas
 
-  function dotCount() {
-    var n = Math.max(30, Math.min(60, Math.round((S.w * S.h) / 32000)));
-    return S.w < SMALL_W ? Math.round(n / 2) : n;
-  }
-
-  function seedDots() {
-    var n = dotCount();
-    while (S.dots.length > n) S.dots.pop();
-    while (S.dots.length < n) {
-      S.dots.push({ x: Math.random() * S.w, y: Math.random() * S.h, v: 8 + Math.random() * 22, r: 0.8 + Math.random() * 1.4, a: 0.25 + Math.random() * 0.45 });
-    }
-  }
-
   // sizes happen on a debounced resize, never inside the loop
   function size() {
     var c = S.canvas;
@@ -162,7 +144,6 @@
     c.width = Math.round(S.w * dpr);
     c.height = Math.round(S.h * dpr);
     S.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    seedDots();
   }
 
   function onResize() {
@@ -174,90 +155,11 @@
     }, 150);
   }
 
-  function rgba(a) {
-    return "rgba(" + Math.round(S.rgb[0]) + "," + Math.round(S.rgb[1]) + "," + Math.round(S.rgb[2]) + "," + a + ")";
-  }
-
+  // the mood colour eases here, for every layer; the plexus (hud.js) draws the canvas itself
   function drawBackground(ctx, t, dt) {
-    var w = S.w;
-    var h = S.h;
-    // the colour eases toward the mood
     var goal = MOODS[S.mood];
     var k = 1 - Math.exp(-dt * 3);
     for (var c = 0; c < 3; c += 1) S.rgb[c] += (goal[c] - S.rgb[c]) * k;
-
-    ctx.clearRect(0, 0, w, h);
-
-    // perspective grid: rows slide toward the viewer, columns meet at the horizon
-    var hy = h * 0.42;
-    var rows = 11;
-    var phase = (t / 7000) % 1;
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = rgba(GRID_ALPHA);
-    for (var i = 0; i < rows; i += 1) {
-      var z = (i + phase) / rows;
-      var y = hy + (h - hy) * z * z;
-      ctx.globalAlpha = Math.min(1, 0.25 + z * 1.2);
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-    var fade = ctx.createLinearGradient(0, hy, 0, h);
-    fade.addColorStop(0, rgba(0));
-    fade.addColorStop(1, rgba(GRID_ALPHA * 1.5));
-    ctx.strokeStyle = fade;
-    var cols = 16;
-    var span = Math.max(w * 0.18, 90);
-    var drift = Math.sin(t / 9000) * span * 0.25;
-    ctx.beginPath();
-    for (var j = 0; j <= cols; j += 1) {
-      ctx.moveTo(w / 2, hy);
-      ctx.lineTo(w / 2 + (j - cols / 2) * span + drift, h);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = rgba(GRID_ALPHA * 2);
-    ctx.beginPath();
-    ctx.moveTo(0, hy);
-    ctx.lineTo(w, hy);
-    ctx.stroke();
-
-    // rising data dots, faded at both ends of their path
-    ctx.fillStyle = rgba(1);
-    for (var d = 0; d < S.dots.length; d += 1) {
-      var p = S.dots[d];
-      p.y -= p.v * dt;
-      if (p.y < -6) {
-        p.y = h + 6;
-        p.x = Math.random() * w;
-      }
-      ctx.globalAlpha = p.a * Math.max(0, Math.sin(Math.PI * (1 - p.y / h)));
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.r, 0, 6.2832);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // one horizontal scan line every 8 to 12 seconds
-    if (!S.scanAt) S.scanAt = t + 4000 + Math.random() * 4000;
-    if (S.scanFrom < 0 && t >= S.scanAt) S.scanFrom = t;
-    if (S.scanFrom >= 0) {
-      var prog = (t - S.scanFrom) / 2800;
-      if (prog >= 1) {
-        S.scanFrom = -1;
-        S.scanAt = t + 8000 + Math.random() * 4000;
-      } else {
-        var sy = prog * h;
-        var band = ctx.createLinearGradient(0, sy - 70, 0, sy);
-        band.addColorStop(0, rgba(0));
-        band.addColorStop(1, rgba(0.12));
-        ctx.fillStyle = band;
-        ctx.fillRect(0, sy - 70, w, 70);
-        ctx.fillStyle = rgba(0.3);
-        ctx.fillRect(0, sy, w, 1);
-      }
-    }
   }
 
   // ---------------------------------------------------------------- header: eye, typed name, ticker, nav underline
@@ -790,13 +692,6 @@
     ctx.stroke();
   }
 
-  // vertical gradient, colour c, one alpha per evenly spaced stop
-  function vgrad(ctx, y0, y1, c, a) {
-    var g = ctx.createLinearGradient(0, y0, 0, y1);
-    for (var i = 0; i < a.length; i += 1) g.addColorStop(i / (a.length - 1), "rgba(" + c + "," + a[i] + ")");
-    return g;
-  }
-
   function drawFill(ctx, O, c) {
     var f = O.fill;
     if (f.length < 4 || !O.ph[0]) return;
@@ -808,17 +703,17 @@
     ctx.lineTo(f[f.length - 2], bottom);
     ctx.lineTo(f[0], bottom);
     ctx.closePath();
-    ctx.fillStyle = vgrad(ctx, top, bottom, c, [0.2, 0]);
+    ctx.fillStyle = "rgba(" + c + ",.07)"; // flat and faint
     ctx.fill();
   }
 
   function drawScan(ctx, O, c, t) {
     var x = Math.round(O.px);
-    ctx.fillStyle = vgrad(ctx, 0, O.h, c, [0.1, 0.6, 0.1]);
+    ctx.fillStyle = "rgba(" + c + ",.35)";
     ctx.fillRect(x - 0.5, 0, 1, O.h);
     var sy = ((t % 3200) / 3200) * O.h; // bright spot travelling down
-    ctx.fillStyle = vgrad(ctx, sy - 24, sy + 24, c, [0, 0.85, 0]);
-    ctx.fillRect(x - 1, sy - 24, 2, 48);
+    ctx.fillStyle = "rgba(" + c + ",.85)";
+    ctx.fillRect(x - 1, sy - 12, 2, 24);
   }
 
   function drawCross(ctx, O, t, plotW) {
@@ -831,12 +726,10 @@
     }
     if (e < 180) {
       var fa = 1 - e / 180; // short flash
-      var rg = ctx.createRadialGradient(X.x, X.y, 0, X.x, X.y, 34);
-      rg.addColorStop(0, "rgba(255,255,255," + 0.9 * fa + ")");
-      rg.addColorStop(0.4, "rgba(" + red + "," + 0.6 * fa + ")");
-      rg.addColorStop(1, "rgba(" + red + ",0)");
-      ctx.fillStyle = rg;
-      ctx.fillRect(X.x - 34, X.y - 34, 68, 68);
+      ctx.beginPath();
+      ctx.arc(X.x, X.y, 14, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255," + 0.8 * fa + ")";
+      ctx.fill();
     }
     for (var k = 0; k < 2; k += 1) {
       var p = (e - k * RING_GAP_MS) / SHOCK_MS;
@@ -1121,6 +1014,11 @@
     // the shared loop, for the scenes added on top of this
     addLayer: addLayer,
     removeLayer: removeLayer,
+
+    // the background canvas state for the plexus (hud.js): size in CSS px and the eased mood colour
+    bg: function () {
+      return S;
+    },
   };
 
   G.Motion = Motion;

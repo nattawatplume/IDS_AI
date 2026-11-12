@@ -33,6 +33,13 @@
     ["chart-card", "rail", 0, 0.26],
     ["chart-card", "replay-bar", 1, 0.78],
   ];
+  var PLEX_MIN = 40; // dots on a wide screen, scaled by area
+  var PLEX_MAX = 70;
+  var PLEX_BEND = 120; // px: lines bend toward the pointer inside this radius
+  var PLEX_LINK = 130; // px: neighbours closer than this are joined
+  var PLEX_SMALL_W = 640; // below this width half the dots are drawn
+  var PLEX_ALPHA = 0.21; // the mockup's .38 line alpha at its .55 canvas opacity
+  var REVEAL_MS = 900;
   var WIRE_IDS = ["hero", "card-alerts", "card-symbol", "card-health", "chart-card", "rail", "replay-bar"];
 
   function reduced() {
@@ -389,6 +396,7 @@
       var root = DOC.documentElement;
       if (isOff()) {
         settleAll();
+        if (revealAnim) revealAnim.cancel(); // effects off: the chart shows at once
         tiltReset();
         glitchEnd();
       } else if (wires && !wires.firstChild) scheduleWires(); // effects came back: draw the wires again
@@ -403,7 +411,140 @@
     }
   }
 
+  // ---------------------------------------------------------------- plexus background (#fx-bg)
+
+  var plex = { pts: [], w: 0, h: 0, mx: -9999, my: -9999, on: false, ctx: null, n: 0 };
+
+  function plexCount(w, h) {
+    var n = Math.max(PLEX_MIN, Math.min(PLEX_MAX, Math.round((w * h) / 20000)));
+    return w < PLEX_SMALL_W ? Math.round(n / 2) : n;
+  }
+
+  // flat, single colour (the eased mood colour); no gradients, no layout reads
+  function drawPlexus(ctx, t, dt) {
+    var bg = M.bg();
+    var w = bg.w;
+    var h = bg.h;
+    var pts = plex.pts;
+    if (w !== plex.w || h !== plex.h) {
+      plex.w = w;
+      plex.h = h;
+      var n = plexCount(w, h);
+      while (pts.length < n) {
+        pts.push({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - 0.5) * 24, vy: (Math.random() - 0.5) * 24 });
+      }
+      pts.length = n;
+    }
+    ctx.clearRect(0, 0, w, h);
+    var i;
+    for (i = 0; i < pts.length; i += 1) {
+      var p = pts[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.x < 0 || p.x > w) {
+        p.vx = -p.vx;
+        p.x = Math.max(0, Math.min(w, p.x));
+      }
+      if (p.y < 0 || p.y > h) {
+        p.vy = -p.vy;
+        p.y = Math.max(0, Math.min(h, p.y));
+      }
+    }
+    var col = Math.round(bg.rgb[0]) + "," + Math.round(bg.rgb[1]) + "," + Math.round(bg.rgb[2]);
+    var near = plex.mx > -9000;
+    var d2max = PLEX_LINK * PLEX_LINK;
+    ctx.strokeStyle = "rgb(" + col + ")";
+    ctx.lineWidth = 0.7;
+    for (i = 0; i < pts.length; i += 1) {
+      var a = pts[i];
+      for (var j = i + 1; j < pts.length; j += 1) {
+        var b = pts[j];
+        var dx = a.x - b.x;
+        var dy = a.y - b.y;
+        var d2 = dx * dx + dy * dy;
+        if (d2 > d2max) continue;
+        var mx = (a.x + b.x) / 2;
+        var my = (a.y + b.y) / 2;
+        var alpha = (1 - Math.sqrt(d2) / PLEX_LINK) * PLEX_ALPHA * 1.8;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        var bent = false;
+        if (near) {
+          var qx = plex.mx - mx;
+          var qy = plex.my - my;
+          var md = Math.sqrt(qx * qx + qy * qy);
+          if (md < PLEX_BEND) {
+            var k = (1 - md / PLEX_BEND) * 0.6;
+            alpha = Math.min(0.4, alpha + 0.12);
+            ctx.quadraticCurveTo(mx + qx * k, my + qy * k, b.x, b.y);
+            bent = true;
+          }
+        }
+        if (!bent) ctx.lineTo(b.x, b.y);
+        ctx.globalAlpha = alpha;
+        ctx.stroke();
+      }
+    }
+    ctx.fillStyle = "rgb(" + col + ")";
+    for (i = 0; i < pts.length; i += 1) {
+      var q = pts[i];
+      var ex = plex.mx - q.x;
+      var ey = plex.my - q.y;
+      ctx.globalAlpha = near && ex * ex + ey * ey < PLEX_BEND * PLEX_BEND ? 0.9 : 0.4;
+      ctx.fillRect(q.x - 1, q.y - 1, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function plexInit() {
+    var canvas = DOC.getElementById("fx-bg");
+    plex.ctx = canvas && typeof canvas.getContext === "function" ? canvas.getContext("2d") : null;
+    if (!plex.ctx) return;
+    M.addLayer(drawPlexus, { ctx: plex.ctx });
+    G.addEventListener(
+      "pointermove",
+      function (e) {
+        if (!pointerFine() || (e.pointerType && e.pointerType !== "mouse" && e.pointerType !== "pen")) return;
+        plex.mx = e.clientX;
+        plex.my = e.clientY;
+      },
+      { passive: true },
+    );
+    DOC.addEventListener("pointerleave", function () {
+      plex.mx = plex.my = -9999;
+    });
+  }
+
+  // ---------------------------------------------------------------- chart draw-in (first full load only)
+
+  var revealed = false;
+  var revealAnim = null;
+
+  // the lines draw themselves left to right: the chart is clipped, and the clip recedes
+  function chartReveal() {
+    var host = DOC.getElementById("chart");
+    if (revealed || !host || !host.offsetWidth) return; // not on screen yet: the first visible load plays it
+    revealed = true;
+    if (isOff() || typeof host.animate !== "function") return;
+    var anim = host.animate(
+      [{ clipPath: "inset(0 100% 0 0)" }, { clipPath: "inset(0 0 0 0)" }],
+      { duration: REVEAL_MS, easing: "cubic-bezier(.3,.7,.2,1)" },
+    );
+    anim.onfinish = anim.oncancel = function () {
+      revealAnim = null;
+    };
+    revealAnim = anim;
+  }
+
   // ---------------------------------------------------------------- public
+
+  M.chartReveal = function () {
+    try {
+      chartReveal();
+    } catch (e) {
+      /* decoration only */
+    }
+  };
 
   M.scramble = function (node, text) {
     try {
@@ -422,6 +563,7 @@
     tiltInit();
     glintInit();
     wiresInit();
+    plexInit();
     if (typeof G.MutationObserver === "function") {
       new G.MutationObserver(onRoot).observe(DOC.documentElement, { attributes: true, attributeFilter: ["class", "data-mood"] });
     }

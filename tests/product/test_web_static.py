@@ -3583,7 +3583,6 @@ def test_page_enter_wired():
     needles = (".fx-wipe", "@keyframes fx-wipe", ".fx-rise", "@keyframes fx-rise")
     for needle in (*needles, "prefers-reduced-motion: no-preference"):
         assert needle in css, needle
-    assert "GRID_ALPHA = 0.16" in js
 
 
 def test_motion_size_budget():
@@ -3885,3 +3884,49 @@ console.log(JSON.stringify(out));
     assert out["external"] == "-" and out["label2"] is False
     assert out["early"] == "-"
     assert out["replaced"] == "9999"
+
+
+# ---- HUD redesign, task 4: plexus background and neon chart ----
+
+
+def test_plexus_layer():
+    hud, js, css = text("hud.js"), text("motion.js"), text("motion.css")
+    for const in ("PLEX_MIN = 40", "PLEX_MAX = 70", "PLEX_BEND = 120"):
+        assert const in hud, const
+    assert "PLEX_SMALL_W = 640" in hud and "pointerFine()" in hud
+    assert 'addLayer(drawPlexus' in hud.replace("M.addLayer", "addLayer")
+    old_grid = ("perspective grid", "GRID_ALPHA", "seedDots", "createLinearGradient")
+    for old in (*old_grid, "createRadialGradient"):
+        assert old not in js, old
+    assert "Gradient(" not in hud
+    body = _js_function(hud, "function drawPlexus(")
+    assert "getBoundingClientRect" not in body and "offsetWidth" not in body
+    crt = re.search(r"(?m)^body::after\s*\{([^}]*)\}", css)
+    assert crt and "pointer-events: none" in crt.group(1) and "animation" not in crt.group(1)
+    assert "body::after" in css.split("prefers-reduced-motion: reduce")[1].split("}", 1)[0]
+    assert ".fx-off body::after" in css
+
+
+def test_chart_hud_colours():
+    js = text("app.js")
+    colours = _js_function(js, "function chartColors(")
+    assert 'price: cssVar("--hud-line")' in colours
+    assert 'f: cssVar("--hud-violet")' in colours
+    assert 'alert: cssVar("--hud-alert")' in colours
+    point = _js_function(js, "function fPoint(")
+    assert "chart.tau" in point and "color" in point
+    assert "fPoint" in _js_function(js, "function plot(")
+    assert "Array.from(f, fPoint)" in js
+    assert "Dashed" in js
+
+
+def test_chart_draw_in():
+    hud, app = text("hud.js"), text("app.js")
+    reveal = _js_function(hud, "function chartReveal(")
+    assert "revealed" in reveal and "isOff()" in reveal and "REVEAL_MS" in hud
+    assert "clipPath" in reveal and "inset(" in reveal
+    assert reveal.index("revealed = true") < reveal.index("isOff()")  # one shot, even when off
+    assert "revealAnim.cancel()" in hud  # effects going off finishes it at once
+    load = _js_function(app, "async function loadSeriesInner(")
+    assert 'fx("chartReveal")' in load
+    assert 'fx("chartReveal")' not in _js_function(app, "function plot(")

@@ -1197,9 +1197,10 @@ function chartColors() {
     bg: cssVar("--panel"),
     text: cssVar("--dim"),
     grid: cssVar("--line"),
-    price: cssVar("--line-price"),
-    f: cssVar("--line-f"),
+    price: cssVar("--hud-line"),
+    f: cssVar("--hud-violet"), // the score; its glow is a wide copy of the same colour
     fGlow: cssVar("--line-f-glow"),
+    alert: cssVar("--hud-alert"), // score above the limit
     tau: cssVar("--tau"),
     shade: cssVar("--shade"),
   };
@@ -1256,7 +1257,7 @@ function initChart() {
   // the glow goes first so the F line draws on top of it; it has no label and no crosshair dot
   chart.fGlow = chart.api.addSeries(
     LWC.LineSeries,
-    lineOptions(c.fGlow, "", { lineWidth: 6, lastValueVisible: false, crosshairMarkerVisible: false }),
+    lineOptions(c.fGlow, "", { lineWidth: 8, lastValueVisible: false, crosshairMarkerVisible: false }),
     1,
   );
   chart.f = chart.api.addSeries(
@@ -1384,6 +1385,13 @@ function lastTime(data) {
   return data.length ? data[data.length - 1].time : -Infinity;
 }
 
+// a score point above the limit is drawn in the alert colour (the segment that ends on it)
+function fPoint(pt) {
+  if (!isNum(chart.tau) || !isNum(pt.value) || pt.value <= chart.tau) return pt;
+  chart.alertColor ||= cssVar("--hud-alert");
+  return { ...pt, color: chart.alertColor };
+}
+
 function setTau(tau) {
   if (!chart.f) return;
   chart.tau = isNum(tau) ? tau : null;
@@ -1433,8 +1441,9 @@ async function loadSeriesInner() {
   chart.price.setData(price);
   chart.priceTimes = price.filter((p) => "value" in p).map((p) => p.time);
   chart.last = { price: lastTime(price) };
+  setTau(s.tau); // before the score is plotted: the points above it are coloured
   const f = seriesData(times, s.F || []);
-  chart.f.setData(f);
+  chart.f.setData(Array.from(f, fPoint));
   chart.fGlow.setData(f);
   chart.last.f = lastTime(f);
   chart.now = { price: lastValue(price), f: lastValue(f) };
@@ -1446,10 +1455,10 @@ async function loadSeriesInner() {
     chart.lanes[key].setData(d);
     chart.last[key] = lastTime(d);
   }
-  setTau(s.tau);
   renderReadout(null, chart.now.price, chart.now.f);
   renderSymbolPrice();
   $("chart-empty").hidden = price.length > 0;
+  if (price.length) fx("chartReveal"); // the lines draw in once, on the first full load (hud.js)
   renderMarkers();
   renderHero();
 }
@@ -1503,7 +1512,7 @@ function plot(key, series, t, value) {
   if (!series || !isNum(value) || !isNum(t)) return false;
   const last = chart.last[key] ?? -Infinity;
   if (t <= last) return false; // stale (e.g. after a seek): dropped on purpose
-  series.update({ time: t, value });
+  series.update(key === "f" ? fPoint({ time: t, value }) : { time: t, value });
   chart.last[key] = t;
   if (key === "price" || key === "f") chart.now[key] = value;
   return true;

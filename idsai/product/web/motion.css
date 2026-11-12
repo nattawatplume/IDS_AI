@@ -34,6 +34,16 @@ html::after {
   pointer-events: none;
 }
 
+/* faint CRT scanlines over the page: a static pattern, one dark hairline in four, hidden when effects are off */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='4' height='1' fill='%23000' fill-opacity='.18'/%3E%3C/svg%3E");
+}
+
 /* the screen-edge flash (filled in with the alert burst): invisible until it is fired */
 #fx-edge {
   position: fixed;
@@ -77,7 +87,7 @@ html::after {
 .user-menu #menu-fx[aria-pressed="true"]::before { background: var(--hud-bg); transform: translate(0, -50%); }
 
 @media (prefers-reduced-motion: reduce) {
-  #fx-bg, #fx-edge, #fx-chart, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires { display: none; }
+  #fx-bg, #fx-edge, #fx-chart, body::after, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires { display: none; }
   #cctv-beam { opacity: .3; }
   *, *::before, *::after { animation: none !important; }
   .iris-core, .brand-mark { transition: none; }
@@ -94,7 +104,7 @@ html::after {
 .fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind,
 .fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch { animation: none !important; }
 .fx-off .fx-glint, .fx-off .hud-wires { display: none; }
-.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
+.fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off body::after, .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .fx-wipe, html.fx-off[data-mood] .orb-ring { display: none; }
 .fx-off #hero-cam *, .fx-off #hero-cam { transition: none; }
 .fx-off .nav-ind, .fx-off .brand-cur, .fx-off .tk-group + .tk-group, .fx-off .tk-rep { display: none; }
 .fx-off .iris-core, .fx-off .brand-mark { transition: none; }
