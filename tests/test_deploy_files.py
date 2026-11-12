@@ -64,9 +64,37 @@ def test_start_script_render():
     raw = (ROOT / "deploy" / "start.sh").read_bytes()
     assert b"\r" not in raw
     text = raw.decode("utf-8")
-    serve_lines = [ln for ln in text.splitlines() if ln.startswith("exec idsai serve")]
-    assert len(serve_lines) == 1
-    assert "--allow-signup" in serve_lines[0]
+    stripped = [ln.strip() for ln in text.splitlines()]
+    serve_lines = [ln for ln in stripped if ln.startswith("exec idsai serve")]
+    assert len(serve_lines) == 2
+    live = next(ln for ln in serve_lines if "--mode live" in ln)
+    replay = next(ln for ln in serve_lines if "--mode replay" in ln)
+    common = (
+        "--host 0.0.0.0",
+        '--port "$PORT"',
+        "--auth",
+        "--secure-cookies",
+        "--allow-signup",
+        '--public-host "$PUBLIC_HOST"',
+    )
+    for want in common:
+        assert want in live
+        assert want in replay
+    assert "--loop" not in live and "--speed" not in live
+    assert replay == (
+        'exec idsai serve --mode replay --loop --speed "$SPEED" --host 0.0.0.0 '
+        '--port "$PORT" --auth --secure-cookies --allow-signup --public-host "$PUBLIC_HOST"'
+    )
+    assert text.index("idsai user seed-env") < text.index("idsai live-check") < text.index(live)
+    assert text.index(live) < text.index(replay)
+    for want in (
+        '"${IDSAI_MODE:-live}"',
+        "models/live/bundle.json",
+        "if ! idsai live-check",
+        "idsai live-prep",
+    ):
+        assert want in text
+    assert any("฀" <= c <= "๿" for c in text)
     for want in (
         "idsai user seed-env",
         "RENDER_EXTERNAL_HOSTNAME",
@@ -99,6 +127,12 @@ def test_start_script_render():
     assert any("฀" <= c <= "๿" for c in r.stderr)
 
 
+def runtime_of(text: str) -> str:
+    lines = text.splitlines()
+    froms = [i for i, ln in enumerate(lines) if ln.startswith("FROM ")]
+    return "\n".join(lines[froms[1] :])
+
+
 def test_dockerfile_two_stages():
     text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -108,6 +142,9 @@ def test_dockerfile_two_stages():
     build, runtime = "\n".join(lines[: froms[1]]), "\n".join(lines[froms[1] :])
     assert "deploy/check_no_hu.py" in build
     assert "idsai demo-pack" in build
+    assert build.index("idsai demo-pack") < build.index("idsai download --split live")
+    assert build.index("idsai download --split live") < build.index("idsai train --profile live")
+    assert "COPY --from=build --chown=user /home/user/app/models" in runtime_of(text)
     assert "--no-group train" not in build
     assert "--no-group train" in runtime
     assert "COPY --from=build --chown=user /home/user/app/data" in runtime
@@ -150,8 +187,8 @@ def test_render_blueprint():
     assert svc["envVars"] == [
         {"key": "IDSAI_USERS", "sync": False},
         {"key": "DATABASE_URL", "sync": False},
+        {"key": "IDSAI_MODE", "value": "live"},
     ]
-    assert "value" not in text
 
 
 def test_keepalive_workflow():
@@ -203,6 +240,12 @@ def test_readme_hosting_section():
         "1–3 นาที",
         "5–20 นาที",
         "ใช้ร่วมกัน",
+        "SOL, DOGE และ PEPE",
+        "512 MB",
+        "10–20 นาที",
+        "30 นาที",
+        "จำลองการปั่นราคา",
+        "IDSAI_MODE=replay",
     ):
         assert want in section
     for n in range(1, 11):

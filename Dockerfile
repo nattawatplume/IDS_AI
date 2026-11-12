@@ -16,8 +16,9 @@ RUN uv sync --frozen --no-dev
 
 ENV PATH=/home/user/app/.venv/bin:$PATH
 
-# Sapienza labels only (hu_pd_logs.tsv is never in the image), then train the demo bundle.
-RUN idsai labels && idsai demo-pack && python deploy/check_no_hu.py data
+# Sapienza labels only (hu_pd_logs.tsv is never in the image), then train the demo bundle
+# and the live bundle (SOL, DOGE, PEPE; the last published days).
+RUN idsai labels && idsai demo-pack && idsai download --split live && idsai train --profile live && python deploy/check_no_hu.py data
 
 # Stage 2: runtime without torch.
 FROM python:3.13-slim AS runtime
@@ -38,6 +39,7 @@ RUN uv sync --frozen --no-dev --no-group train
 RUN mkdir -p data
 COPY --from=build --chown=user /home/user/app/data /home/user/app/data
 RUN test -w data && test -w data/app.duckdb
+COPY --from=build --chown=user /home/user/app/models /home/user/app/models
 
 ENV PATH=/home/user/app/.venv/bin:$PATH
 # 0.1 CPU box: one thread per pool avoids throttling; results unchanged.
