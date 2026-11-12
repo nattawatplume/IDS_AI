@@ -1060,7 +1060,7 @@ function renderBudget() {
 function renderAlertsKpi(now = eventNowUs()) {
   const box = $("alerts-count");
   if (!state.symbol || !isNum(now) || !state.alertsLoaded) {
-    box.textContent = "–";
+    setKpiText(box, "–");
     state.alertCount = 0;
     state.alertCountKnown = false;
     return null;

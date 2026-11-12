@@ -3822,3 +3822,23 @@ def test_hero_glitch_once_per_alert_transition():
     assert "GLITCH_GAP_MS = 2000" in hud
     assert 'mood === "alert" && !wasAlert' in hud
     assert "@keyframes hud-glitch" in mcss
+
+
+def test_scramble_fix_round_1():
+    hud, app, mcss = text("hud.js"), text("app.js"), text("motion.css")
+    kpi = _js_function(app, "function renderAlertsKpi(")
+    assert 'box.textContent = "–"' not in kpi and 'setKpiText(box, "–")' in kpi
+    # a job whose node was changed from outside abandons itself instead of writing over it
+    draw = _js_function(hud, "function drawScramble(")
+    assert "job.last" in draw and "abandon(job)" in draw
+    assert "job.node.textContent === job.last" in _js_function(hud, "function settle(")
+    # a 1 Hz value must not flicker: snaps stamp the node too and the gap is wide
+    assert "SCRAMBLE_GAP_MS = 3000" in hud
+    sc = _js_function(hud, "function scramble(")
+    snap = sc[sc.index("isOff() ||"): sc.index("var job =")]
+    assert "_hudScrambleAt = t" in snap
+    # screen readers get the final value while it scrambles
+    assert 'setAttribute("aria-label", to)' in sc
+    assert 'removeAttribute("aria-label")' in _js_function(hud, "function settle(")
+    assert "if (isOff()) return" in _js_function(hud, "function layoutWires(")
+    assert "accepted exception to transform/opacity-only" in mcss

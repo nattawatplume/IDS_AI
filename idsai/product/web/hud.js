@@ -16,7 +16,7 @@
   var SVGNS = "http://www.w3.org/2000/svg";
   var SCRAMBLE_MS = 400;
   var SCRAMBLE_STEP_MS = 40; // glyphs change at ~25 Hz, not every frame
-  var SCRAMBLE_GAP_MS = 900; // a node that just scrambled snaps instead (a number that changes every second must not flicker)
+  var SCRAMBLE_GAP_MS = 3000; // a node that just changed (scramble or snap) snaps instead: a number that changes every second must not flicker
   var GLYPHS = "0123456789#%&@*+";
   var TILT_SMALL = 6; // degrees
   var TILT_CHART = 2.5;
@@ -62,13 +62,20 @@
     var i = jobs.indexOf(job);
     if (i >= 0) jobs.splice(i, 1);
     if (job.node) {
-      job.node.textContent = job.text;
+      // someone else wrote the node meanwhile (not our last frame): leave their text alone
+      if (job.last === null || job.node.textContent === job.last) job.node.textContent = job.text;
       job.node._hudScramble = null;
+      job.node.removeAttribute("aria-label");
     }
     if (!jobs.length && layerOn) {
       layerOn = false;
       M.removeLayer(drawScramble);
     }
+  }
+
+  function abandon(job) {
+    job.last = null;
+    settle(job);
   }
 
   function settleAll() {
@@ -100,8 +107,13 @@
         continue;
       }
       if (t - job.upd < SCRAMBLE_STEP_MS) continue;
+      if (job.last !== null && job.node.textContent !== job.last) {
+        abandon(job); // the text was changed from outside: stop writing over it
+        continue;
+      }
       job.upd = t;
-      job.node.textContent = frame(job, p);
+      job.last = frame(job, p);
+      job.node.textContent = job.last;
     }
   }
 
@@ -114,11 +126,13 @@
     if (node.textContent === to) return;
     if (isOff() || DOC.hidden || t - last < SCRAMBLE_GAP_MS || !/[0-9]/.test(to)) {
       node.textContent = to;
+      node._hudScrambleAt = t; // a snap counts too, so a 1 Hz value never starts flickering
       return;
     }
     node._hudScrambleAt = t;
-    var job = { node: node, text: to, t0: 0, upd: -1e9 };
+    var job = { node: node, text: to, t0: 0, upd: -1e9, last: null };
     node._hudScramble = job;
+    node.setAttribute("aria-label", to); // assistive tech reads the final value, never the scrambled glyphs
     jobs.push(job);
     if (!layerOn) {
       layerOn = true;
@@ -285,6 +299,7 @@
     wireRaf = 0;
     if (!wires || !wireHost) return;
     while (wires.firstChild) wires.removeChild(wires.firstChild);
+    if (isOff()) return; // nothing is drawn while effects are off
     if (!wireHost.offsetWidth) return; // another page is showing
     var panels = {};
     var list = [];
@@ -375,7 +390,7 @@
         settleAll();
         tiltReset();
         glitchEnd();
-      }
+      } else if (wires && !wires.firstChild) scheduleWires(); // effects came back: draw the wires again
       var mood = root.getAttribute("data-mood") || "calm";
       if (mood !== lastMood) {
         var wasAlert = lastMood === "alert";

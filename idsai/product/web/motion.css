@@ -244,6 +244,7 @@ html[data-mood="alert"] #hero-cam .cam-led { animation: cctv-blink 1s step-end i
 .hud-wires { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .hud-wire { fill: none; stroke: rgba(0, 229, 255, .3); stroke-width: 1; transition: stroke .3s; }
 .hud-wire-node { fill: var(--fx-calm); transition: fill .3s; }
+/* accepted exception to transform/opacity-only: stroke-dashoffset on at most 6 short paths */
 .hud-wire-pulse {
   fill: none;
   stroke: var(--fx-calm);
