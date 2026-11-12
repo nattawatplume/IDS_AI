@@ -63,7 +63,8 @@
     if (i >= 0) jobs.splice(i, 1);
     if (job.node) {
       // someone else wrote the node meanwhile (not our last frame): leave their text alone
-      if (job.last === null || job.node.textContent === job.last) job.node.textContent = job.text;
+      var mine = job.last === null ? job.start : job.last; // what the node holds if nobody else wrote it
+      if (!job.abandoned && job.node.textContent === mine) job.node.textContent = job.text;
       job.node._hudScramble = null;
       job.node.removeAttribute("aria-label");
     }
@@ -74,7 +75,7 @@
   }
 
   function abandon(job) {
-    job.last = null;
+    job.abandoned = true; // settle clears the job but leaves the outside text alone
     settle(job);
   }
 
@@ -130,7 +131,7 @@
       return;
     }
     node._hudScrambleAt = t;
-    var job = { node: node, text: to, t0: 0, upd: -1e9, last: null };
+    var job = { node: node, text: to, t0: 0, upd: -1e9, last: null, start: node.textContent, abandoned: false };
     node._hudScramble = job;
     node.setAttribute("aria-label", to); // assistive tech reads the final value, never the scrambled glyphs
     jobs.push(job);

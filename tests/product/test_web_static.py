@@ -3831,7 +3831,7 @@ def test_scramble_fix_round_1():
     # a job whose node was changed from outside abandons itself instead of writing over it
     draw = _js_function(hud, "function drawScramble(")
     assert "job.last" in draw and "abandon(job)" in draw
-    assert "job.node.textContent === job.last" in _js_function(hud, "function settle(")
+    assert "!job.abandoned" in _js_function(hud, "function settle(")
     # a 1 Hz value must not flicker: snaps stamp the node too and the gap is wide
     assert "SCRAMBLE_GAP_MS = 3000" in hud
     sc = _js_function(hud, "function scramble(")
@@ -3842,3 +3842,45 @@ def test_scramble_fix_round_1():
     assert 'removeAttribute("aria-label")' in _js_function(hud, "function settle(")
     assert "if (isOff()) return" in _js_function(hud, "function layoutWires(")
     assert "accepted exception to transform/opacity-only" in mcss
+
+
+def test_scramble_behaviour_in_node(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    harness = r"""
+const fs = require("fs"), vm = require("vm");
+let layers = [], timers = [], clock = 0;
+function mkNode(t) { const a = {}; return { textContent: t, setAttribute(k, v) { a[k] = v; }, removeAttribute(k) { delete a[k]; }, a }; }
+const root = { classList: { contains: () => false }, getAttribute: () => null };
+const doc = { documentElement: root, hidden: false, querySelectorAll: () => [], getElementById: () => null,
+  addEventListener() {}, createElement: () => ({ setAttribute() {}, style: { setProperty() {} } }) };
+doc.documentElement.addEventListener = () => {};
+const M = { addLayer: f => layers.push(f), removeLayer: f => { layers = layers.filter(x => x !== f); } };
+const g = { document: doc, Motion: M, performance: { now: () => clock }, setTimeout: (f, ms) => { timers.push(f); return timers.length; },
+  matchMedia: () => ({ matches: false }), addEventListener() {}, getSelection: () => null };
+g.globalThis = g;
+vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), g);
+const out = {};
+function frames(n) { for (let i = 0; i < n; i++) { clock += 50; layers.slice().forEach(f => f(null, clock)); } }
+let n = mkNode("0"); M.scramble = g.Motion.scramble;
+// normal job ends on its text
+M.scramble(n, "1234"); frames(3); out.mid = n.textContent !== "1234"; frames(20); out.normal = n.textContent;
+out.label1 = "aria-label" in n.a;
+// external write mid-job survives (also through the safety timer)
+clock += 5000; n = mkNode("0"); M.scramble(n, "5555"); frames(3); n.textContent = "-"; frames(20); timers.forEach(f => f()); out.external = n.textContent; out.label2 = "aria-label" in n.a;
+// external write before the first frame survives
+clock += 5000; n = mkNode("0"); M.scramble(n, "7777"); n.textContent = "-"; timers.forEach(f => f()); out.early = n.textContent;
+// a new scramble mid-job ends on the new text
+clock += 5000; n = mkNode("0"); M.scramble(n, "8888"); frames(3); clock += 10; M.scramble(n, "9999"); frames(30); timers.forEach(f => f()); out.replaced = n.textContent;
+console.log(JSON.stringify(out));
+"""
+    script = tmp_path / "h.js"
+    script.write_text(harness, encoding="utf-8")
+    r = subprocess.run([node, str(script), str(WEB_DIR / "hud.js")], capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["mid"] is True and out["normal"] == "1234" and out["label1"] is False
+    assert out["external"] == "-" and out["label2"] is False
+    assert out["early"] == "-"
+    assert out["replaced"] == "9999"
