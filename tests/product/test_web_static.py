@@ -3464,7 +3464,8 @@ def test_login_beam_is_flat_and_stacked_between_the_left_column_and_the_card():
     assert re.search(r"\.login-fx\s*\{\s*display:\s*none", css)
     wide = re.search(r"@media \(min-width: 900px\) \{(.*?)\n\}", css, re.S).group(1)
     assert re.search(r"\.login-fx\s*\{\s*display:\s*contents", wide)
-    assert "grid-template-columns: minmax(0, 720px)" in wide and "align-items: stretch" in wide
+    assert "grid-template-columns: minmax(0, 1fr) minmax(320px, 440px)" in wide
+    assert "max-width: 1540px" in wide and "align-items: stretch" in wide
 
 
 def test_login_scene_is_static_with_effects_off():

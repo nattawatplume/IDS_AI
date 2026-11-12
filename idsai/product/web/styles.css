@@ -1060,13 +1060,13 @@ body.login-mode #ws-banner { display: none; }
 @media (min-width: 900px) {
   body.login-mode main { max-width: none; padding: 0; }
   #page-login:not([hidden]) {
-    grid-template-columns: minmax(0, 720px) minmax(320px, 440px);
+    /* the graph column takes all the room beside the card; the page cap keeps it at most about 720 px */
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
     gap: 32px clamp(32px, 5.6vw, 72px);
-    justify-content: center;
     align-content: center;
     align-items: stretch;
-    max-width: none;
-    margin: 0;
+    max-width: 1540px;
+    margin: 0 auto;
     padding: 90px 48px 40px clamp(200px, 20vw, 260px);
   }
   #page-login .login-card { position: relative; z-index: 5; }
