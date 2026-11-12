@@ -177,6 +177,42 @@ class ArchiveDownloader:
         finally:
             path.unlink(missing_ok=True)
 
+    def fetch_into(self, store: "Store", symbol: str, day: date) -> int | None:
+        """Ingest one day into `store` with bounded memory; the row count, None if no archive.
+
+        A well-formed day (one UTC day, sorted, unique ids - Binance's are) streams from a temp CSV
+        to the partition. Anything else falls back to the in-memory `fetch` + `write_trades` path.
+        """
+        import httpx
+
+        from idsai.data.archive import (
+            csv_to_parquet,
+            download_day,
+            extract_csv,
+            read_trades_zip,
+        )
+
+        if self._client is None:
+            self._client = httpx.Client(timeout=120.0, follow_redirects=False)
+        path = download_day(symbol, day, self.dest_dir / symbol, self._client)
+        if path is None:
+            return None
+        csv = None
+        try:
+            csv = extract_csv(path, path.parent)
+            if csv is None or not csv.stat().st_size:
+                return 0
+            n = store.write_day_streamed(symbol, day, lambda out: csv_to_parquet(csv, symbol, out))
+            if n is not None:
+                return n
+            df = read_trades_zip(path, symbol)  # not streamable: parse it whole, as `fetch` does
+            store.write_trades(df)
+            return df.height
+        finally:
+            path.unlink(missing_ok=True)
+            if csv is not None:
+                csv.unlink(missing_ok=True)
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
@@ -215,12 +251,18 @@ def ingest(store: "Store", dl: Downloader, symdays: Iterable[tuple[str, date]]) 
         if store.has_day(symbol, day):
             c.skipped += 1
             continue
-        df = dl.fetch(symbol, day)
-        if df is None or df.height == 0:
+        fetch_into = getattr(dl, "fetch_into", None)
+        if fetch_into is not None:
+            n = fetch_into(store, symbol, day)
+        else:
+            df = dl.fetch(symbol, day)
+            n = None if df is None else df.height
+            if n:
+                store.write_trades(df)
+        if not n:
             c.missing += 1
             c.missing_days.append((symbol, day))
             continue
-        store.write_trades(df)
         c.downloaded += 1
     return c
 

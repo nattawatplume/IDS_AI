@@ -8,6 +8,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -164,6 +165,60 @@ class Store:
                 os.replace(tmp, path)
                 entries.append((str(symbol), day, file_sha(path), part.height))
             self._update_index(entries)
+
+    def write_day_streamed(
+        self, symbol: str, day: date, build: Callable[[Path], None]
+    ) -> int | None:
+        """Write one symbol-day without holding it in memory: `build(tmp)` creates the partition's
+        Parquet (TRADES schema, rows in file order) at `tmp`.
+
+        The result equals `write_trades` for the same rows only when they are one UTC day with
+        ts_us non-decreasing and trade_id strictly increasing (so sorting and de-duplicating are
+        no-ops); that is checked on the built file. Returns the row count, or None - nothing is
+        stored - when `build` fails, the file is empty or fails the check; the caller then falls
+        back to `write_trades`.
+        """
+        path = self._part_path(symbol, day)
+        lo = (day - _EPOCH).days * DAY_US
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            try:
+                try:
+                    build(tmp)
+                    stats = self._order_stats(tmp)
+                except duckdb.Error:
+                    return None
+                n, t_min, t_max, ordered = stats
+                if not (n > 0 and t_min >= lo and t_max < lo + DAY_US and ordered):
+                    return None
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+                try:
+                    path.parent.rmdir()  # only succeeds when the partition was never created
+                except OSError:
+                    pass
+            self._update_index([(symbol, day, file_sha(path), n)])
+            return n
+
+    @staticmethod
+    def _order_stats(parquet: Path) -> tuple[int, int, int, bool]:
+        """(rows, min ts_us, max ts_us, ts_us non-decreasing and trade_id strictly increasing)."""
+        con = duckdb.connect()
+        try:
+            con.execute("SET memory_limit='96MB'")
+            con.execute("SET threads=1")
+            con.execute(f"SET temp_directory='{parquet.parent.as_posix()}'")
+            n, lo, hi, bad = con.execute(
+                """SELECT count(*), min(ts_us), max(ts_us), coalesce(bool_or(back), false) FROM (
+                       SELECT ts_us, ts_us < lag(ts_us) OVER w OR trade_id <= lag(trade_id) OVER w
+                       AS back FROM read_parquet(?) WINDOW w AS ())""",
+                [parquet.as_posix()],
+            ).fetchone()
+        finally:
+            con.close()
+        return int(n), lo, hi, not bad
 
     def _update_index(self, entries: list[tuple[str, date, str, int]]) -> None:
         new = pl.DataFrame(entries, schema=_INDEX_SCHEMA, orient="row")
