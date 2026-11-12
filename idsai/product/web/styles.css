@@ -1012,19 +1012,37 @@ body.login-mode #ws-banner { display: none; }
   margin: 0 auto;
   padding: 24px 8px;
 }
-.login-hero { min-width: 0; }
+.login-hero { min-width: 0; display: flex; flex-direction: column; position: relative; z-index: 3; }
 .login-brand { display: flex; align-items: center; gap: 12px; }
 .login-mark { width: 40px; height: 40px; flex: none; }
 .login-name { margin: 0; font-size: 28px; }
-.login-tagline { margin: 16px 0 0; max-width: 520px; font-size: 24px; line-height: 1.45; }
-/* a phrase per line: Thai has no spaces inside a phrase, so a free wrap splits words like ผิด|ปกติ */
-.login-tagline .tg { display: inline-block; }
-.login-line { display: block; width: 100%; max-width: 520px; height: auto; margin-top: 32px; overflow: visible; filter: drop-shadow(0 0 6px rgba(0, 229, 255, 0.55)); }
-.login-line path { stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
-.login-line-limit { stroke: rgba(255, 45, 85, 0.45); stroke-width: 1; stroke-dasharray: 4 6; }
-.login-line-rest { stroke: rgba(0, 229, 255, 0.16); stroke-width: 1.5; }
-/* drawn at rest (reduced motion keeps it so); the loop redraws it from the left */
-.login-line-trace { stroke: var(--hud-line); stroke-width: 2; stroke-dasharray: 1000; stroke-dashoffset: 0; animation: trace 9s ease-in-out infinite; }
+/* mono status line over the graph: REC, camera, the real clock, NORMAL or ANOMALY */
+.login-meta { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 14px 0 10px; font: 11px var(--mono); letter-spacing: 0.16em; color: var(--hud-muted); }
+.login-meta .rec { color: var(--fx-alert); }
+.login-meta .rec::before { content: "●"; margin-right: 6px; }
+.login-meta .st { margin-left: auto; color: var(--hud-ok); }
+.is-locked .login-meta .st { color: var(--fx-alert); }
+/* the open-frame graph: corner brackets, a dashed limit, a neon line with one spike; it fills the column beside the card */
+.login-chart { flex: 1; display: flex; align-items: center; margin-top: 6px; }
+.login-graph { display: block; width: 100%; height: auto; overflow: visible; }
+.login-graph .lg-corner { fill: none; stroke: var(--hud-line); stroke-opacity: 0.55; stroke-width: 1.5; }
+.login-graph .lg-price { fill: none; stroke: var(--hud-line); stroke-width: 1.8; filter: drop-shadow(0 0 4px var(--hud-line)); }
+.login-graph .lg-limit { stroke: var(--hud-alert); stroke-opacity: 0.5; stroke-dasharray: 6 6; }
+.login-graph .lg-hot { fill: none; stroke: var(--hud-alert); stroke-width: 2.4; filter: drop-shadow(0 0 6px var(--hud-alert)); opacity: 0; transition: opacity 0.15s; }
+.login-graph .lg-lock { opacity: 0; transition: opacity 0.12s; }
+.login-graph .lg-lock rect { fill: rgba(255, 45, 85, 0.08); }
+.login-graph .lg-lock path { fill: none; stroke: var(--hud-alert); stroke-width: 2; }
+.login-graph .lg-lock text { font: 10px var(--mono); letter-spacing: 0.14em; fill: var(--hud-alert); }
+.is-locked .lg-hot, .is-locked .lg-lock { opacity: 1; }
+/* camera, beam, floor and scanlines belong to wide screens only */
+.login-fx { display: none; }
+.login-brand.is-glitch .login-name { animation: login-glitch 0.5s steps(2) 1; }
+@keyframes login-glitch {
+  20% { transform: translate(-3px, 1px); text-shadow: 3px 0 var(--hud-alert), -3px 0 var(--hud-line); }
+  40% { transform: translate(3px, -1px); }
+  60% { transform: translate(-1px, 2px); text-shadow: -2px 0 var(--hud-alert); }
+  100% { transform: none; text-shadow: none; }
+}
 .login-card { --px: 32px; --py: 32px; display: flex; flex-direction: column; gap: 16px; width: 100%; margin: 0; }
 .login-card .field { display: flex; }
 .login-card .field > input { width: 100%; min-height: 44px; padding: 8px 12px; }
@@ -1037,7 +1055,23 @@ body.login-mode #ws-banner { display: none; }
 
 @media (max-width: 860px) {
   #page-login:not([hidden]) { grid-template-columns: minmax(0, 1fr) minmax(0, 360px); gap: 32px; }
-  .login-tagline { font-size: 20px; }
+}
+/* 900 px and wider: the camera sits in the top-left corner and the page is two equal-height columns */
+@media (min-width: 900px) {
+  body.login-mode main { max-width: none; padding: 0; }
+  #page-login:not([hidden]) {
+    /* the graph column takes all the room beside the card; the page cap keeps it at most about 720 px */
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 440px);
+    gap: 32px clamp(32px, 5.6vw, 72px);
+    align-content: center;
+    align-items: stretch;
+    max-width: 1540px;
+    margin: 0 auto;
+    /* the camera head swings down to about 160 px: keep the brand clear of it */
+    padding: clamp(130px, 19vh, 170px) 48px 40px clamp(230px, 22vw, 300px);
+  }
+  #page-login .login-card { position: relative; z-index: 5; }
+  .login-fx { display: contents; }
 }
 
 /* ------------------------------------------------------------------ activity */
@@ -1126,18 +1160,16 @@ td.when { white-space: nowrap; }
   .chart.lanes { height: 520px; }
   .replay-bar { --px: 16px; --py: 12px; }
   .play-btn { width: 44px; min-width: 44px; height: 44px; min-height: 44px; }
-  /* sign-in stacks: the logo and tagline above the form, no line */
+  /* sign-in stacks: the logo above the form, no graph */
   body.login-mode main { padding-bottom: 32px; }
   body.login-mode .footer { padding-bottom: 24px; }
   #page-login:not([hidden]) { grid-template-columns: minmax(0, 1fr); align-content: start; gap: 24px; min-height: 0; padding: 32px 4px 0; }
-  .login-tagline { margin-top: 12px; font-size: 18px; }
-  .login-line { display: none; }
-  /* the form comes first: the brand stays on top, the tagline drops below the forms */
+  .login-chart, .login-meta { display: none; }
+  /* the form comes first: the brand stays on top */
   .login-hero { display: contents; }
   .login-brand { order: -1; }
   .login-mark { width: 32px; height: 32px; }
   .login-name { font-size: 22px; }
-  .login-tagline { order: 2; }
   .login-card { --px: 24px; --py: 24px; }
   /* results */
   .result-wide { --px: 16px; --py: 16px; }
@@ -1173,12 +1205,6 @@ td.when { white-space: nowrap; }
 @keyframes hud-rec { 50% { opacity: 0.15; } }
 @keyframes toast-in { 0% { opacity: 0; transform: translateX(16px); } 100% { opacity: 1; transform: none; } }
 @keyframes loader-in { 0% { opacity: 0; } 100% { opacity: 1; } }
-@keyframes trace {
-  0% { stroke-dashoffset: 1000; opacity: 1; }
-  55% { stroke-dashoffset: 0; }
-  88% { stroke-dashoffset: 0; opacity: 1; }
-  100% { stroke-dashoffset: 0; opacity: 0; }
-}
 .flash { animation: glow 0.9s ease-out; }
 /* a panel's own background sits under its fill (::after), so the flash is an amber veil on the fill itself */
 .hud.flash { animation: none; }

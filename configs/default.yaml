@@ -44,10 +44,10 @@ ae:
   train_stride_s: 60
 
 live:
-  symbols: [BTCUSDT, ETHUSDT, SOLUSDT, DOGEUSDT, PEPEUSDT]
+  symbols: [BTCUSDT, SOLUSDT, DOGEUSDT, PEPEUSDT]
   ws_url: wss://data-stream.binance.vision/stream
   budget_per_hour: 2.0
-  universe_size: 5
+  universe_size: 4
   train_days: 7
   bar_grace_s: 2
 

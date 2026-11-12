@@ -1468,17 +1468,13 @@ def test_login_markup():
     assert 'class="login-hero"' in page and "login-card" in page
     assert page.index('class="login-hero"') < page.index('id="login-form"')
     hero = page[page.index('class="login-hero"') : page.index('id="login-form"')]
-    tagline = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', hero, re.S)
-    visible = (
-        re.sub(r'<span class="sr-only">.*?</span>', "", tagline.group(1), flags=re.S)
-        if tagline
-        else ""
-    )
-    assert tagline and " ".join(re.sub(r"<[^>]+>", "", visible).split()) == (
+    desc = re.search(r'<p class="sr-only" id="login-desc">(.*?)</p>', hero, re.S)
+    assert desc and " ".join(desc.group(1).split()) == (
         "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
     )
-    line = re.search(r'<svg class="login-line"[^>]*>', hero)
-    assert line and 'aria-hidden="true"' in line.group(0)
+    assert "login-tagline" not in html  # the visible tagline is gone
+    graph = re.search(r'<svg class="login-graph"[^>]*>', hero)
+    assert graph and 'aria-hidden="true"' in graph.group(0)
     assert "<ul" not in hero and "<ol" not in hero and "<img" not in hero
     button = re.search(r'<button id="login-submit"[^>]*>(.*?)</button>', page, re.S)
     assert button and button.group(1).strip() == "เข้าสู่ระบบ"
@@ -1491,18 +1487,17 @@ def test_login_markup():
         assert word not in html + text("app.js"), word
 
 
-def test_login_line_animates_but_rests_drawn():
+def test_login_graph_is_flat_and_the_phone_layout_keeps_the_form_first():
     css = text("styles.css").replace("\r\n", "\n")
-    rules = re.findall(r"(?m)^\.login-line[^{\n]*\{([^}]*)\}", css)
-    joined = " ".join(rules)
-    assert "stroke-dasharray" in joined and "animation" in joined
-    for body in rules:  # with the animation off (reduced motion) the line is still drawn
-        assert not re.search(r"opacity\s*:\s*0\b", body)
-        assert not re.search(r"animation[^;]*\bboth\b", body)
-        assert not re.search(r"stroke-dashoffset\s*:\s*[1-9]", body)
-    assert re.search(r"@keyframes [\w-]+\s*\{[^@]*stroke-dashoffset", css)
+    for rule in (".lg-price", ".lg-limit", ".lg-hot", ".lg-lock", ".lg-corner"):
+        assert rule in css, rule
+    assert re.search(r"\.lg-limit\s*\{[^}]*stroke-dasharray", css)  # the dashed limit line
+    # the red segment and the lock box show only while locked (they rest hidden)
+    assert re.search(r"\.lg-hot\s*\{[^}]*opacity:\s*0", css)
+    assert re.search(r"\.lg-lock\s*\{[^}]*opacity:\s*0", css)
+    assert re.search(r"\.is-locked \.lg-hot, \.is-locked \.lg-lock\s*\{[^}]*opacity:\s*1", css)
     narrow = re.search(r"@media \(max-width: 720px\) \{(.*?)\n\}", css, re.S).group(1)
-    assert re.search(r"\.login-line\s*\{[^}]*display:\s*none", narrow)
+    assert re.search(r"\.login-chart[^{]*\{[^}]*display:\s*none", narrow)
     assert re.search(r"#page-login[^{]*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)", narrow)
 
 
@@ -2414,7 +2409,7 @@ def test_styles_css_blocks_are_balanced_and_motion_is_top_level():
 def test_only_the_allowed_animations_loop():
     # the status orb, the login line and the REC dot in every panel head (0.5 Hz); the boot
     # spinner is a loading indicator that goes away with the loader, not decoration
-    allowed = (".hud-rec", ".orb", ".login-line-trace", ".boot-spinner")
+    allowed = (".hud-rec", ".orb", ".boot-spinner")
     for prelude, _, body, _ in _css_blocks(text("styles.css")):
         if re.search(r"animation[^;]*infinite", body):
             assert all(sel.strip().startswith(allowed) for sel in prelude.split(",")), prelude
@@ -3396,20 +3391,231 @@ def _login_hero() -> str:
     return page[page.index('class="login-hero"') : page.index('id="login-form"')]
 
 
-def test_login_cctv_markup():
-    hero = _login_hero()
-    cctv = re.search(r'<svg\b[^>]*\bid="cctv"[^>]*>', hero)
-    assert cctv and 'aria-hidden="true"' in cctv.group(0)
-    body = hero[hero.index('id="cctv"') :]
+def _login_page() -> str:
+    html = text("index.html")
+    return re.search(r'<section id="page-login"[^>]*>(.*?)</section>', html, re.S).group(1)
+
+
+def test_login_corner_camera_and_beam_markup():
+    page = _login_page()
+    cam = re.search(r'<svg\b[^>]*\bid="login-cam"[^>]*>', page)
+    assert cam and 'aria-hidden="true"' in cam.group(0)
+    body = page[page.index('id="login-cam"') :]
     body = body[: body.index("</svg>")]
-    for ident in ("cctv-beam", "cctv-rec", "cctv-target", "cctv-tag", "cctv-spike"):
-        assert f'id="{ident}"' in hero, ident
-    tag = re.search(r'<g\b[^>]*\bid="cctv-tag"[^>]*>(.*?)</g>', body, re.S)
-    assert tag and "ตรวจพบ" in re.sub(r"<[^>]+>", "", tag.group(1))
-    assert re.search(r'id="cctv-tag"[^>]*\bopacity="0"', body)  # hidden until the beam hits
-    assert "<img" not in hero and "<ul" not in hero
-    # the camera sits over the sample chart: the existing chart svg is still there
-    assert re.search(r'<svg class="login-line"[^>]*aria-hidden="true"', hero)
+    assert 'id="login-head"' in body and 'id="login-lens"' in body
+    beam = re.search(r'<div id="login-beam"[^>]*>(.*?)</div>\s*</div>', page, re.S)
+    assert beam and 'class="cone"' in beam.group(1) and beam.group(1).count('class="edge') == 2
+    # the decoration wrapper is aria-hidden as a whole, and the floor and scanlines are svg
+    fx = re.search(r'<div class="login-fx"[^>]*>', page)
+    assert fx and 'aria-hidden="true"' in fx.group(0)
+    assert page.index('class="login-fx"') < page.index('class="login-hero"')
+    for ident in ("login-floor", "login-scan"):
+        tag = re.search(rf'<svg\b[^>]*\bid="{ident}"[^>]*>', page)
+        assert tag and 'aria-hidden="true"' in tag.group(0), ident
+    assert "<pattern" in page[page.index('id="login-scan"') :][:400]
+    floor = page[page.index('id="login-floor"') : page.index('id="login-scan"')]
+    assert len(re.findall(r"<line ", floor)) >= 30
+    assert "-gradient" not in page.lower()  # no gradient anywhere on the page
+    assert "<canvas" not in page  # no second plexus: the app's one canvas is the only one
+
+
+def test_login_graph_lock_box_and_description():
+    page = _login_page()
+    graph = page[page.index('class="login-graph"') :]
+    graph = graph[: graph.index("</svg>")]
+    for needle in ("lg-corner", "lg-limit", "lg-price", 'id="login-hot"', 'id="login-lock"'):
+        assert needle in graph, needle
+    assert "ANOMALY · LOCKED" in graph
+    assert graph.count("<polyline") == 2  # the line and its red segment
+    meta = re.search(r'<div class="login-meta" aria-hidden="true">(.*?)</div>', page, re.S)
+    assert meta
+    for needle in ("REC", "CAM-00 · PUBLIC FEED", 'id="login-clock"', 'id="login-status"'):
+        assert needle in meta.group(1), needle
+    assert ">NORMAL<" in meta.group(1)
+    assert '<p class="sr-only" id="login-desc">' in page
+    keys = ('class="login-brand"', 'class="login-meta"', 'class="login-chart"')
+    order = [page.index(k) for k in keys]
+    assert order == sorted(order)
+
+
+def _z(css: str, selector: str) -> int:
+    for prelude, _, body, _ in _css_blocks(css):
+        if selector in [x.strip() for x in prelude.split(",")]:
+            m = re.search(r"z-index:\s*(\d+)", body)
+            if m:
+                return int(m.group(1))
+    raise AssertionError(f"no z-index for {selector}")
+
+
+def test_login_beam_is_flat_and_stacked_between_the_left_column_and_the_card():
+    mcss, css = text("motion.css"), text("styles.css")
+    assert "-gradient(" not in css
+    assert "-gradient(" not in mcss.replace("conic-gradient(from 0deg, transparent 0 66%", "")
+    beam = [b for b in _css_blocks(mcss) if b[0].strip() == ".login-beam .cone"]
+    assert beam and re.search(r"background:\s*rgba\(255, 45, 85", beam[0][2])
+    assert "gradient" not in beam[0][2] and "clip-path: polygon(" in beam[0][2]
+    edges = [b for b in _css_blocks(mcss) if b[0].strip() == ".login-beam .edge"]
+    assert len(edges) == 1 and "gradient" not in edges[0][2]
+    # left column (3) < beam and camera (4) < card (5): the card is never covered by the beam
+    assert _z(css, ".login-hero") < _z(mcss, ".login-beam") < _z(css, "#page-login .login-card")
+    assert _z(mcss, ".login-cam") < _z(css, "#page-login .login-card")
+    assert _z(mcss, ".login-floor") < _z(css, ".login-hero")
+    # the camera, the beam, the floor and the scanlines belong to 900 px and wider
+    assert re.search(r"\.login-fx\s*\{\s*display:\s*none", css)
+    wide = re.search(r"@media \(min-width: 900px\) \{(.*?)\n\}", css, re.S).group(1)
+    assert re.search(r"\.login-fx\s*\{\s*display:\s*contents", wide)
+    assert "grid-template-columns: minmax(0, 1fr) minmax(320px, 440px)" in wide
+    assert "max-width: 1540px" in wide and "align-items: stretch" in wide
+
+
+def test_login_scene_is_static_with_effects_off():
+    mcss = text("motion.css")
+    reduced = [b for b in _css_blocks(mcss) if "prefers-reduced-motion: reduce" in b[0]]
+    assert reduced and ".login-beam { display: none; }" in reduced[0][2]
+    assert "animation: none !important" in reduced[0][2]
+    off = " ".join(b[0] for b in _css_blocks(mcss) if ".fx-off" in b[0])
+    for owned in (
+        ".fx-off .login-floor-rows",
+        ".fx-off .login-beam",
+        ".fx-off .login-meta .rec::before",
+    ):
+        assert owned in off, owned
+    beam_off = [b for b in _css_blocks(mcss) if b[0].strip() == ".fx-off .login-beam"]
+    assert beam_off and "display: none" in beam_off[0][2]
+    # a still scene has no lock: effects going off clears the lock and the glitch
+    assert "loginRest(lp)" in _js_function(text("motion.js"), "function dropTransient(")
+
+
+LOGIN_SCENE_HARNESS = r"""
+const assert = require("assert");
+function el(rect) {
+  const cl = new Set();
+  return {
+    style: {}, attrs: {}, sets: 0, hidden: false, textContent: "", offsetWidth: 1,
+    classList: {
+      add: (...c) => c.forEach((x) => cl.add(x)),
+      remove: (...c) => c.forEach((x) => cl.delete(x)),
+      toggle: (c, on) => {
+        if (on === undefined ? !cl.has(c) : on) cl.add(c); else cl.delete(c);
+        return cl.has(c);
+      },
+      contains: (c) => cl.has(c),
+    },
+    setAttribute(k, v) { this.attrs[k] = v; this.sets += 1; },
+    getBoundingClientRect: () => rect,
+    querySelector(sel) { return (this.kids || {})[sel] || null; },
+  };
+}
+const camRect = { left: 0, top: 0, width: 330, height: 260 };
+const lockRect = { left: 500, top: 250, width: 128, height: 176 };
+const E = {
+  "page-login": el({ left: 0, top: 0, width: 1280, height: 800 }),
+  "login-cam": el(camRect), "login-head": el(camRect),
+  "login-beam": el({ left: 0, top: 0, width: 0, height: 0 }),
+  "login-lock": el(lockRect), "login-brand": el(camRect),
+  "login-status": el(camRect), "login-clock": el(camRect),
+};
+E["login-status"].textContent = "NORMAL";
+// the app's one background canvas: a stub that accepts any call (without it motion stays off)
+const ctx = new Proxy({}, {
+  get: (t, k) => (k in t ? t[k] : () => {}),
+  set: (t, k, v) => { t[k] = v; return true; },
+});
+E["fx-bg"] = Object.assign(el({ left: 0, top: 0, width: 1280, height: 800 }),
+  { getContext: () => ctx, width: 1280, height: 800 });
+globalThis.innerWidth = 1280; globalThis.innerHeight = 800; globalThis.devicePixelRatio = 1;
+E["login-beam"].kids = { ".cone": el(camRect), ".e1": el(camRect), ".e2": el(camRect) };
+let queue = [];
+globalThis.requestAnimationFrame = (f) => { queue.push(f); return queue.length; };
+globalThis.cancelAnimationFrame = () => {};
+globalThis.setTimeout = () => 1;
+globalThis.clearTimeout = () => {};
+globalThis.document = {
+  hidden: false,
+  documentElement: { classList: { toggle() {} }, setAttribute() {} },
+  getElementById: (id) => E[id] || null,
+  querySelectorAll: () => [],
+  addEventListener() {},
+};
+globalThis.addEventListener = () => {};
+require(process.argv[2]);
+const M = globalThis.Motion;
+M.init({ off: false });
+let now = 1000;
+function frames(n) {
+  for (let i = 0; i < n; i += 1) {
+    const q = queue; queue = []; now += 40;
+    q.forEach((f) => f(now));
+  }
+}
+const page = E["page-login"];
+
+// narrow screen: the camera is display:none (zero width), so nothing is scheduled at all
+camRect.width = 0;
+M.loginEnter();
+frames(5);
+assert.strictEqual(E["login-head"].sets, 0, "no sweep below 900 px");
+camRect.width = 330;
+
+M.loginEnter();
+frames(3);
+assert.ok(E["login-head"].sets > 0, "the sweep runs while the login page shows");
+let locked = false, glitch = false, released = false;
+for (let i = 0; i < 600; i += 1) {
+  frames(1);
+  if (page.classList.contains("is-locked")) {
+    locked = true;
+    assert.strictEqual(E["login-status"].textContent, "ANOMALY");
+    if (E["login-brand"].classList.contains("is-glitch")) glitch = true;
+  } else if (locked) {
+    released = true;
+    assert.strictEqual(E["login-status"].textContent, "NORMAL");
+  }
+}
+assert.ok(locked, "the beam crosses the spike and the lock fires");
+assert.ok(glitch, "the brand glitches on the lock");
+assert.ok(released, "the lock releases");
+assert.ok(E["login-head"].sets > 100, "the head pans every frame");
+assert.ok(/^translate\(/.test(E["login-beam"].style.transform));
+
+// routed away (or signed in): the layer ends and nothing is drawn or rescheduled
+page.hidden = true;
+frames(2);
+const sets = E["login-head"].sets;
+frames(5);
+assert.strictEqual(E["login-head"].sets, sets, "no drawing while the login page is hidden");
+assert.ok(!page.classList.contains("is-locked"));
+assert.strictEqual(E["login-status"].textContent, "NORMAL");
+const pending = queue.length; // only the background canvas still draws: the login layer is gone
+frames(3);
+assert.strictEqual(E["login-head"].sets, sets);
+assert.strictEqual(queue.length, pending);
+
+// back on the login page the sweep starts again
+page.hidden = false;
+M.loginEnter();
+frames(3);
+assert.ok(E["login-head"].sets > sets);
+
+// a hidden tab stops it too
+document.hidden = true;
+frames(3);
+const after = E["login-head"].sets;
+frames(3);
+assert.strictEqual(E["login-head"].sets, after);
+"""
+
+
+def test_login_scene_stops_when_hidden_and_locks_on_the_spike(tmp_path):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = tmp_path / "scene.js"
+    script.write_text(LOGIN_SCENE_HARNESS, encoding="utf-8")
+    r = subprocess.run(
+        [node, str(script), str(WEB_DIR / "motion.js")], capture_output=True, text=True, timeout=60
+    )
+    assert r.returncode == 0, r.stderr
 
 
 def test_login_leave_always_continues():
@@ -3435,18 +3641,20 @@ def test_login_enter_called_when_login_shows():
 
 def test_verified_copy():
     assert "ยืนยันตัวตนแล้ว" in text("index.html") + text("motion.js")
-    assert "ตรวจพบ" in text("index.html")
 
 
 def test_login_scene_css():
     css = text("motion.css")
-    for needle in ("#cctv-beam", ".cctv-rec", ".cctv-pan", "@keyframes cctv-pan", ".login-card"):
+    for needle in (
+        ".login-beam",
+        ".login-cam",
+        ".login-floor",
+        ".login-scan",
+        "@keyframes login-floor",
+    ):
         assert needle in css, needle
-    assert "18deg" in css  # pans +-18 degrees
-    off = [b for b in _css_blocks(css) if ".fx-off" in b[0] and "#cctv-beam" in b[0]]
-    assert off, "the beam is dim and still when effects are off"
-    reduced = [b for b in _css_blocks(css) if "prefers-reduced-motion: reduce" in b[0]]
-    assert "#cctv-beam" in reduced[0][2] or any("#cctv-beam" in b[0] for b in _css_blocks(css))
+    assert re.search(r"\.login-cam[^{]*\{[^}]*position:\s*fixed", css)
+    assert re.search(r"\.login-beam\s*\{[^}]*mix-blend-mode:\s*screen", css)
 
 
 def test_login_leave_calls_done_at_once_when_off(tmp_path):
@@ -3646,7 +3854,15 @@ def test_fx_off_does_not_kill_app_animations():
         for app_class in (".page", ".rail-row", ".flash", ".orb-change", ".ci-line", ".toast"):
             assert app_class not in prelude, app_class
     joined = " ".join(b[0] for b in off)
-    owned_all = ("#fx-edge", ".fx-wipe", ".fx-rise", ".fx-sweep", ".cctv", ".orb-radar", ".hud-rec")
+    owned_all = (
+        "#fx-edge",
+        ".fx-wipe",
+        ".fx-rise",
+        ".fx-sweep",
+        ".login-floor-rows",
+        ".orb-radar",
+        ".hud-rec",
+    )
     for owned in owned_all:
         assert owned in joined, owned
     js = text("motion.js")
@@ -4003,9 +4219,9 @@ def test_login_hud():
         "signup-line",
         "signup-open",
         "signup-back",
-        "cctv-beam",
-        "cctv-rec",
-        "cctv-tag",
+        "login-cam",
+        "login-beam",
+        "login-lock",
     ):
         assert f'id="{ident}"' in page, ident
     assert "-gradient" not in page.lower()
@@ -4013,24 +4229,17 @@ def test_login_hud():
     assert "-gradient(" not in css
     assert re.search(r'<svg class="login-mark"[^>]*aria-hidden="true"', page)  # the eye logo
     assert "login-iris" in page and ".login-iris" in mcss
-    assert "ตรวจพบ" in page
-    assert re.search(r"\.cctv-beam-fill\s*\{[^}]*fill: var\(--fx-alert\)", mcss)
+    assert "ANOMALY · LOCKED" in page
+    assert re.search(r"\.login-cam \.lc-lens-dot\s*\{[^}]*fill: var\(--hud-alert\)", mcss)
     # phone: the form comes before the tagline, and the decoration is gone
     assert ".login-hero { display: contents; }" in css
 
 
-def test_login_typed_tagline():
+def test_login_typing_code_is_gone():
     html, hud, mcss = text("index.html"), text("hud.js"), text("motion.css")
-    tag = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', html, re.S)
-    assert tag
-    assert "กล้องวงจรปิดของตลาดคริปโต" in tag.group(1)
-    assert "เตือนเมื่อการซื้อขายผิดปกติทางสถิติ" in tag.group(1)
-    # the markup holds the full text (the fallback); hud.js types it, and off shows it all
-    assert "function typeTagline(" in hud and "function typeEnd(" in hud
-    assert "innerHTML" not in hud
-    assert "if (isOff()) {\n        settleAll();\n        typeEnd();" in hud
-    assert "typeEnd" in _js_function(hud, "function typeTagline(")
-    assert ".fx-off .login-tagline.is-typing::after" in mcss
+    assert "typeTagline" not in hud and "typeEnd" not in hud and "login-tagline" not in hud
+    assert "is-typing" not in mcss and "login-tagline" not in mcss + text("styles.css")
+    assert 'id="login-tagline"' not in html
 
 
 # ---- HUD redesign, final-review fixes ----
@@ -4045,19 +4254,11 @@ def test_panel_flash_drives_the_fill_not_the_hidden_background():
     assert 'flash($("card-alerts"))' in text("app.js")
 
 
-def test_login_tagline_has_a_permanent_sr_only_copy():
-    html, hud = text("index.html"), text("hud.js")
-    tag = re.search(r'<p class="login-tagline" id="login-tagline">(.*?)</p>', html, re.S)
-    assert tag
-    inner = tag.group(1)
+def test_login_description_has_a_permanent_sr_only_copy():
+    html = text("index.html")
     full = "กล้องวงจรปิดของตลาดคริปโต เตือนเมื่อการซื้อขายผิดปกติทางสถิติ"
-    assert f'<span class="sr-only">{full}</span>' in inner
-    assert len(re.findall(r'<span class="tg" aria-hidden="true">', inner)) == 2
-    assert "aria-label" not in tag.group(0)
-    assert "aria-label" not in _js_function(hud, "function typeTagline(") + _js_function(
-        hud, "function typeEnd("
-    )
-    assert ".login-tagline .tg" in text("styles.css")
+    assert f'<p class="sr-only" id="login-desc">{full}</p>' in html
+    assert ".sr-only" in text("styles.css")
 
 
 def test_cctv_svg_has_no_stray_whitespace_line():
@@ -4140,14 +4341,12 @@ function mk(o) {
     closest() { return this; }, getBoundingClientRect() { return { left: 10, top: 10, width: 100, height: 30 }; } }, o);
 }
 const root = mk({}); root.classList = { contains: c => c === "fx-off" && off, add() {}, remove() {} }; root.getAttribute = () => null;
-const tagA = mk({ textContent: "AAAA" }), tagB = mk({ textContent: "BBBB" });
-const tag = mk({ id: "login-tagline" }); tag.querySelectorAll = sel => (sel === ".tg" ? [tagA, tagB] : []);
 const page = mk({}); const canvas = mk({}); const rec = { bent: 0 };
 const ctx2d = ({ clearRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillRect() {},
   quadraticCurveTo() { rec.bent++; }, set strokeStyle(v) {}, set fillStyle(v) {}, set lineWidth(v) {}, set globalAlpha(v) {} });
 canvas.getContext = () => ctx2d;
 const clocks = [mk({ textContent: "-" }), mk({ textContent: "-" })];
-const byId = { "login-tagline": tag, "page-login": page, "fx-bg": canvas };
+const byId = { "page-login": page, "fx-bg": canvas };
 const doc = { documentElement: root, hidden: false, getElementById: id => byId[id] || null, createElement: () => mk({}),
   querySelectorAll: sel => (sel === ".hud-clock" ? clocks : []), addEventListener(t, f) { (doc.l[t] = doc.l[t] || []).push(f); }, l: {} };
 const M = { addLayer: f => layers.push(f), removeLayer: f => { layers = layers.filter(x => x !== f); }, bg: () => ({ w: 400, h: 400, rgb: [0, 229, 255] }) };
@@ -4162,13 +4361,6 @@ g.globalThis = g;
 vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), g);
 const fire = () => observers.forEach(o => o.f());
 const out = {};
-// tagline: it types into the aria-hidden spans, never labels the paragraph, and ends on the full text
-out.t0 = [tagA.textContent, tagB.textContent, "aria-label" in tag.attrs];
-intervals[0](); intervals[0](); intervals[0]();
-out.t1 = [tagA.textContent, "aria-label" in tag.attrs];
-off = true; fire();
-out.t2 = [tagA.textContent, tagB.textContent, "aria-label" in tag.attrs];
-off = false;
 // clock: one shared timer, written once a second, static while off
 const before = intervals.length;
 let now = "10:00:00";
@@ -4212,9 +4404,6 @@ def test_hud_behaviour_in_node(tmp_path):
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path, timeout=60)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert out["t0"] == ["", "", False] and out["t1"][1] is False
-    assert out["t1"][0] not in ("", "AAAA")  # partway through, on the hidden span
-    assert out["t2"] == ["AAAA", "BBBB", False]  # effects off: the whole text at once
     assert out["c0"] == ["10:00:00", "10:00:00"] and out["c1"] == "10:00:01"
     assert out["c2"] == "10:00:01" and out["c2cleared"] is True  # off: static
     assert out["oneTimer"] == 1

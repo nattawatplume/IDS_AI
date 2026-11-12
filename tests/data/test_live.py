@@ -20,8 +20,15 @@ from idsai.ai.auditor import Auditor
 from idsai.bus import Bus
 from idsai.config import load_settings
 from idsai.contracts.events import Trade
+from idsai.contracts.frames import TRADES
 from idsai.data import live
-from idsai.data.live import GAP_RESTART_S, LiveTradeSensor, parse_trade, warmup_then_live
+from idsai.data.live import (
+    GAP_RESTART_S,
+    LiveTradeSensor,
+    chunked_archive,
+    parse_trade,
+    warmup_then_live,
+)
 from idsai.data.replay import Replayer
 from idsai.data.store import Store
 from idsai.detection.features.bars import BarBuilder
@@ -1857,3 +1864,181 @@ def test_btcusdt_yields_at_least_10_trades_in_10_s():
         return n
 
     assert asyncio.run(main()) >= 10
+
+
+# ------------------------------------------------------------------ chunked archive
+
+
+def tie_frame(seed: int, n: int, span_s: float, t0: int) -> pl.DataFrame:
+    """Trades of three symbols over `span_s` seconds; ties on `ts_us` within and across symbols."""
+    rng = np.random.default_rng(seed)
+    ts = np.sort(t0 + rng.integers(0, int(span_s * S), n))
+    ts[1::7] = ts[0::7][: len(ts[1::7])]  # equal times
+    ts = np.sort(ts)
+    syms = rng.choice(["SOLUSDT", "DOGEUSDT", "PEPEUSDT"], n)
+    price = np.round(1 + rng.random(n), 4)
+    qty = np.round(rng.random(n) + 0.1, 3)
+    ids = np.zeros(n, dtype=np.int64)
+    for sym in set(syms.tolist()):  # unique per symbol, equal across symbols: ties for the order
+        mask = syms == sym
+        ids[mask] = np.arange(mask.sum()) + seed
+    return pl.DataFrame(
+        {
+            "ts_us": ts,
+            "recv_us": ts,
+            "symbol": syms.tolist(),
+            "price": price,
+            "qty": qty,
+            "quote_qty": price * qty,
+            "taker_side": rng.choice(["buy", "sell"], n).tolist(),
+            "trade_id": ids,
+            "n_fills": np.ones(n, dtype=np.int32),
+            "source": ["archive"] * n,
+        },
+        schema=TRADES,
+    )
+
+
+def reader_of(frame: pl.DataFrame, calls: list | None = None):
+    def read(symbol: str, a: int, b: int) -> pl.DataFrame:
+        if calls is not None:
+            calls.append((symbol, a, b))
+        return frame.filter(
+            (pl.col("symbol") == symbol) & (pl.col("ts_us") >= a) & (pl.col("ts_us") < b)
+        )
+
+    return read
+
+
+async def collect(it) -> list[tuple[str, Any]]:
+    return [ev async for ev in it]
+
+
+async def single_replayer(frame: pl.DataFrame, start: int, end: int) -> list[tuple[str, Any]]:
+    inside = frame.filter((pl.col("ts_us") >= start) & (pl.col("ts_us") < end))
+    out = await collect(Replayer(inside, speed=0, start_us=start))
+    return [e for e in out if e[0] != "preroll_done"]
+
+
+SYMS3 = ["SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
+
+
+@pytest.mark.parametrize("chunk_s", [1, 7, 30, 59.5, 60, 1000])
+@pytest.mark.parametrize("start_off", [0, 123_456])  # a start inside a second
+def test_chunked_archive_equals_one_replayer(chunk_s, start_off):
+    start = T0 + start_off
+    frame = tie_frame(3, 400, 300, T0 + 5 * S)  # trades from +5 s to +305 s
+    end = start + 320 * S
+
+    async def main():
+        got = await collect(chunked_archive(reader_of(frame), SYMS3, start, end, chunk_s))
+        return got, await single_replayer(frame, start, end)
+
+    got, want = run(main())
+    assert got == want
+    assert sum(e[0] == "trade" for e in got) == 400
+
+
+def test_chunked_archive_an_empty_chunk_in_the_middle_fills_its_ticks():
+    a = tie_frame(4, 60, 20, T0 + 3 * S)
+    b = tie_frame(5, 60, 20, T0 + 100 * S)  # nothing from +23 s to +100 s
+    frame = pl.concat([a, b])
+    end = T0 + 130 * S
+
+    async def main():
+        got = await collect(chunked_archive(reader_of(frame), SYMS3, T0, end, 10))
+        return got, await single_replayer(frame, T0, end)
+
+    got, want = run(main())
+    assert got == want
+    assert [e[1] for e in got if e[0] == "tick"] == sorted(e[1] for e in got if e[0] == "tick")
+
+
+def test_chunked_archive_ends_with_the_last_trade_second_like_one_replayer():
+    frame = tie_frame(6, 30, 20, T0 + S)
+
+    async def main():
+        got = await collect(chunked_archive(reader_of(frame), SYMS3, T0, T0 + 500 * S, 30))
+        return got, await single_replayer(frame, T0, T0 + 500 * S)
+
+    got, want = run(main())
+    assert got == want and got[-1][0] == "tick"
+
+
+def test_chunked_archive_without_any_trade_yields_nothing():
+    frame = tie_frame(7, 5, 5, T0).head(0)
+
+    async def main():
+        return await collect(chunked_archive(reader_of(frame), SYMS3, T0, T0 + 100 * S, 10))
+
+    assert run(main()) == []
+
+
+def test_chunked_archive_reads_only_the_requested_symbols_one_chunk_at_a_time():
+    frame = tie_frame(8, 100, 100, T0)
+    calls: list = []
+
+    async def main():
+        return await collect(
+            chunked_archive(reader_of(frame, calls), ["SOLUSDT", "PEPEUSDT"], T0, T0 + 100 * S, 40)
+        )
+
+    out = run(main())
+    assert {c[0] for c in calls} == {"SOLUSDT", "PEPEUSDT"}
+    assert {(c[1], c[2]) for c in calls} == {
+        (T0, T0 + 40 * S),
+        (T0 + 40 * S, T0 + 80 * S),
+        (T0 + 80 * S, T0 + 100 * S),
+    }
+    assert {e[1].symbol for e in out if e[0] == "trade"} <= {"SOLUSDT", "PEPEUSDT"}
+
+
+def test_chunked_archive_yields_to_the_event_loop():
+    frame = tie_frame(9, 50, 3000, T0)  # long quiet stretches: mostly filled ticks
+    beats = 0
+
+    async def beat():
+        nonlocal beats
+        while True:
+            beats += 1
+            await asyncio.sleep(0)
+
+    async def main():
+        task = asyncio.create_task(beat())
+        await collect(chunked_archive(reader_of(frame), SYMS3, T0, T0 + 3000 * S, 500))
+        task.cancel()
+
+    run(main())
+    assert beats >= 8  # the Replayer's own yields, 256 events apart, and one per empty chunk
+
+
+def test_chunked_archive_checks_its_arguments():
+    with pytest.raises(ValueError):
+        chunked_archive(reader_of(tie_frame(1, 5, 5, T0)), SYMS3, T0, T0 + S, 0)
+
+
+def test_warmup_takes_an_async_source_like_a_frame():
+    frame = tie_frame(10, 80, 60, T0 + S)
+    sensor_a, sensor_b = FakeSensor(live_trades(LIVE_T, 3)), FakeSensor(live_trades(LIVE_T, 3))
+
+    async def main():
+        first = int(frame["ts_us"].min()) // S * S  # a bare frame starts at its first second
+        src = chunked_archive(reader_of(frame), SYMS3, first, T0 + 120 * S, 20)
+        a = [ev async for ev in warmup_then_live(src, sensor_a)]
+        b = [ev async for ev in warmup_then_live(frame, sensor_b)]
+        return a, b
+
+    a, b = run(main())
+    assert a == b and sensor_a.closed
+    assert sum(e[0] == "gap" for e in a) == 1 and "preroll_done" in [e[0] for e in a]
+
+
+def test_warmup_with_an_empty_async_source_is_just_the_sensor():
+    frame = tie_frame(11, 5, 5, T0).head(0)
+    sensor = FakeSensor(live_trades(LIVE_T, 2))
+
+    async def main():
+        src = chunked_archive(reader_of(frame), SYMS3, T0, T0 + 50 * S, 10)
+        return [ev async for ev in warmup_then_live(src, sensor)]
+
+    assert run(main()) == sensor.events and sensor.closed

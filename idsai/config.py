@@ -127,10 +127,10 @@ class AECfg(_Cfg):
 
 
 class LiveCfg(_Cfg):
-    symbols: list[str] = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
+    symbols: list[str] = ["BTCUSDT", "SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
     ws_url: str = "wss://data-stream.binance.vision/stream"
     budget_per_hour: float = 2.0
-    universe_size: int = 5
+    universe_size: int = 4
     train_days: int = 7
     bar_grace_s: int = 2
 

@@ -88,7 +88,8 @@ body::after {
 
 @media (prefers-reduced-motion: reduce) {
   #fx-bg, #fx-edge, #fx-chart, body::after, .orb-radar, .orb-ring, .fx-wipe, html:root[data-mood] .orb-ring, .nav-ind, .brand-cur, .tk-group + .tk-group, .tk-rep, .fx-glint, .hud-wires, .fx-ripple { display: none; }
-  #cctv-beam { opacity: .3; }
+  .login-beam, .login-floor-rows, .login-cam .lc-lens-dot { animation: none; }
+  .login-beam { display: none; }
   *, *::before, *::after { animation: none !important; }
   .iris-core, .brand-mark { transition: none; }
   .tk-track { display: none; }
@@ -98,8 +99,8 @@ body::after {
 /* only what motion owns is stopped: the app's own one-shot animations (page enter, rail rows, flash, toasts,
    help drawer) keep their behaviour, so turning effects back on replays nothing */
 .fx-off #fx-bg, .fx-off #fx-edge, .fx-off #fx-chart, .fx-off .fx-wipe, .fx-off .fx-rise, .fx-off .fx-sweep, .fx-off .fx-sweep::after,
-.fx-off .cctv, .fx-off .cctv *, .fx-off .cctv-stage, .fx-off .login-brand, .fx-off .login-tagline, .fx-off .login-card,
-.fx-off .login-card button.primary::after, .fx-off .login-line-trace, .fx-off .login-iris, .fx-off .login-eye-ring, .fx-off .login-tagline.is-typing::after,
+.fx-off .login-floor-rows, .fx-off .login-meta .rec::before, .fx-off .login-brand, .fx-off .login-chart, .fx-off .login-card,
+.fx-off .login-card button.primary::after, .fx-off .login-iris, .fx-off .login-eye-ring, .fx-off .login-brand.is-glitch .login-name,
 .fx-off .orb-radar, .fx-off .orb-ring, .fx-off .orb::after, .fx-off .hud-rec, .fx-off #hero-cam .cam-led,
 .fx-off #logo-ring, .fx-off .brand-cur, .fx-off .tk-track, .fx-off .nav-ind,
 .fx-off .fx-glint::before, .fx-off .hud-wire-pulse, .fx-off .hud-glitch, .fx-off .fx-ripple i { animation: none !important; }
@@ -110,37 +111,35 @@ body::after {
 .fx-off .iris-core, .fx-off .brand-mark { transition: none; }
 .fx-off .tk-track { display: none; }
 .fx-off .tk-view.is-live .tk-static { display: block; }
-.fx-off #cctv-beam { opacity: .3; }
+.fx-off .login-beam { display: none; }
 
-/* ---- login: the CCTV camera over the sample chart ---- */
-.cctv-stage { position: relative; width: 100%; max-width: 520px; aspect-ratio: 520 / 260; margin-top: 20px; }
-.cctv-stage .login-line { position: absolute; left: 0; bottom: 0; width: 100%; max-width: none; margin: 0; }
-.cctv { position: absolute; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
-.cctv-pan { transform-box: view-box; transform-origin: 0 0; animation: cctv-pan 3.6s cubic-bezier(.37, 0, .63, 1) infinite alternate; }
-.cctv-beam-fill { fill: var(--fx-alert); fill-opacity: .16; }
-.cctv-part { fill: var(--hud-panel); stroke: rgba(0, 229, 255, .55); stroke-width: 1; }
-.cctv-lens { fill: var(--hud-bg); stroke: var(--fx-alert); stroke-width: 1; }
-.cctv-vent { fill: none; stroke: rgba(0, 229, 255, .3); stroke-linecap: round; }
+/* ---- login: the corner camera, its red beam, the floor and the scanlines (flat colours, no gradients) ---- */
 .login-mark { color: var(--hud-line); }
 .login-iris { transform-box: view-box; transform-origin: 22px 22px; animation: login-look 5s ease-in-out infinite; }
 .login-eye-ring { transform-box: view-box; transform-origin: 22px 22px; animation: login-spin 14s linear infinite; }
-.login-tagline.is-typing::after { content: ""; display: inline-block; width: .55em; height: 1em; margin-left: 4px; vertical-align: -.12em; background: var(--hud-line); animation: cctv-blink 1s step-end infinite; }
 @keyframes login-look { 0%, 100% { transform: translate(0, 0); } 30% { transform: translate(-3px, 0); } 65% { transform: translate(3px, 1px); } }
 @keyframes login-spin { to { transform: rotate(360deg); } }
-.cctv-beam { animation: cctv-flicker 2.6s ease-in-out infinite alternate; }
-.cctv-lens-dot, .cctv-rec, .cctv-blink { fill: var(--fx-alert); }
-.cctv-lens-dot { filter: drop-shadow(0 0 3px var(--fx-alert)); }
-.cctv-rec { filter: drop-shadow(0 0 3px var(--fx-alert)); animation: cctv-blink 1s step-end infinite; }
-.cctv-blink { animation: cctv-blink 1s step-end infinite; }
-.cctv-hud { fill: none; stroke: rgba(0, 229, 255, .42); stroke-width: 1.5; stroke-linecap: round; }
-.cctv-hud-text text { font: 600 10px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: .14em; fill: rgba(186, 230, 253, .78); }
-.cctv-ring { fill: none; stroke: var(--fx-alert); stroke-width: 2; opacity: 0; transform-box: fill-box; transform-origin: center; }
-.cctv-tag text { fill: #fff; font-size: 12px; font-weight: 600; }
-.login-line-spike { fill: none; stroke: transparent; stroke-width: 3; transition: stroke .25s, filter .35s; }
-.login-line-spike.is-hit { stroke: #fecaca; filter: drop-shadow(0 0 5px var(--fx-alert)) drop-shadow(0 0 14px var(--fx-alert)); transition-duration: .08s; }
-
-@keyframes cctv-pan { from { transform: rotate(-18deg); } to { transform: rotate(18deg); } }
-@keyframes cctv-flicker { from { opacity: .82; } to { opacity: 1; } }
+.login-meta .rec::before { animation: cctv-blink 1s step-end infinite; }
+/* the floor and the scanlines sit under the content (z 0 and 7 as in the mockup; the app's plexus canvas is behind) */
+.login-floor { position: fixed; left: 0; right: 0; bottom: 0; width: 100%; height: 42vh; z-index: 0; pointer-events: none; opacity: .55; }
+.login-floor line { stroke: var(--hud-line); stroke-opacity: .16; }
+.login-floor-rows { animation: login-floor 3s linear infinite; }
+@keyframes login-floor { from { transform: translateY(0); } to { transform: translateY(40px); } }
+.login-scan { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 7; pointer-events: none; }
+/* the camera is above the left column (z 3) and the beam too; both stay under the card (z 5), which stays clean */
+.login-cam { position: fixed; left: 0; top: 0; width: 330px; height: 260px; z-index: 4; pointer-events: none; overflow: visible; }
+.login-cam .lc-part { fill: var(--hud-panel); stroke: var(--hud-line); stroke-opacity: .6; }
+.login-cam .lc-body { stroke-opacity: 1; stroke-width: 1.5; }
+.login-cam .lc-visor { stroke-opacity: .6; }
+.login-cam .lc-line { stroke: var(--hud-line); stroke-opacity: .35; }
+.login-cam .lc-joint { fill: var(--hud-bg); stroke: var(--hud-line); }
+.login-cam .lc-lens { fill: var(--hud-bg); stroke: var(--hud-alert); stroke-width: 2; }
+.login-cam .lc-lens-dot { fill: var(--hud-alert); filter: drop-shadow(0 0 6px var(--hud-alert)); }
+.login-cam .lc-text { font: 11px ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 2px; fill: var(--hud-muted); }
+.login-beam { position: fixed; left: 0; top: 0; width: 0; height: 0; z-index: 4; pointer-events: none; mix-blend-mode: screen; }
+.login-beam .cone { position: absolute; left: 0; top: -900px; width: 2600px; height: 1800px; transform-origin: 0 50%; clip-path: polygon(0 50%, 100% 30%, 100% 70%); background: rgba(255, 45, 85, .10); }
+.login-beam .edge { position: absolute; left: 0; top: 0; height: 1px; width: 2600px; transform-origin: 0 0; background: rgba(255, 45, 85, .55); box-shadow: 0 0 6px rgba(255, 45, 85, .7); }
+.is-hit .login-beam .cone { background: rgba(255, 45, 85, .17); }
 @keyframes cctv-blink { from, 50% { opacity: 1; } 50.01%, to { opacity: .12; } }
 @keyframes cctv-rise { from { opacity: 0; transform: translate3d(0, 14px, 0); } to { opacity: 1; transform: none; } }
 @keyframes cctv-card-in { from { opacity: 0; transform: translate3d(34px, 0, 0) scale(.97); } to { opacity: 1; transform: none; } }
@@ -148,8 +147,7 @@ body::after {
 
 /* the entrance: the hero lines rise one after another, the card slides in from the side */
 #page-login:not([hidden]) .login-brand { animation: cctv-rise .6s cubic-bezier(.2, .8, .2, 1) backwards; }
-#page-login:not([hidden]) .login-tagline { animation: cctv-rise .6s .12s cubic-bezier(.2, .8, .2, 1) backwards; }
-#page-login:not([hidden]) .cctv-stage { animation: cctv-rise .7s .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+#page-login:not([hidden]) .login-chart { animation: cctv-rise .7s .26s cubic-bezier(.2, .8, .2, 1) backwards; }
 #page-login:not([hidden]) .login-card:not([hidden]) { animation: cctv-card-in .7s .1s cubic-bezier(.2, .8, .2, 1) backwards; }
 
 /* inputs glow on focus; the submit button has a light sheen passing over it every few seconds */
@@ -300,7 +298,6 @@ html[data-mood="alert"] .hud-wire-pulse { stroke: var(--fx-alert); }
 @keyframes fx-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 720px) {
-  .cctv-stage { display: none; }
   #hero-cam { display: none; }
 }
 

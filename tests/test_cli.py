@@ -36,7 +36,9 @@ SYM = "AAABTC"
 PUMP = date(2025, 3, 20)  # the demo label's day
 PUMP_T0 = day_us(PUMP) + 12 * 3600 * S
 FAKE_RANGE = (PUMP - timedelta(days=30), PUMP + timedelta(days=30))
-COMMANDS = ("labels", "download", "train", "eval", "report", "demo-pack", "serve")
+COMMANDS = (
+    "labels", "download", "train", "eval", "report", "demo-pack", "serve", "live-prep", "live-check"
+)
 
 
 def write_cfg(tmp: Path, **extra) -> Path:
@@ -115,7 +117,7 @@ def test_usage_errors_exit_1(capsys):
 
 
 def test_live_budget_is_per_symbol_day():
-    assert cli.live_budget_per_symbol_day(load_settings()) == pytest.approx(2.0 * 24 / 5)
+    assert cli.live_budget_per_symbol_day(load_settings()) == pytest.approx(2.0 * 24 / 4)
 
 
 # ------------------------------------------------------------------ train
@@ -595,7 +597,7 @@ def test_train_live_uses_the_live_budget_and_dir_and_warns_on_stale_data(
     monkeypatch.setattr(cli, "train_and_save", fake_train_and_save)
     monkeypatch.setattr(cli, "_today", lambda: date(2025, 3, 6))  # newest day is yesterday
     assert cli.main(["--config", str(cfg), "train", "--profile", "live"]) == 0
-    assert seen["budget"] == pytest.approx(9.6) and seen["profile"] == "live"
+    assert seen["budget"] == pytest.approx(12.0) and seen["profile"] == "live"
     assert seen["out"] == s.paths.models_dir / "live"
     assert len(seen["train"]) == 2 and len(seen["cal"]) == 2
     assert "เก่ากว่า" not in capsys.readouterr().err
@@ -680,3 +682,188 @@ def test_help_imports_no_models_and_names_every_experiment():
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]"
     assert cli.EXPERIMENT_NAMES == ex.EXPERIMENTS
+
+
+# ------------------------------------------------------------------ live: prep, source, check
+
+LIVE_SYMS = ["SOLUSDT", "DOGEUSDT"]
+
+
+def live_store(tmp_path, days: list[date], symbols=None):
+    store = Store(tmp_path / "data", tmp_path / "data" / "a.duckdb")
+    for s in symbols or LIVE_SYMS:
+        for d in days:
+            store.write_trades(make_trades(d, 1, symbol=s, seed=d.toordinal() % 100, rate=0.05))
+    return store
+
+
+def run_events(source) -> list:
+    async def main():
+        return [ev async for ev in source]
+
+    return asyncio.run(main())
+
+
+def test_default_live_universe_is_btc_and_three_pump_prone_coins():
+    s = load_settings()
+    assert s.live.symbols == ["BTCUSDT", "SOLUSDT", "DOGEUSDT", "PEPEUSDT"]
+    assert s.live.universe_size == 4
+
+
+def test_live_prep_ingest_takes_the_two_latest_published_days(tmp_path, monkeypatch):
+    cfg = write_cfg(tmp_path)
+    dl = FakeDownloader(hi=PUMP - timedelta(days=1))
+    monkeypatch.setattr(cli, "make_downloader", lambda c: dl)
+    now = day_us(PUMP) + 3600 * S
+    with Store(tmp_path / "d", tmp_path / "d" / "a.duckdb") as store:
+        cli.live_prep_ingest(load_settings(cfg), store, LIVE_SYMS, now)
+        for s in LIVE_SYMS:
+            assert store.days(s) == [PUMP - timedelta(days=2), PUMP - timedelta(days=1)]
+    assert dl.closed
+
+
+def test_live_prep_command_uses_the_live_symbols_and_the_tmp_store(tmp_path, monkeypatch):
+    cfg = write_cfg(tmp_path, live={"symbols": ["SOLUSDT"]})
+    dl = FakeDownloader()
+    monkeypatch.setattr(cli, "make_downloader", lambda c: dl)
+    monkeypatch.setattr(cli, "_now_us", lambda: day_us(PUMP) + 3600 * S)
+    assert cli.main(["--config", str(cfg), "live-prep"]) == 0
+    s = load_settings(cfg)
+    with Store(s.paths.data_dir, s.paths.app_db) as store:
+        assert store.days("SOLUSDT") == [PUMP - timedelta(days=2), PUMP - timedelta(days=1)]
+    assert {c[0] for c in dl.calls} == {"SOLUSDT"}
+
+
+def test_live_prep_with_empty_symbols_exits_1(tmp_path, capsys):
+    cfg = write_cfg(tmp_path, live={"symbols": []})
+    assert cli.main(["--config", str(cfg), "live-prep"]) == 1
+    assert "live.symbols" in capsys.readouterr().err
+
+
+def test_live_source_is_the_last_12_h_of_the_newest_stored_day(tmp_path):
+    d1 = PUMP - timedelta(days=1)
+    now = day_us(PUMP) + 10 * 3600 * S
+    with live_store(tmp_path, [d1 - timedelta(days=1), d1]) as store:
+        src, end = cli.live_preroll_source(store, LIVE_SYMS, now)
+        got = run_events(src)
+        assert end == day_us(PUMP)  # midnight after the newest day
+        start = end - 12 * 3600 * S
+        frame = pl.concat([store.read_trades(s, start, end) for s in LIVE_SYMS])
+        every = run_events(Replayer(frame, speed=0, start_us=start))
+        want = [e for e in every if e[0] != "preroll_done"]
+    assert got == want and got and got[-1][0] == "tick"
+
+
+def test_live_source_of_a_day_still_running_ends_now(tmp_path):
+    now = day_us(PUMP) + 10 * 3600 * S
+    with live_store(tmp_path, [PUMP - timedelta(days=1), PUMP]) as store:
+        src, end = cli.live_preroll_source(store, LIVE_SYMS, now)
+        run_events(src)
+    assert end == now
+
+
+def test_live_source_is_none_without_fresh_enough_data(tmp_path):
+    now = day_us(PUMP) + 10 * 3600 * S
+    with live_store(tmp_path, []) as store:
+        assert cli.live_preroll_source(store, LIVE_SYMS, now) is None
+    with live_store(tmp_path, [PUMP - timedelta(days=5)]) as store:  # ends before now - 24 h
+        assert cli.live_preroll_source(store, LIVE_SYMS, now) is None
+
+
+def test_download_split_live_takes_the_live_symbols_and_train_days(tmp_path, monkeypatch):
+    cfg = write_cfg(tmp_path, live={"symbols": LIVE_SYMS, "train_days": 2})
+    dl = FakeDownloader()
+    monkeypatch.setattr(cli, "make_downloader", lambda c: dl)
+    monkeypatch.setattr(cli, "_today", lambda: PUMP + timedelta(days=1))
+    assert cli.main(["--config", str(cfg), "download", "--split", "live"]) == 0
+    want = {(s, PUMP - timedelta(days=k)) for s in LIVE_SYMS for k in range(3)}  # 2 days + D-1
+    assert set(dl.calls) == want
+    assert cli.main(["--config", str(cfg), "download", "--split", "live", "--days", "3"]) == 1
+
+
+def test_download_split_live_with_empty_symbols_exits_1(tmp_path, capsys):
+    cfg = write_cfg(tmp_path, live={"symbols": []})
+    assert cli.main(["--config", str(cfg), "download", "--split", "live"]) == 1
+    assert "live.symbols" in capsys.readouterr().err
+
+
+class LiveFake:
+    """A loopback Binance stand-in in a thread: sends 3 trades (or nothing), records receipts."""
+
+    def __init__(self, send: bool = True):
+        import threading
+
+        self.send, self.received, self.url = send, [], None
+        ready = threading.Event()
+
+        def serve():
+            import time
+
+            import websockets
+
+            async def handler(ws):
+                if self.send:
+                    now = int(time.time() * S)
+                    for i in range(3):
+                        t = now + i
+                        body = {
+                            "e": "trade", "E": t, "s": "SOLUSDT", "t": i, "p": "2.5", "q": "4",
+                            "T": t, "m": False,
+                        }
+                        await ws.send(json.dumps({"stream": "solusdt@trade", "data": body}))
+                try:
+                    async for msg in ws:
+                        self.received.append(msg)
+                except Exception:
+                    pass
+
+            async def main():
+                async with websockets.serve(handler, "127.0.0.1", 0) as srv:
+                    port = srv.sockets[0].getsockname()[1]
+                    self.url = f"ws://127.0.0.1:{port}/stream"
+                    self.stop = asyncio.Event()
+                    self.loop = asyncio.get_running_loop()
+                    ready.set()
+                    await self.stop.wait()
+
+            asyncio.run(main())
+
+        self.thread = threading.Thread(target=serve, daemon=True)
+        self.thread.start()
+        assert ready.wait(10)
+
+    def close(self):
+        self.loop.call_soon_threadsafe(self.stop.set)
+        self.thread.join(5)
+
+
+def test_live_check_exits_0_at_the_first_trade_and_sends_nothing(tmp_path, capsys):
+    fake = LiveFake()
+    try:
+        cfg = write_cfg(tmp_path, live={"symbols": ["SOLUSDT"], "ws_url": fake.url})
+        assert cli.main(["--config", str(cfg), "live-check", "--timeout", "10"]) == 0
+    finally:
+        fake.close()
+    assert fake.received == []
+    assert "รับเทรดแรก" in capsys.readouterr().out
+
+
+def test_live_check_times_out_with_exit_1_and_a_thai_message(tmp_path, capsys):
+    fake = LiveFake(send=False)
+    try:
+        cfg = write_cfg(tmp_path, live={"symbols": ["SOLUSDT"], "ws_url": fake.url})
+        assert cli.main(["--config", str(cfg), "live-check", "--timeout", "1"]) == 1
+    finally:
+        fake.close()
+    assert "ต่อสายข้อมูลสดไม่ได้" in capsys.readouterr().err
+
+
+def test_live_check_with_a_refused_host_exits_1(tmp_path, capsys):
+    cfg = write_cfg(tmp_path, live={"symbols": ["SOLUSDT"], "ws_url": "wss://example.com/stream"})
+    assert cli.main(["--config", str(cfg), "live-check"]) == 1
+    assert "ไม่ถูกต้อง" in capsys.readouterr().err
+
+
+def test_live_check_timeout_must_be_positive():
+    with pytest.raises(SystemExit):
+        cli.main(["live-check", "--timeout", "0"])
