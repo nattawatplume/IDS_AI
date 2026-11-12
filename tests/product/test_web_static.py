@@ -3877,7 +3877,8 @@ console.log(JSON.stringify(out));
 """  # noqa: E501
     script = tmp_path / "h.js"
     script.write_text(harness, encoding="utf-8")
-    r = subprocess.run([node, str(script), str(WEB_DIR / "hud.js")], capture_output=True, text=True, cwd=tmp_path)
+    cmd = [node, str(script), str(WEB_DIR / "hud.js")]
+    r = subprocess.run(cmd, capture_output=True, text=True, cwd=tmp_path)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out["mid"] is True and out["normal"] == "1234" and out["label1"] is False
