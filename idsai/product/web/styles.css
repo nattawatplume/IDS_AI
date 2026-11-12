@@ -1067,7 +1067,8 @@ body.login-mode #ws-banner { display: none; }
     align-items: stretch;
     max-width: 1540px;
     margin: 0 auto;
-    padding: 90px 48px 40px clamp(200px, 20vw, 260px);
+    /* the camera head swings down to about 160 px: keep the brand clear of it */
+    padding: clamp(130px, 19vh, 170px) 48px 40px clamp(230px, 22vw, 300px);
   }
   #page-login .login-card { position: relative; z-index: 5; }
   .login-fx { display: contents; }
