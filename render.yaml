@@ -10,5 +10,9 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: IDSAI_PUBLIC_URL
+        sync: false
       - key: IDSAI_MODE
         value: live

@@ -415,6 +415,7 @@ def test_prefs_whitelist_and_round_trip(aenv, auth_client):
         "auth_enabled": True,
         "signup": False,
         "prefs": prefs,
+        "telegram": {"enabled": False, "linked": False},
     }
     # a partial update keeps the other keys
     assert send(c, "PUT", "/api/me/prefs", {"theme": "auto"}).json() == {**prefs, "theme": "auto"}
@@ -471,6 +472,7 @@ def test_auth_off_me_is_local(aenv):
             "auth_enabled": False,
             "signup": False,
             "prefs": {},
+            "telegram": {"enabled": False, "linked": False},
         }
         assert c.get("/api/audit").status_code == 200
         r = send(c, "POST", "/api/alerts/a1/feedback", {"verdict": "tp", "analyst": "x"})
