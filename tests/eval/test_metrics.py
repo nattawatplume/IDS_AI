@@ -13,6 +13,7 @@ from idsai.eval.metrics import (
     ratio_bootstrap_ci,
     significant,
     summarize,
+    unmatched_onsets,
     window_positive,
     window_pr_auc,
 )
@@ -239,3 +240,25 @@ def test_significant_accepts_the_exact_min_effect_despite_float_rounding():
     assert not significant(0.0199, (0.01, 0.03), 0.02)  # a real shortfall is still rejected
     assert not significant(0.02, (0.0, 0.04), 0.02)  # CI lower bound must be strictly > 0
     assert not significant(0.02, (-1e-13, 0.04), 0.02)
+
+
+# ---------------------------------------------------------------- techniques per event
+def test_techniques_are_the_sorted_unique_ids_of_matched_episodes():
+    labs = labels(("e1", T0, T0, "MM-T001"), ("e2", T0 + 3600 * S, T0 + 3600 * S, "MM-T002"))
+    alerts = [
+        alert(T0, T0 + 10 * S, "MM-T002.1"),
+        alert(T0 + 20 * S, T0 + 30 * S, "MM-T000"),
+        alert(T0 + 40 * S, T0 + 50 * S, "MM-T002.1"),  # duplicate id: once
+        alert(T0 + 10_000 * S, T0 + 10_010 * S, "MM-T003"),  # unmatched
+    ]
+    mr = match(alerts, labs)
+    assert mr.techniques == {"e1": ["MM-T000", "MM-T002.1"], "e2": []}
+    assert unmatched_onsets(alerts, labs, 120, 300) == [(SYM, T0 + 10_000 * S)]
+    assert len(unmatched_onsets(alerts, labs, 120, 300)) == mr.n_alerts - mr.n_alerts_matched
+
+
+def test_match_result_techniques_default_keeps_positional_callers():
+    from idsai.eval.metrics import MatchResult
+
+    mr = MatchResult(0, {}, {}, 0, 0, {})
+    assert mr.techniques == {}

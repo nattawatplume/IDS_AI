@@ -19,6 +19,7 @@ from idsai.eval.experiments import (
     SupervisedRFDetector,
     _Ctx,
     _evaluate,
+    _fa_by_day,
     _Part,
     git_sha,
     model_version,
@@ -250,14 +251,61 @@ def test_fa_counts_unmatched_episodes_on_normal_days_only():
         days=[SymDay("ABCBTC", H1), SymDay("ABCBTC", H2)],
     )
     fused = chief.fuse(real.frame)
-    metrics, per_event = _evaluate(
+    metrics, per_event, fa_by_day = _evaluate(
         chief, 3.0, [fused], [real], (chief.fuse(hard.frame), hard), 120, 300
     )
     assert metrics["n_alerts"] == 4 and metrics["n_alerts_matched"] == 1
     assert metrics["precision"] == 0.25 and metrics["recall_any"] == 1.0
     assert metrics["fa_per_symbol_day"] == 1.0  # 2 unmatched episodes / 2 normal days
     assert metrics["fa_per_symbol_day_hard"] == 1.5  # 3 episodes / 2 hard-negative days
+    assert metrics["n_fa_days"] == 2 and metrics["n_hard_days"] == 2
     assert per_event["ev"]["day"] == E.isoformat() and per_event["ev"]["ttd_s"] == 60.0
+    assert per_event["ev"]["techniques"] == ["MM-T000"]  # stat.test names no technique
+    # per symbol-day counts, the quiet day included; the event-day episode is not a false alert
+    assert fa_by_day == {
+        "normal": {f"ABCBTC|{N1}": 2, f"ABCBTC|{N2}": 0},
+        "hard": {f"ABCBTC|{H1}": 2, f"ABCBTC|{H2}": 1},
+    }
+    normal, hard_days = fa_by_day["normal"], fa_by_day["hard"]
+    assert metrics["fa_per_symbol_day"] == sum(normal.values()) / metrics["n_fa_days"]
+    assert metrics["fa_per_symbol_day_hard"] == sum(hard_days.values()) / len(hard_days)
+
+
+def test_fa_by_day_on_every_loaded_day_when_fa_days_is_none():
+    """SEMI-SYN parts count FA on every loaded day; undetected events get no techniques."""
+    chief, _ = calibrated_chief()
+    t0 = at_h(N2, 12)
+    labels = pl.DataFrame(
+        [("inj", "sim", "ABCBTC", t0, t0, "MM-T001", "pump_burst", None, "SEMI-SYN")],
+        schema=LABELS,
+        orient="row",
+    )
+    part = _Part(
+        frame([(N1, 0, 0, 0), (N1, 6, 0, 5), (N2, 0, 0, 0), (N2, 3, 0, 5), (N2, 4, 0, 5)]),
+        labels,
+        days=[SymDay("ABCBTC", N1), SymDay("ABCBTC", N2)],
+    )
+    metrics, per_event, fa_by_day = _evaluate(
+        chief, 3.0, [chief.fuse(part.frame)], [part], None, 120, 300
+    )
+    assert fa_by_day == {"normal": {f"ABCBTC|{N1}": 1, f"ABCBTC|{N2}": 2}, "hard": {}}
+    assert metrics["n_fa_days"] == 2 and "n_hard_days" not in metrics
+    assert metrics["fa_per_symbol_day"] == sum(fa_by_day["normal"].values()) / 2
+    assert per_event["inj"]["detected_any"] is False and per_event["inj"]["techniques"] == []
+
+
+def test_fa_by_day_counts_an_onset_past_midnight_on_the_listed_day():
+    days = [SymDay("ABCBTC", N1), SymDay("ABCBTC", N2), SymDay("XYZBTC", N2)]
+    onsets = [
+        ("ABCBTC", at_h(N1, 23)),
+        ("ABCBTC", at_h(date(2020, 7, 7), 0, 3)),  # next-day extension minutes of N2
+        ("XYZBTC", at_h(N1, 23, 59)),  # before the symbol's only listed day
+    ]
+    assert _fa_by_day(onsets, days) == {
+        f"ABCBTC|{N1}": 1,
+        f"ABCBTC|{N2}": 1,
+        f"XYZBTC|{N2}": 1,
+    }
 
 
 def test_only_the_saturation_warning_is_silenced():
