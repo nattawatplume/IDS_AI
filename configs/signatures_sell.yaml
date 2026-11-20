@@ -1,0 +1,27 @@
+# M4 sell-side signature rules, loaded only with `features.sell_side: true` (configs/signatures.yaml
+# and its recorded sha256 are untouched when the flag is off).
+# Thresholds mirror the pump-burst rule (100101) and are set from train-period data only
+# (<= 2019-06-30, scripts/tune_sell_rules.py); never tuned on cal / accept / test.
+# Bump `rev` whenever a threshold or condition changes. Its sha256 is recorded in m4_sell runs.
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100104  # 100103 is the Kamps-Kleinberg baseline
+    technique: MM-T001.003
+    layer: rule
+    rev: 1
+    name: ช่วงเทขายหลังปั่น (dump phase)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 6}
+      - {feature: ret_60, op: "<=", thr: -0.02}
+      - {feature: z_sell_rush_60, op: ">=", thr: 4}
+      - {feature: jump_1800, op: ">=", thr: 0.03}
+  - sid: 100601
+    technique: MM-T006.001
+    layer: rule
+    rev: 1
+    name: ทุบราคาแบบพุ่งเร็ว (bear raid burst)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 6}
+      - {feature: ret_60, op: "<=", thr: -0.02}
+      - {feature: z_sell_rush_60, op: ">=", thr: 4}
+      - {feature: jump_1800, op: "<=", thr: 0.03}

@@ -13,7 +13,12 @@ from idsai.ai.baselines import IsolationForestDetector, PCADetector, RandomDetec
 from idsai.config import Settings
 from idsai.contracts.detector import Detector
 from idsai.detection.features.registry import model_features
-from idsai.detection.rules import KK_SID, SignatureDetector, load_signatures
+from idsai.detection.rules import (
+    KK_SID,
+    SELL_SIGNATURES_PATH,
+    SignatureDetector,
+    load_signatures,
+)
 from idsai.detection.stats import CusumDetector, RobustZDetector
 
 Factory = Callable[[Settings, int], Detector | list[Detector]]
@@ -41,8 +46,26 @@ def build_detectors(names: list[str], cfg: Settings, seed: int = 0) -> list[Dete
     return out
 
 
+def rule_signatures(cfg: Settings) -> list:
+    """Rule-layer signatures: `signatures.yaml`, plus `signatures_sell.yaml` with `sell_side`."""
+    sigs = [s for s in load_signatures() if s.layer == "rule"]
+    if cfg.features.sell_side:
+        sigs += [s for s in load_signatures(SELL_SIGNATURES_PATH) if s.layer == "rule"]
+    sids = [s.sid for s in sigs]
+    if len(set(sids)) != len(sids):
+        raise ValueError(f"duplicate signature ids across signature files: {sids}")
+    return sigs
+
+
+def sell_rule_detectors() -> list[Detector]:
+    """Only the sell-side rule detectors (M4 eval adds them to an existing detector set)."""
+    return [
+        SignatureDetector(s) for s in load_signatures(SELL_SIGNATURES_PATH) if s.layer == "rule"
+    ]
+
+
 def _rules(cfg: Settings, seed: int) -> list[Detector]:
-    return [SignatureDetector(s) for s in load_signatures() if s.layer == "rule"]
+    return [SignatureDetector(s) for s in rule_signatures(cfg)]
 
 
 def _kk(cfg: Settings, seed: int) -> Detector:

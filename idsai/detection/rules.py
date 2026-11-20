@@ -19,6 +19,9 @@ from idsai.config import REPO_ROOT
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
 
 SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures.yaml"
+# M4 sell-side rules: a separate file, read only with `features.sell_side`, so the sha of
+# `signatures.yaml` that every run records is unchanged
+SELL_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_sell.yaml"
 THR_FLOOR = 1e-9
 KK_SID = 100103  # Kamps-Kleinberg baseline signature
 
@@ -73,6 +76,7 @@ class SignatureDetector(Detector):
         self.layer = sig.layer
         self.name = "baseline.kk" if sig.sid == KK_SID else f"{sig.layer}.{sig.sid}"
         self.technique_ids = [sig.technique.split(".")[0]]
+        self.technique = sig.technique  # the full (sub-)technique, e.g. "MM-T001.003"
         self.requires = [c.feature for c in sig.conditions]
         self.signature_id = sig.sid
         self.rev = sig.rev

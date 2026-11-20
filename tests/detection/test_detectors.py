@@ -392,11 +392,16 @@ def test_evidence_from_items_sorts_truncates_and_drops_nan():
 
 def test_taxonomy_has_expected_ids_and_fields():
     tax = load_taxonomy()
-    assert list(tax) == [f"MM-T00{i}" for i in range(6)]
+    assert list(tax) == [f"MM-T00{i}" for i in range(7)]
     for entry in tax.values():
         for k in ("name_th", "definition_th", "reference", "observability_th", "sub_techniques"):
             assert k in entry
-    assert {s["id"] for s in tax["MM-T001"]["sub_techniques"]} == {"MM-T001.001", "MM-T001.002"}
+    assert {s["id"] for s in tax["MM-T001"]["sub_techniques"]} == {
+        "MM-T001.001",
+        "MM-T001.002",
+        "MM-T001.003",  # M4 dump phase
+    }
+    assert {s["id"] for s in tax["MM-T006"]["sub_techniques"]} == {"MM-T006.001"}  # M4
     assert {s["id"] for s in tax["MM-T005"]["sub_techniques"]} == {"MM-T005.001"}
 
 

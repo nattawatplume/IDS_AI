@@ -27,7 +27,8 @@ exceedance row whose technique is not `MM-T000` (earliest on ties), so an episod
 is unclassified still names the technique a less extreme row found; `MM-T000` only when no row
 classifies. `fused_p`, `detectors`, `agreement`, `severity`, `evidence` and `peak_technique_id`
 (the peak row's own technique) stay from the peak row; `window` spans the episode's first and last
-rows. Batch and stream both fold rows through `_Attribution.merge`.
+rows. Batch and stream both fold rows through `_Attribution.merge`. `phase` (M4) is
+`phase_of` the attributed signature's full technique, set only when the Chief has a sell-side rule.
 
 AI fusion mode (`AiFusion`, M1; the default `"fuse"` is the fusion above, unchanged):
 - `"exclude"`: the `ai` layer still gets `p__` and is listed in the alert detectors, but never
@@ -52,7 +53,7 @@ import numpy as np
 import polars as pl
 
 from idsai.config import ChiefCfg
-from idsai.contracts.alert import Alert, DetectorRef
+from idsai.contracts.alert import Alert, DetectorRef, phase_of
 from idsai.contracts.detector import Detector, feature_matrix
 
 FUSION_LAYERS = ("rule", "stat", "ai")
@@ -250,6 +251,13 @@ class Chief:
         self._rule_tech = np.array(
             [_parent_technique(detectors[j].technique_ids[0]) for j in self._rules], dtype=object
         )
+        # M4 phase: from the episode signature's full technique, and only when a sell-side rule
+        # runs (without one every alert keeps phase None and serializes as before M4)
+        sig_phase = {
+            detectors[j].signature_id: phase_of(getattr(detectors[j], "technique", None))
+            for j in self._rules
+        }
+        self._sig_phase = sig_phase if "sell" in sig_phase.values() else {}
         cusum = [j for j in fusion if detectors[j].name == CUSUM_NAME]
         self._cusum = cusum[0] if cusum else None
         self._index = {n: j for j, n in enumerate(names)}
@@ -549,6 +557,7 @@ class Chief:
             config_hash=self.config_hash,
             model_versions=dict(self.model_versions),
             provenance=provenance,
+            phase=self._sig_phase.get(attribution.signature_id),
         )
 
     def episodes(

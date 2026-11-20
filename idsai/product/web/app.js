@@ -1959,6 +1959,13 @@ function renderAlertFilters(all) {
   }
 }
 
+// M4: the market phase an alert names ("pump" / "sell"), a small badge; nothing when unset
+const PHASE_TH = { pump: "กำลังพุ่ง", sell: "กำลังเทขาย" };
+function phaseBadge(a) {
+  const p = a && a.phase;
+  return PHASE_TH[p] ? el("span", { class: `badge alert-phase phase-${p}` }, `ช่วง: ${PHASE_TH[p]}`) : null;
+}
+
 function alertCard(a) {
   return hudMark(el(
     "a",
@@ -1972,6 +1979,7 @@ function alertCard(a) {
         { class: "alert-card-meta small muted" },
         el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
         el("span", {}, a.symbol),
+        phaseBadge(a),
       ),
     ),
     el(
@@ -2117,6 +2125,7 @@ async function showAlert(id) {
         { class: "detail-meta" },
         el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
         el("span", {}, a.symbol),
+        phaseBadge(a),
         el("span", { class: "muted" }, fmtThaiTime(a.ts_event_us, true)),
         chipSlot,
       ),
@@ -4094,6 +4103,7 @@ if (typeof document !== "undefined") {
       BASELINE_TH,
       NEED_ANALYST_TH,
       TECHNIQUE_TH,
+      PHASE_TH,
       NET_FAILED_TH,
       ACT_FAILED_TH,
       ACT_FORBIDDEN_TH,
