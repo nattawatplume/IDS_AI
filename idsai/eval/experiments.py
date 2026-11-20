@@ -133,7 +133,16 @@ ABLATION: dict[str, list[str] | None] = {
     "all": None,  # cfg.detectors
 }
 # detectors whose scores depend on the run seed (everything else is deterministic)
-SEEDED = {AE, "baseline.iforest", "baseline.random", RF_NAME}
+SEEDED = {
+    AE,
+    "baseline.iforest",
+    "baseline.random",
+    RF_NAME,
+    # the M2 AI models (names spelled out: the M2 constants are defined further down)
+    "ai.iforest",
+    "ai.autoencoder_wide",
+    "ai.autoencoder_narrow",
+}
 MASK_MARGIN_S = 3600
 RF_POSITIVE_S = 300
 MIN_TICKS = 2.0  # skip pumps whose impact moves the price by fewer ticks
@@ -1164,8 +1173,8 @@ def _m2_grid(cfg: Settings) -> dict[str, dict[str, int]]:
 
 def _exp_m2_ai(ctx: _Ctx) -> list[dict]:
     sp, cfg = ctx.split, ctx.cfg
-    groups = ctx.build(cfg.detectors)
-    # the rules and stats of the configured set; the AI layer is the M2 models
+    # the rules and stats of the configured set (today's AE is built by m2_ai_models instead)
+    groups = ctx.build(n for n in cfg.detectors if n != AE)
     base = [d for d in _flatten(groups, groups) if d.layer != "ai"]
     models = m2_ai_models(cfg, ctx.seed)
     variants = m2_variants()

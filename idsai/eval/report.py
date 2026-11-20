@@ -53,7 +53,9 @@ are the variants whose accept-hard FA and accept FA are each at most `M2_FA_FACT
 `no_ai`'s; among them the one with the largest paired recall_any gain over `no_ai` (ties go to
 the simpler: fewer AI models, then AE before iforest (`ae` < `ae_narrow` < `ae_wide`), then
 `fuse` < `shift1` < `shift2`) wins only if that gain is significant (`significant` with
-`min_effect`); otherwise the pick is `no_ai`. A variant without a paired gain is not eligible.
+`min_effect`); otherwise the pick is `no_ai`. A variant without a paired gain, one whose seed set
+differs from `no_ai`'s, or one whose every budget-2 record failed (shown in the table with its
+error) is not eligible.
 A paired line `test:ae:alone` vs `test:iforest:alone` answers the ROADMAP M2 question.
 
 M4 (`m4_sell`, budget 2): one table of the `base` (no sell-side rules) and `sell` variants on
@@ -915,7 +917,9 @@ def _m2_rank(variant: str) -> tuple[int, int, int, str]:
 
 def m2_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """The M2 selection rule on accept rows (`variant`, `fa`, `fa_hard`, `gain` = paired
-    recall_any of X minus `no_ai` or None, `gain_significant`); see the module docstring.
+    recall_any of X minus `no_ai` or None, `gain_significant`, optional `seeds` and `error`);
+    see the module docstring. A variant whose budget-2 records all failed (`error`), or whose
+    seed set differs from `no_ai`'s (its FA means would cover other seeds), is not eligible.
 
     Returns `chosen` (`no_ai` when nothing wins; None without a usable `no_ai` row), `top` (the
     eligible variant with the largest gain, None if none), `eligible` and `excluded` (Thai
@@ -931,7 +935,18 @@ def m2_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
         v = r["variant"]
         if v == M2_REF:
             continue
-        if r["fa_hard"] is None or r["fa"] is None:
+        if r.get("error"):
+            excluded[v] = f"ประเมินไม่ได้ (error: {_error_th(r['error'], 200)})"
+        elif (
+            r.get("seeds") is not None
+            and ref.get("seeds") is not None
+            and (list(r["seeds"]) != list(ref["seeds"]))
+        ):
+            excluded[v] = (
+                f"seed ไม่ครบชุดเดียวกับ no_ai ({list(r['seeds'])} เทียบ {list(ref['seeds'])}) "
+                "จึงเทียบ FA และผลเพิ่มบนชุดเดียวกันไม่ได้"
+            )
+        elif r["fa_hard"] is None or r["fa"] is None:
             excluded[v] = "ไม่มีค่า FA หรือ FA-hard"
         elif r["fa_hard"] > hard_cap:
             excluded[v] = (
@@ -974,17 +989,52 @@ def _m2(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
     for split, provenance in M2_SPLITS:
         arms = _m1_arms(recs, split)
         arms = {v: a for v, a in arms.items() if not v.endswith(":alone")}
-        if not arms:
+        # variants whose every budget-2 record failed (e.g. CalibrationError) stay visible
+        failed: dict[str, str] = {}
+        for r in recs:
+            sp, _, v = r["variant"].partition(":")
+            if sp == split and not v.endswith(":alone") and v not in arms and r.get("error"):
+                failed.setdefault(v, r["error"])
+        if not arms and not failed:
             continue
         rows = []
-        order = sorted(arms, key=lambda v: (v != M2_REF, _m2_rank(v)))
+        order = sorted({*arms, *failed}, key=lambda v: (v != M2_REF, _m2_rank(v)))
         for v in order:
+            if v in failed:
+                rows.append(
+                    {
+                        "variant": v,
+                        "n_seeds": 0,
+                        "n_events": None,
+                        "seeds": [],
+                        "error": failed[v],
+                        **dict.fromkeys(
+                            (
+                                "recall_any",
+                                "recall_any_ci",
+                                "recall_correct",
+                                "fa",
+                                "fa_ci",
+                                "fa_hard",
+                                "fa_hard_ci",
+                                "vs_ref",
+                                "gain",
+                                "reason_th",
+                            ),
+                        ),  # fmt: skip
+                        "gain_significant": False,
+                        "below_ref": False,
+                    }
+                )
+                continue
             c = _cell(list(arms[v].values()), n_boot)
             m, ci, fa_ci = c["mean"] or {}, c["ci"] or {}, c["fa_ci"] or {}
             row: dict[str, Any] = {
                 "variant": v,
                 "n_seeds": c["n_seeds"],
                 "n_events": c["n_events"],
+                "seeds": sorted(arms[v]),
+                "error": None,
                 "recall_any": m.get("recall_any"),
                 "recall_any_ci": ci.get("recall_any"),
                 "recall_correct": m.get("recall_correct"),
@@ -1064,7 +1114,9 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
             "|" + "---|" * 9,
         ]
         for r in block["rows"]:
-            if r["variant"] == M2_REF:
+            if r.get("error"):
+                diff, verdict = "–", f"ประเมินไม่ได้: {_error_th(r['error'])}"
+            elif r["variant"] == M2_REF:
                 diff, verdict = "–", "ตัวอ้างอิง"
             elif r["vs_ref"] is None:
                 diff, verdict = "–", r["reason_th"] or "–"
@@ -1079,7 +1131,8 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
                 else:
                     verdict = "ไม่ต่างจาก no_ai อย่างมีนัย"
             lines.append(
-                f"| {r['variant']} | {r['n_seeds']} | {r['n_events']} | "
+                f"| {r['variant']} | {r['n_seeds']} | "
+                f"{'–' if r['n_events'] is None else r['n_events']} | "
                 f"{_fmt_ci(r['recall_any'], r['recall_any_ci'])} | {_fmt(r['recall_correct'])} | "
                 f"{_fmt_ci(r['fa'], r['fa_ci'])} | {_fmt_ci(r['fa_hard'], r['fa_hard_ci'])} | "
                 f"{diff} | {verdict} |"

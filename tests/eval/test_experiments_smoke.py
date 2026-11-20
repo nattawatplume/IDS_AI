@@ -495,6 +495,7 @@ def test_m2_ai_fits_each_model_once_and_no_ai_equals_m1(world, monkeypatch):
     for r in recs:
         assert RECORD_KEYS <= set(r)
         assert r["experiment"] == "m2_ai"
+        assert r["deterministic"] is False  # every variant holds a seeded AI model
         assert r["provenance"] == ("SEMI-SYN" if r["variant"].startswith("semisyn:") else "REAL")
         mv_all.update(r["model_versions"])
         parts = r["variant"].split(":")
@@ -525,8 +526,19 @@ def test_m2_ai_fits_each_model_once_and_no_ai_equals_m1(world, monkeypatch):
                         "detectors", "model_versions", "error", "n_events"):  # fmt: skip
                 assert a.get(key) == m.get(key), (split, b, key)
 
+    # the report's M2 section built from these real records (the smoke run has no budget 2)
+    from idsai.eval import report
+
+    monkeypatch.setattr(report, "PAIRED_BUDGET", 10.0)
     md, js = tmp / "m2.md", tmp / "m2.json"
     data = build_report(research, md, js, cfg=cfg)
     text = md.read_text(encoding="utf-8")
     assert "### m2_ai" in text and "accuracy" not in text.lower()
-    assert data["m2_ai"] is None  # the smoke budgets (0.1, 10) have no budget-2 records
+    m2 = data["m2_ai"]
+    assert m2 is not None and m2["selection"] is not None
+    accept = {r["variant"] for r in m2["splits"]["accept"]["rows"]}
+    assert accept == set(ex.m2_variants()) and len(accept) == 16
+    assert set(m2["splits"]) == set(ex.M2_SPLITS)
+    # one accept event: no paired gain can be significant, so the pick stays no_ai
+    assert m2["selection"]["chosen"] == "no_ai"
+    assert m2["ae_vs_iforest"] is not None or any("iforest" in n for n in m2["notes"])

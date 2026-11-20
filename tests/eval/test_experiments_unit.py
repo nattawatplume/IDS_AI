@@ -405,3 +405,4 @@ def test_m2_models_grid_and_variants():
     assert len(v) == 16 and v["no_ai"][0] is None and v["no_ai"][1].mode == "exclude"
     assert v["ae+iforest:shift2"] == ("ae+iforest", ex.M2_FUSIONS["shift2"])
     assert "m2_ai" in ex.EXPERIMENTS and "m2_ai" in ex.INJECTING
+    assert set(ex.M2_AI_NAMES.values()) <= ex.SEEDED  # never tagged deterministic

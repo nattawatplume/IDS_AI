@@ -1243,3 +1243,38 @@ def test_m2_report_without_no_ai_does_not_select(research, tmp_path):
     data, _ = _report(research, tmp_path)
     assert data["m2_ai"]["selection"] is None
     assert any("no_ai" in n for n in data["m2_ai"]["notes"])
+
+
+def test_m2_select_excludes_errored_variants_and_mismatched_seed_sets():
+    ref = {**REF, "seeds": [0, 1]}
+    rows = [
+        ref,
+        {**_m2_row("ae:fuse", None, None), "seeds": [], "error": "งบนี้ใช้ไม่ได้. English"},
+        {**_m2_row("ae:shift1", 2.0, 5.0, gain=0.3, sig=True), "seeds": [0]},  # seed 1 missing
+        {**_m2_row("ae:shift2", 2.0, 5.0, gain=0.1, sig=True), "seeds": [0, 1]},
+    ]
+    sel = m2_select(rows)
+    assert sel["chosen"] == "ae:shift2"
+    assert sel["excluded"]["ae:fuse"].startswith("ประเมินไม่ได้ (error: งบนี้ใช้ไม่ได้.")
+    assert "seed" in sel["excluded"]["ae:shift1"]
+
+
+def test_m2_report_shows_errored_variants(research, tmp_path):
+    ref = [1] * 8 + [0] * 12
+    bad = [
+        {**r, "metrics": None, "per_event": {}, "error": "ชุดข้อมูลสอบเทียบเล็กเกินไป. Too small"}
+        for r in _m2_recs("accept", "ae+iforest:fuse", ref, 2.0, 5.0)
+    ]
+    write(research, [*_m2_recs("accept", "no_ai", ref, 2.0, 5.0), *bad])
+    data, text = _report(research, tmp_path)
+    m2 = data["m2_ai"]
+    row = {r["variant"]: r for r in m2["splits"]["accept"]["rows"]}["ae+iforest:fuse"]
+    assert row["error"] and row["recall_any"] is None and row["n_seeds"] == 0
+    assert m2["selection"]["chosen"] == "no_ai"
+    assert (
+        "ประเมินไม่ได้ (error: ชุดข้อมูลสอบเทียบเล็กเกินไป."
+        in m2["selection"]["excluded"]["ae+iforest:fuse"]
+    )
+    section = _section(text, "m2_ai")
+    assert "| ae+iforest:fuse |" in section and "ชุดข้อมูลสอบเทียบเล็กเกินไป." in section
+    assert "Too small" not in section

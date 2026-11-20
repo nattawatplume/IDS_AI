@@ -98,6 +98,10 @@ Source: `docs/ROADMAP.md` M2 and the M1 results (`docs/REPORT.md` §9). Branch `
    - A variant without a paired gain vs `no_ai` cannot be ranked, so it is not eligible.
    - A variant with too few clusters is ranked, but it can never be significant. If it has the top gain, the pick stays `no_ai`.
    - Following the spec literally, only the top-gain eligible variant can win. A smaller significant gain elsewhere does not.
+   - (After review) A variant whose budget-2 records all failed (e.g. a `CalibrationError`) stays in the table with an "ประเมินไม่ได้" verdict and is excluded as "ประเมินไม่ได้ (error: …)", so it cannot silently vanish.
+   - (After review) A variant whose seed set differs from `no_ai`'s is not eligible, so the FA means compared with the 1.10 caps always cover the same seeds as the paired gain.
+7. (After review) `ai.iforest`, `ai.autoencoder_wide` and `ai.autoencoder_narrow` are in `SEEDED`, so their records are never tagged deterministic. `m2_ai` no longer builds the configured AE it would discard; `m2_ai_models` builds today's AE.
+8. (After review) The smoke test builds the report's M2 section from the real `m2_ai` records (with `PAIRED_BUDGET` patched to the smoke budget 10). It checks that all 16 variants appear and that a selection is made: `no_ai`, since one accept event cannot give a significant gain.
 
 **Expected cost of the real run vs `m1_fusion` (per seed).**
 - Model fits: 4 vs 1. The fits are 3 AE plus 1 IsolationForest. The AE fits are single-threaded: `ae_narrow` costs about the same as `ae`, and `ae_wide` about 2× (twice the hidden width), so AE training is about 4× M1's. The IsolationForest fit is small (256-row subsamples per tree).
