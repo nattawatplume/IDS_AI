@@ -174,6 +174,14 @@ def test_semisyn_records(semisyn, world):
         for pe in r["per_event"].values():  # cluster key of the report's bootstrap
             assert pe["symbol"] in SYMS and pe["family"] == r["variant"]
             assert date.fromisoformat(pe["day"]) >= d(12)
+            assert pe["techniques"] == sorted(set(pe["techniques"]))
+            assert bool(pe["techniques"]) == pe["detected_any"]
+        if r["error"] is None:  # FA on every loaded day, zero days included
+            normal = r["fa_by_day"]["normal"]
+            assert len(normal) == r["metrics"]["n_fa_days"] == r["n_symbol_days"]
+            fa = sum(normal.values()) / len(normal)
+            assert r["metrics"]["fa_per_symbol_day"] == pytest.approx(fa)
+            assert r["fa_by_day"]["hard"] == {}
     burst = [r for r in semisyn if r["variant"] == "pump_burst" and r["budget"] == 10.0]
     assert burst[0]["metrics"]["recall_any"] == 1.0  # a 3-8 % burst on a quiet pair
     runs = research.list_runs("semisyn")
@@ -258,6 +266,12 @@ def test_other_experiments_run(world):
                 if r["provenance"] == "REAL":
                     assert r["n_events"] == 1 and set(r["per_event"]) == {"L3"}
                     assert math.isfinite(r["metrics"]["fa_per_symbol_day_hard"])
+                    fd, m = r["fa_by_day"], r["metrics"]
+                    assert len(fd["normal"]) == m["n_fa_days"]
+                    assert len(fd["hard"]) == m["n_hard_days"] > 0
+                    for which, k in (("normal", ""), ("hard", "_hard")):
+                        fa = sum(fd[which].values()) / len(fd[which])
+                        assert m[f"fa_per_symbol_day{k}"] == pytest.approx(fa), (name, which)
         if name == "baselines":
             assert all(r["classifies"] is False for r in recs)
         if name == "real_t001":

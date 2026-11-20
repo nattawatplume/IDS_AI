@@ -13,7 +13,7 @@ precision is always reported next to the prevalence of positive windows.
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import polars as pl
@@ -36,6 +36,8 @@ class MatchResult:
     n_alerts: int
     n_alerts_matched: int
     ttd_s: dict[str, float]  # detected (any) events only; first_us - t_start, may be negative
+    # per label_id: sorted unique technique_id of the matched episodes (empty when undetected)
+    techniques: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _parent(technique_id: str) -> str:
@@ -55,6 +57,7 @@ def match_events(
     det_any: dict[str, bool] = {}
     det_ok: dict[str, bool] = {}
     ttd: dict[str, float] = {}
+    techs: dict[str, list[str]] = {}
     for lid, sym, t0, t1, tech in labels.select(
         "label_id", "symbol", "t_start_us", "t_end_us", "technique_id"
     ).iter_rows():
@@ -66,6 +69,7 @@ def match_events(
             if first <= hi and last >= lo
         ]
         det_any[lid] = bool(hits)
+        techs[lid] = sorted({t for _, _, t in hits})
         det_ok[lid] = any(t != UNCLASSIFIED and _parent(t) == want for _, _, t in hits)
         if hits:
             ttd[lid] = (min(first for _, first, _ in hits) - t0) / S_US
@@ -77,7 +81,24 @@ def match_events(
         n_alerts=len(alerts),
         n_alerts_matched=len(matched),
         ttd_s=ttd,
+        techniques=techs,
     )
+
+
+def unmatched_onsets(
+    alerts: Sequence[Alert], labels: pl.DataFrame, before_s: float, after_s: float
+) -> list[tuple[str, int]]:
+    """`(symbol, first_us)` of every episode `match_events` leaves unmatched (same rule)."""
+    labels = conform(labels, LABELS)
+    before, after = int(round(before_s * S_US)), int(round(after_s * S_US))
+    spans: dict[str, list[tuple[int, int]]] = {}
+    for sym, t0, t1 in labels.select("symbol", "t_start_us", "t_end_us").iter_rows():
+        spans.setdefault(sym, []).append((t0 - before, t1 + after))
+    return [
+        (a.symbol, a.window[0])
+        for a in alerts
+        if not any(a.window[0] <= hi and a.window[1] >= lo for lo, hi in spans.get(a.symbol, []))
+    ]
 
 
 def _mean(values: list[bool] | list[float]) -> float:

@@ -8,16 +8,18 @@ from idsai.ai.chief import Chief
 from idsai.config import load_settings
 from idsai.data.store import Store
 from idsai.detection.rules import Condition, Signature, SignatureDetector
-from idsai.eval.metrics import MIN_EVENTS, bootstrap_ci
+from idsai.eval.metrics import MIN_EVENTS, bootstrap_ci, few_events_th, paired_bootstrap
 from idsai.eval.report import (
     AGNOSTIC_NOTE,
     DETERMINISTIC_NOTE,
     MIXED_CONFIG_NOTE,
+    NO_PAIRED_ABLATION_TH,
     NOTES_TH,
     SATURATED_MARK,
     UNIT_LEGACY,
     build_report,
     cluster_counts,
+    paired_ratio_bootstrap,
 )
 
 EVENTS = [f"e{i}" for i in range(20)]
@@ -559,3 +561,285 @@ def test_note_defines_recall_correct():
     (note,) = [n for n in NOTES_TH if n.startswith("recall_correct")]
     assert "ทับ" in note and "F สูงสุด" in note and "หลักฐาน" in note and "จุดสูงสุด" in note
     assert "สังเคราะห์" not in note and "ข้อมูลจริง" not in note
+
+
+# ---------------------------------------------------------------- ablation paired bootstrap
+
+
+def _ablation(prefix, arms, seeds=(0, 1), **kw):
+    """Ablation records at budget 2: `arms` maps the subset name to its per-event detections."""
+    prov = "SEMI-SYN" if prefix == "semisyn" else "REAL"
+    return [
+        rec("ablation", f"{prefix}:{sub}", 2, s, det, provenance=prov, **kw)
+        for sub, det in arms.items()
+        for s in seeds
+    ]
+
+
+def _section(text, title):
+    return text.split(f"## {title}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_paired_ratio_bootstrap_matches_the_event_bootstrap_with_one_cluster_per_event():
+    rng = np.random.default_rng(3)
+    a = rng.integers(0, 2, size=(3, 25)).astype(float)
+    b = rng.integers(0, 2, size=(3, 25)).astype(float)
+    n = np.full(25, 3.0)
+    got = paired_ratio_bootstrap(a.sum(axis=0), b.sum(axis=0), n, 500, 0)
+    want = paired_bootstrap(a, b, 500, 0)
+    assert got[0] == pytest.approx(want[0]) and got[1] == pytest.approx(want[1])
+    assert paired_ratio_bootstrap(a.sum(axis=0), b.sum(axis=0), n, 500, 0) == got  # seeded
+    assert paired_ratio_bootstrap(a.sum(axis=0), a.sum(axis=0), n, 500, 0) == (0.0, (0.0, 0.0))
+    nan, (lo, hi) = paired_ratio_bootstrap(np.array([]), np.array([]), np.array([]), 10, 0)
+    assert np.isnan(nan) and np.isnan(lo) and np.isnan(hi)
+    with pytest.raises(ValueError):
+        paired_ratio_bootstrap(np.ones(2), np.ones(2), np.ones(3), 10, 0)
+
+
+def test_paired_ablation_real_rows_json_and_md(research, tmp_path):
+    full = [1] * 15 + [0] * 5
+    arms = {
+        "all": full,
+        "rules+stats": [1] * 5 + [0] * 15,  # all clearly better
+        "rules": full,  # identical: diff 0
+        "ai": [1] * 20,  # the subset clearly better
+    }  # stats missing: skipped with a note
+    write(research, _ablation("real_t001", arms))
+    data, text = _report(research, tmp_path, n_boot=300)
+    pa = data["paired_ablation"]
+    assert pa["budget"] == 2.0 and pa["metric"] == "recall_any"
+    rows = {r["variant"]: r for r in pa["rows"]}
+    assert set(rows) == {"real_t001:rules+stats", "real_t001:rules", "real_t001:ai"}
+    rs = rows["real_t001:rules+stats"]
+    assert rs["provenance"] == "REAL" and rs["ci_unit"] == "event"
+    assert rs["n_seeds"] == 2 and rs["n_events"] == 20 and rs["n_clusters"] == 20
+    assert rs["diff_mean"] == pytest.approx(0.5) and rs["significant"]
+    assert not rs["significant_reverse"]
+    # REAL mirrors `_paired`: the event-level paired bootstrap over sorted label ids, draw for draw
+    order = sorted(range(20), key=lambda i: EVENTS[i])
+    a = np.array([[full[i] for i in order]] * 2, dtype=float)
+    b = np.array([[arms["rules+stats"][i] for i in order]] * 2, dtype=float)
+    _, ci = paired_bootstrap(a, b, 300, 0)
+    assert rs["ci"] == pytest.approx(list(ci))
+    assert rows["real_t001:rules"]["ci"] == [0.0, 0.0]
+    assert not rows["real_t001:rules"]["significant"]
+    ai = rows["real_t001:ai"]
+    assert ai["diff_mean"] == pytest.approx(-0.25) and ai["significant_reverse"]
+    assert not ai["significant"]
+    assert any("real_t001:stats" in n for n in pa["notes"])
+    assert json.loads((tmp_path / "r.json").read_text(encoding="utf-8"))["paired_ablation"] == pa
+
+    section = _section(text, "ablation")
+    assert "### ablation: all เทียบชุดย่อย (paired bootstrap, budget 2)" in section
+    assert "ผลต่าง recall_any (all − X) [95 % CI]" in section and "อ่านว่า" in section
+    row = _row(text, "| all vs real_t001:rules+stats |")
+    assert "| REAL | 2 | 20 | event (20) | 0.500 [" in row
+    assert "all ดีกว่า rules+stats อย่างมีนัย" in row
+    assert "ai ดีกว่า all อย่างมีนัย" in _row(text, "| all vs real_t001:ai |")
+    assert "ไม่มีนัยสำคัญ" in _row(text, "| all vs real_t001:rules |")
+    assert NO_PAIRED_ABLATION_TH not in text
+
+
+def test_paired_ablation_semisyn_pairs_per_seed_and_clusters_by_symbol_day(research, tmp_path):
+    """Scenario ids differ per seed; 4 days, and both arms' detection depends only on the day."""
+    days = [("ABCBTC", f"2020-07-0{1 + i % 4}") for i in range(12)]
+    full = [1, 0, 1, 0] * 3
+    sub = [0, 0, 1, 0] * 3  # misses day 1 only
+    write(research, _ablation("semisyn", {"all": full, "rules": sub}, seeds=range(5), days=days))
+    data, text = _report(research, tmp_path, n_boot=1000)
+    (row,) = data["paired_ablation"]["rows"]
+    assert row["variant"] == "semisyn:rules" and row["provenance"] == "SEMI-SYN"
+    assert row["ci_unit"] == "symbol-day" and row["n_clusters"] == 4
+    assert row["n_seeds"] == 5 and row["n_events"] == 12 and row["n_values"] == 60
+    # the difference of the two table recalls (same cluster ratio estimator)
+    cells = data["experiments"]["ablation"]
+    diff = cells["semisyn:all"]["2"]["mean"]["recall_any"]
+    diff -= cells["semisyn:rules"]["2"]["mean"]["recall_any"]
+    assert row["diff_mean"] == pytest.approx(diff) and diff == pytest.approx(0.25)
+    # 4 symbol-days, not 60 independent values: below MIN_EVENTS clusters, not decided
+    assert not row["significant"] and not row["significant_reverse"]
+    assert "4 กลุ่ม (symbol-day)" in row["reason_th"]
+    lo, hi = row["ci"]
+    _, (elo, ehi) = paired_bootstrap(
+        np.array([full], dtype=float), np.array([sub], dtype=float), 1000, 0
+    )
+    assert (hi - lo) > (ehi - elo)  # wider than resampling 12 events as independent
+    assert "symbol-day (4)" in _row(text, "| all vs semisyn:rules |")
+    again, _ = _report(research, tmp_path / "again", n_boot=1000)
+    assert again["paired_ablation"] == data["paired_ablation"]  # deterministic (CI_SEED)
+
+
+def test_paired_ablation_semisyn_with_enough_days_decides(research, tmp_path):
+    days = [("ABCBTC", f"2020-07-{1 + i:02d}") for i in range(MIN_EVENTS)]
+    arms = {"all": [1] * MIN_EVENTS, "rules+stats": [0] * MIN_EVENTS}
+    write(research, _ablation("semisyn", arms, days=days))
+    data, _ = _report(research, tmp_path)
+    (row,) = data["paired_ablation"]["rows"]
+    assert row["n_clusters"] == MIN_EVENTS and row["reason_th"] is None
+    assert row["diff_mean"] == 1.0 and row["ci"] == [1.0, 1.0] and row["significant"]
+
+
+def test_paired_ablation_uses_the_latest_config_and_min_events(research, tmp_path):
+    t = 0
+    records = []
+    for cfg_hash, det in (("old", [1] * 9), ("cfg", [0] * 9)):
+        for r in _ablation("real_t001", {"all": [1] * 9, "rules": det}):
+            t += 1
+            r.update(config_hash=cfg_hash, created_us=t, run_id=r["run_id"] + cfg_hash)
+            records.append(r)
+    write(research, records)
+    data, text = _report(research, tmp_path)
+    pa = data["paired_ablation"]
+    (row,) = pa["rows"]
+    assert "ไม่นับ 4 run ของ config_hash เก่า (ใช้เฉพาะ config_hash ล่าสุด cfg)" in pa["notes"]
+    assert row["diff_mean"] == 1.0  # the old config (diff 0) is not pooled in
+    assert row["n_events"] == 9 and not row["significant"]
+    assert row["reason_th"] == few_events_th(9)
+    assert row["reason_th"] in _row(text, "| all vs real_t001:rules |")
+
+
+def test_paired_ablation_without_the_full_arm_says_no_paired_bootstrap(research, tmp_path):
+    write(research, _ablation("real_t001", {"rules": [1, 0]}))
+    data, text = _report(research, tmp_path)
+    pa = data["paired_ablation"]
+    assert pa["rows"] == [] and any("real_t001:all" in n for n in pa["notes"])
+    section = _section(text, "ablation")
+    assert NO_PAIRED_ABLATION_TH in section and "| all vs" not in section
+
+
+def test_no_ablation_records_no_ablation_section(research, tmp_path):
+    write(research, [rec("real_t001", "full", 2, 0, [1, 0])])
+    data, text = _report(research, tmp_path)
+    assert data["paired_ablation"]["rows"] == [] and data["paired_ablation"]["notes"] == []
+    assert "### ablation" not in text
+
+
+def test_paired_ablation_skips_when_cluster_sizes_match_but_keys_differ(research, tmp_path):
+    """Same event ids, one cluster each, but arm `rules` puts e1 on another day."""
+    days_a = [("ABCBTC", "2020-07-01"), ("ABCBTC", "2020-07-02")]
+    days_b = [("ABCBTC", "2020-07-01"), ("ABCBTC", "2020-07-03")]
+    records = [
+        rec("ablation", "semisyn:all", 2, 0, [1, 0], provenance="SEMI-SYN", days=days_a),
+        rec("ablation", "semisyn:rules", 2, 0, [1, 0], provenance="SEMI-SYN", days=days_b),
+    ]
+    write(research, records)
+    data, _ = _report(research, tmp_path)
+    pa = data["paired_ablation"]
+    assert pa["rows"] == []
+    assert any("semisyn:rules" in n and "คนละ symbol-day" in n for n in pa["notes"])
+
+
+# ---------------------------------------------------------------- FA CI and day counts (Part C)
+def _fa_days(counts, prefix="ABCBTC|2020-08-"):
+    return {f"{prefix}{i + 1:02d}": c for i, c in enumerate(counts)}
+
+
+def test_fa_ci_bootstraps_seed_mean_per_symbol_day(research, tmp_path):
+    normal = {0: [0, 2, 1, 0, 3], 1: [1, 0, 1, 2, 1]}
+    hard = {0: [4, 0, 2], 1: [2, 2, 0]}
+    records = []
+    for seed in (0, 1):
+        r = rec("real_t001", "full", 2, seed, [1, 0])
+        r["fa_by_day"] = {"normal": _fa_days(normal[seed]), "hard": _fa_days(hard[seed], "X|")}
+        r["metrics"].update(
+            fa_per_symbol_day=sum(normal[seed]) / 5,
+            fa_per_symbol_day_hard=sum(hard[seed]) / 3,
+            n_fa_days=5,
+            n_hard_days=3,
+        )
+        records.append(r)
+    write(research, records)
+    data, text = _report(research, tmp_path, n_boot=400)
+    c = data["experiments"]["real_t001"]["full"]["2"]
+    assert c["n_fa_days"] == 5 and c["n_hard_days"] == 3
+    day_means = np.mean([normal[0], normal[1]], axis=0)
+    mean, ci = bootstrap_ci(day_means, 400, 0)
+    assert c["mean"]["fa_per_symbol_day"] == pytest.approx(mean)  # seed mean = day mean
+    assert c["fa_ci"]["fa_per_symbol_day"] == pytest.approx(list(ci))
+    _, ci_h = bootstrap_ci(np.mean([hard[0], hard[1]], axis=0), 400, 0)
+    assert c["fa_ci"]["fa_per_symbol_day_hard"] == pytest.approx(list(ci_h))
+    row = _row(text, "| full | 2 |")
+    assert f"{mean:.3f} [{ci[0]:.3f}, {ci[1]:.3f}] (5 วัน)" in row
+    assert f"[{ci_h[0]:.3f}, {ci_h[1]:.3f}] (3 วัน)" in row
+    assert "FA/symbol-day [95% CI]" in text
+
+
+def test_fa_without_fa_by_day_shows_the_mean_alone(research, tmp_path):
+    new = rec("real_t001", "full", 2, 0, [1, 0], fa_by_day={"normal": _fa_days([1, 2]), "hard": {}})
+    old = rec("real_t001", "full", 2, 1, [1, 0])  # older record: no fa_by_day, no n_*_days
+    write(research, [new, old])
+    data, text = _report(research, tmp_path)
+    c = data["experiments"]["real_t001"]["full"]["2"]
+    assert c["fa_ci"] == {"fa_per_symbol_day": None, "fa_per_symbol_day_hard": None}
+    assert c["n_fa_days"] is None and c["n_hard_days"] is None
+    assert "| 1.500 | 3.000 |" in _row(text, "| full | 2 |")
+
+
+# ---------------------------------------------------------------- technique confusion (Part C)
+def _tech_rec(experiment, variant, seed, events, provenance="REAL"):
+    """`events`: list of (family, techniques)."""
+    r = rec(experiment, variant, 2, seed, [bool(t) for _, t in events], provenance=provenance)
+    for (fam, techs), pe in zip(events, r["per_event"].values(), strict=True):
+        pe.update(family=fam, techniques=techs)
+    return r
+
+
+def test_confusion_table_shares_over_seeds_and_multi_technique_events(research, tmp_path):
+    real = {
+        0: [
+            ("telegram_pump", ["MM-T001.2"]),
+            ("telegram_pump", ["MM-T001", "MM-T000"]),  # counts in both columns
+            ("telegram_pump", []),
+            ("telegram_pump", ["MM-T003"]),
+        ],
+        1: [
+            ("telegram_pump", ["MM-T001"]),
+            ("telegram_pump", []),
+            ("telegram_pump", []),
+            ("telegram_pump", []),
+        ],
+    }
+    records = [_tech_rec("real_t001", "full", s, ev) for s, ev in real.items()]
+    records.append(
+        _tech_rec("real_t001", "full", 0, real[0]) | {"budget": 10.0, "run_id": "b10"}
+    )  # other budget: ignored
+    for seed in (0, 1):
+        records.append(
+            _tech_rec("semisyn", "pump_burst", seed, [("pump_burst", ["MM-T001"])], "SEMI-SYN")
+        )
+        records.append(_tech_rec("semisyn", "wash_ring", seed, [("wash_ring", [])] * 2, "SEMI-SYN"))
+    write(research, records)
+    data, text = _report(research, tmp_path)
+    cf = data["confusion"]
+    rt = cf["real_t001 full"]
+    assert rt["columns"] == ["MM-T000", "MM-T001", "MM-T003", "none"]
+    (row,) = rt["rows"]
+    assert row["family"] == "telegram_pump" and row["n_seeds"] == 2 and row["n_events"] == 4
+    assert row["share"] == pytest.approx(
+        {
+            "MM-T001": (2 / 4 + 1 / 4) / 2,
+            "MM-T000": 1 / 8,
+            "MM-T003": 1 / 8,
+            "none": (1 / 4 + 3 / 4) / 2,
+        }
+    )
+    ss = cf["semisyn"]
+    assert ss["columns"] == ["MM-T001", "none"]
+    rows = {r["family"]: r["share"] for r in ss["rows"]}
+    assert rows == {
+        "pump_burst": {"MM-T001": 1.0, "none": 0.0},
+        "wash_ring": {"MM-T001": 0.0, "none": 1.0},
+    }
+    section = _section(text, "confusion: family ของป้ายกำกับ × เทคนิคที่ระบุ (budget 2)")
+    assert "| family | seeds | events | MM-T000 | MM-T001 | MM-T003 | none |" in section
+    assert "| telegram_pump | 2 | 4 | 0.125 | 0.375 | 0.125 | 0.500 |" in section
+    assert "นับในทุกคอลัมน์" in section
+
+
+def test_confusion_needs_a_rerun_for_records_without_techniques(research, tmp_path):
+    write(research, [rec("real_t001", "full", 2, 0, [1, 0])])
+    data, text = _report(research, tmp_path)
+    assert data["confusion"]["real_t001 full"]["rows"] == []
+    assert data["confusion"]["semisyn"]["rows"] == []
+    section = _section(text, "confusion: family ของป้ายกำกับ × เทคนิคที่ระบุ (budget 2)")
+    assert section.count("ต้องรัน `idsai eval` ใหม่") == 2

@@ -155,6 +155,7 @@ const AUDIT_ACTIONS = [
   "login", "login_failed", "logout", "feedback", "replay_control", "redteam_inject",
   "user_add", "user_role", "user_disable", "user_enable", "user_passwd",
   "signup", "role_change", "user_seed",
+  "telegram_link_code", "telegram_link", "telegram_unlink", "telegram_stop", "telegram_blocked",
 ];
 // parent techniques whose taxonomy name_th holds Latin words ("wash trading"): the plain view names them here
 const TECHNIQUE_TH = { "MM-T005": "การซื้อขายวนหลอก" };
@@ -428,17 +429,149 @@ function flushPrefs() {
     .catch((e) => console.warn("dashboard: prefs not saved:", e.message));
 }
 
-// auth off: this browser's localStorage, at once. auth on: the account, one PUT 500 ms after the last change
+// keys the server acts on (the Telegram watchlist): they go to the account even with auth off
+const SERVER_PREF_KEYS = ["watch"];
+
+// auth off: this browser's localStorage, at once (server keys still go to the server). auth on:
+// the account, one PUT 500 ms after the last change
 function savePrefs(patch) {
   if (!authOn()) {
+    const toServer = {};
     for (const [k, v] of Object.entries(patch || {})) {
       if (PREF_KEYS[k]) storageSet(PREF_KEYS[k], String(v));
+      if (SERVER_PREF_KEYS.includes(k)) toServer[k] = v;
     }
-    return;
+    if (!Object.keys(toServer).length) return;
+    patch = toServer;
   }
   prefsPending = { ...prefsPending, ...patch };
   if (prefsTimer !== null) clearTimeout(prefsTimer);
   prefsTimer = setTimeout(flushPrefs, 500);
+}
+
+// ------------------------------------------------------------------ Telegram alerts (user menu)
+
+// not a *_TH table on purpose: the copy guard allows no Latin word, and "Telegram" is a name
+const TG_TEXT = {
+  linked: "เชื่อมแล้ว · ส่งข้อความเมื่อพบความผิดปกติทางสถิติ",
+  unlinked: "ยังไม่ได้เชื่อม",
+  waiting: "เปิดลิงก์แล้วกด Start ใน Telegram ภายใน 10 นาที",
+  failed: "เชื่อมไม่สำเร็จ ลองใหม่อีกครั้ง",
+};
+const TG_POLL_MS = 3000;
+const TG_POLL_MAX = 200; // 10 minutes: the link code's life
+let tgPoll = null;
+
+function tgInfo() {
+  const tg = state.me && state.me.telegram;
+  return { enabled: !!(tg && tg.enabled), linked: !!(tg && tg.linked) };
+}
+
+// the watchlist the server uses: no `watch` pref means every symbol
+function tgWatched(prefs, symbol) {
+  const w = prefs && prefs.watch;
+  return !Array.isArray(w) || w.includes(symbol);
+}
+
+function renderTelegram() {
+  const box = typeof document !== "undefined" ? $("tg-section") : null;
+  if (!box) return;
+  const info = tgInfo();
+  box.hidden = !info.enabled;
+  if (!info.enabled) return;
+  const status = $("tg-status");
+  if (!tgPoll || info.linked) {
+    status.textContent = info.linked ? TG_TEXT.linked : TG_TEXT.unlinked;
+    status.classList.toggle("ok", info.linked);
+  }
+  $("tg-link").hidden = info.linked;
+  $("tg-unlink").hidden = !info.linked;
+  if (info.linked) $("tg-open").hidden = true;
+  const list = clear($("tg-watch-list"));
+  const prefs = (state.me && state.me.prefs) || {};
+  for (const sym of state.symbols || []) {
+    const input = el("input", { type: "checkbox", value: sym });
+    input.checked = tgWatched(prefs, sym);
+    input.addEventListener("change", saveWatch);
+    list.appendChild(el("label", { class: "check" }, input, el("span", {}, sym)));
+  }
+}
+
+function saveWatch() {
+  const watch = [...document.querySelectorAll("#tg-watch-list input")].filter((i) => i.checked).map((i) => i.value);
+  if (state.me) state.me.prefs = { ...(state.me.prefs || {}), watch };
+  savePrefs({ watch });
+}
+
+function stopTgPoll() {
+  if (tgPoll !== null) clearInterval(tgPoll);
+  tgPoll = null;
+}
+
+// after a link is handed out, re-read /api/me until the bot has bound the chat (or the code expired)
+function startTgPoll() {
+  stopTgPoll();
+  let n = 0;
+  tgPoll = setInterval(async () => {
+    n += 1;
+    try {
+      const me = await api("/api/me");
+      if (state.me && me && me.telegram) state.me.telegram = me.telegram;
+    } catch (e) {
+      /* try again on the next tick */
+    }
+    if (tgInfo().linked || n >= TG_POLL_MAX) {
+      stopTgPoll();
+      renderTelegram();
+    }
+  }, TG_POLL_MS);
+}
+
+// only a Telegram deep link is ever put in the menu: https on Telegram's own short-link host
+function isTelegramLink(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && /^t\.me$/.test(u.hostname);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function linkTelegram() {
+  const status = $("tg-status");
+  try {
+    const out = await api("/api/me/telegram/link", { method: "POST" });
+    const url = out && typeof out.url === "string" ? out.url : "";
+    if (!isTelegramLink(url)) throw new Error("bad link");
+    const open = $("tg-open");
+    open.href = url;
+    open.hidden = false;
+    status.textContent = TG_TEXT.waiting;
+    status.classList.remove("ok");
+    startTgPoll();
+  } catch (e) {
+    status.textContent = e && e.status === 503 && e.message ? e.message : TG_TEXT.failed;
+  }
+}
+
+async function unlinkTelegram() {
+  try {
+    await api("/api/me/telegram", { method: "DELETE" });
+    if (state.me) state.me.telegram = { ...tgInfo(), linked: false };
+  } catch (e) {
+    $("tg-status").textContent = TG_TEXT.failed;
+    return;
+  }
+  stopTgPoll();
+  renderTelegram();
+}
+
+function bindTelegram() {
+  $("tg-link").addEventListener("click", linkTelegram);
+  $("tg-unlink").addEventListener("click", unlinkTelegram);
+  $("tg-open").addEventListener("click", () => {
+    $("tg-open").hidden = true;
+  });
 }
 
 function provenanceBadges(text) {
@@ -3333,6 +3466,7 @@ function adoptMe(me) {
   const prefs = loadedPrefs();
   if (isNum(prefs.eval_budget)) state.evalBudget = String(prefs.eval_budget);
   renderUserChip();
+  renderTelegram();
   applyRoleGates();
   fxApply(); // the account's choice may differ from this browser's
 }
@@ -3795,6 +3929,7 @@ async function enterApp() {
   const savedSymbol = loadedPrefs().symbol;
   state.symbol = state.symbols.includes(savedSymbol) ? savedSymbol : state.symbols[0] || null;
   fillSymbols();
+  renderTelegram(); // the watchlist needs the symbols
   try {
     renderHealth(await api("/api/health"));
   } catch (e) {
@@ -3820,6 +3955,7 @@ async function boot() {
   const fxSwitch = $("menu-fx");
   if (fxSwitch) fxSwitch.addEventListener("click", () => setFxOff(fxSwitch.getAttribute("aria-pressed") !== "true"));
   bindActivity();
+  bindTelegram();
   document.addEventListener("keydown", safely(onPresenterKey));
   bindReplay();
   bindMonitor();
@@ -3998,6 +4134,9 @@ if (typeof document !== "undefined") {
     can,
     setMe,
     savePrefs,
+    tgWatched,
+    isTelegramLink,
+    renderTelegram,
     api,
     onWsClose,
     getMe: () => state.me,

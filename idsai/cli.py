@@ -1279,6 +1279,25 @@ def with_session_purge(
     return run
 
 
+def with_telegram(
+    state: Any, background: Callable[[], Coroutine[Any, Any, None]]
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """`background` plus the Telegram poller and notifier of `state.telegram` (when it is on);
+    they start with the server and stop with it."""
+    svc = state.telegram
+    if svc is None:
+        return background
+
+    async def run() -> None:
+        svc.start(state.bus)
+        try:
+            await background()
+        finally:
+            await svc.stop()
+
+    return run
+
+
 def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
     from idsai.product.api import create_app
 
@@ -1310,10 +1329,16 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
                 state.env_usernames = frozenset(n for n, _, _ in parse_seed_users(env_users))
             except CliError:  # a bad IDSAI_USERS is seed-env's error to report, not serve's
                 pass
+        from idsai.product.notify import TelegramService
+
+        # None without TELEGRAM_BOT_TOKEN
+        state.telegram = TelegramService.from_env(store, auth_enabled=state.auth_enabled)
+        if state.telegram is not None:
+            _say("เปิดการแจ้งเตือน Telegram แล้ว")
         store.purge_sessions(_now_us())
         app = create_app(state, allowed_hosts=allowed_hosts(host, args.public_host))
         _say(f"เปิดที่ http://{host if ':' not in host else f'[{host}]'}:{port} (กด Ctrl+C เพื่อหยุด)")
-        run_server(app, host, port, with_session_purge(store, background))
+        run_server(app, host, port, with_telegram(state, with_session_purge(store, background)))
     return 0
 
 
