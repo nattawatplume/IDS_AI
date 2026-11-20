@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from idsai.ai.chief import Chief
+from idsai.ai.chief import Chief, ChiefStream
 from idsai.config import load_settings
 from idsai.contracts.alert import Alert, phase_of
 from idsai.contracts.frames import TRADES
@@ -146,20 +146,20 @@ def test_phase_of():
     )
 
 
-def _chief_alerts(windows: pl.DataFrame, cfg) -> list[Alert]:
-    # no stat.cusum: its MM-T001 rows would out-rank the rule rows of a merged episode
-    dets = build_detectors(["rules", "stat.robust_z"], cfg)
+def _chief(windows: pl.DataFrame, cfg, names=("rules", "stat.robust_z")):
+    dets = build_detectors(list(names), cfg)
     scored = score_windows(windows, dets)
     cols = ["symbol", "t_end_us", *[f"score__{d.name}" for d in dets]]
     cal = scored.filter(pl.col("t_end_us") < EVENT_US - 3600 * S)
     chief = Chief(dets, cfg.chief, "h", {})
     chief.calibrate(cal.select(cols))
     chief.fit_threshold(chief.fuse(cal.select(cols)), 10.0)
-    ev = scored.filter(pl.col("t_end_us") >= EVENT_US - 3600 * S)
+    return chief, scored.filter(pl.col("t_end_us") >= EVENT_US - 3600 * S)
+
+
+def _chief_alerts(windows: pl.DataFrame, cfg, names=("rules", "stat.robust_z")) -> list[Alert]:
+    chief, ev = _chief(windows, cfg, names)
     return chief.episodes(chief.fuse(ev))
-
-
-SIG_TECH = {DUMP: "MM-T001.003", RAID: "MM-T006.001", 100101: "MM-T001.001", 100102: "MM-T001.002"}
 
 
 def test_chief_sets_phase_only_with_sell_rules(dump_windows, raid_windows):
@@ -167,15 +167,27 @@ def test_chief_sets_phase_only_with_sell_rules(dump_windows, raid_windows):
     crash = [a for a in raid if a.window[0] <= EVENT_US + 120 * S and a.window[1] >= EVENT_US]
     assert crash and crash[0].phase == "sell" and crash[0].signature_id == RAID
     assert crash[0].technique_id == "MM-T006"
-    # rise then crash in one episode: the episode names its highest-F classified row (here the
-    # stealth pump rule), so its phase is that row's, "pump"
-    dump = _chief_alerts(dump_windows, ON)
-    assert dump
-    for a in [*raid, *dump]:
-        assert a.phase == phase_of(SIG_TECH.get(a.signature_id))
     off = _chief_alerts(_windows(_day(rise=True), CFG), CFG)
     assert off and all(a.phase is None for a in off)
     assert all('"phase"' not in a.model_dump_json() for a in off)
+
+
+@pytest.mark.parametrize(
+    "names", [("rules", "stat.robust_z"), ("rules", "stat.robust_z", "stat.cusum")]
+)
+def test_rise_then_crash_reports_the_sell_phase_batch_and_stream(dump_windows, names):
+    """One episode spans the rise and the crash: technique / signature stay those of its
+    highest-F classified row, the phase follows its latest rule-classified row (the dump)."""
+    chief, ev = _chief(dump_windows, ON, names)
+    batch = chief.episodes(chief.fuse(ev))
+    (ep,) = [a for a in batch if a.window[0] <= EVENT_US + 120 * S and a.window[1] >= EVENT_US]
+    assert ep.phase == "sell" and ep.technique_id == "MM-T001"
+    stream = ChiefStream(chief, "replay")
+    out = [a for r in ev.to_dicts() for a in stream.step(r)] + stream.flush()
+    closed = [a for a in out if a.status == "closed"]
+    assert [a.model_dump() for a in closed] == [a.model_dump() for a in batch]
+    phases = [a.phase for a in out if a.alert_id == ep.alert_id]
+    assert phases[-1] == "sell" and "sell" in phases  # an `updated` alert carries the change
 
 
 def _alert(**kw) -> Alert:

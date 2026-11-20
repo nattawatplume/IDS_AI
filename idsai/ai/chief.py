@@ -28,7 +28,8 @@ is unclassified still names the technique a less extreme row found; `MM-T000` on
 classifies. `fused_p`, `detectors`, `agreement`, `severity`, `evidence` and `peak_technique_id`
 (the peak row's own technique) stay from the peak row; `window` spans the episode's first and last
 rows. Batch and stream both fold rows through `_Attribution.merge`. `phase` (M4) is
-`phase_of` the attributed signature's full technique, set only when the Chief has a sell-side rule.
+`phase_of` the full technique of the episode's LATEST rule-classified row (`last_sig`; a pump that
+turns into a dump reports "sell"), set only when the Chief has a sell-side rule.
 
 AI fusion mode (`AiFusion`, M1; the default `"fuse"` is the fusion above, unchanged):
 - `"exclude"`: the `ai` layer still gets `p__` and is listed in the alert detectors, but never
@@ -46,7 +47,7 @@ so batch/stream parity holds in each.
 
 import math
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import numpy as np
@@ -199,6 +200,9 @@ class _Attribution:
     technique: str
     signature_id: int | None
     rev: int | None
+    # M4: signature of the episode's latest row that a rule classified (drives `Alert.phase`,
+    # so a pump episode that turns into a dump reports "sell"); not part of `label`
+    last_sig: int | None = None
 
     @property
     def label(self) -> tuple[str, int | None, int | None]:
@@ -206,12 +210,14 @@ class _Attribution:
         return self.technique, self.signature_id, self.rev
 
     def merge(self, later: "_Attribution") -> "_Attribution":
-        """Attribution after a later row: highest-`F` classified row, earliest on ties."""
+        """Attribution after a later row: highest-`F` classified row, earliest on ties; `last_sig`
+        follows the latest row with a rule signature."""
+        last = later.last_sig if later.last_sig is not None else self.last_sig
         if later.technique == UNCLASSIFIED:
-            return self
+            return self if last == self.last_sig else replace(self, last_sig=last)
         if self.technique == UNCLASSIFIED or later.F > self.F:
-            return later
-        return self
+            return later if last == later.last_sig else replace(later, last_sig=last)
+        return self if last == self.last_sig else replace(self, last_sig=last)
 
 
 class Chief:
@@ -503,6 +509,7 @@ class Chief:
             technique=str(fu.technique[i]),
             signature_id=sig.signature_id if sig is not None else None,
             rev=sig.rev if sig is not None else None,
+            last_sig=sig.signature_id if sig is not None else None,
         )
 
     def _alert(
@@ -557,7 +564,7 @@ class Chief:
             config_hash=self.config_hash,
             model_versions=dict(self.model_versions),
             provenance=provenance,
-            phase=self._sig_phase.get(attribution.signature_id),
+            phase=self._sig_phase.get(attribution.last_sig),
         )
 
     def episodes(
@@ -812,11 +819,14 @@ class ChiefStream:
             return out
         o.episode.last_us = t
         before = o.attribution.label
+        phase_before = ch._sig_phase.get(o.attribution.last_sig)
         o.attribution = o.attribution.merge(attribution)
         rose = F > o.peak_F
         if rose:
             o.peak_F, o.peak, o.peak_row = F, fu, dict(row)
-        if rose or o.attribution.label != before:
+        # a phase change (M4, only with sell rules) is news too; `_sig_phase` is empty otherwise
+        phased = ch._sig_phase.get(o.attribution.last_sig) != phase_before
+        if rose or o.attribution.label != before or phased:
             out.append(self._emit(o, "updated"))
         return out
 
