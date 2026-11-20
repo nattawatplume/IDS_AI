@@ -2,6 +2,9 @@
 # and its recorded sha256 are untouched when the flag is off).
 # Thresholds mirror the pump-burst rule (100101) and are set from train-period data only
 # (<= 2019-06-30, scripts/tune_sell_rules.py); never tuned on cal / accept / test.
+# Train result (30 measured train pumps, 20 train normal days): the mirrored z_quote_vol_60 >= 6
+# never fired inside a sell window (0/30); >= 3 fired in 9/30 with 0 episodes on the normal days,
+# so only that threshold moved (6 -> 3); ret_60 <= -0.02 and z_sell_rush_60 >= 4 stay mirrored.
 # Bump `rev` whenever a threshold or condition changes. Its sha256 is recorded in m4_sell runs.
 # ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
 signatures:
@@ -11,7 +14,7 @@ signatures:
     rev: 1
     name: ช่วงเทขายหลังปั่น (dump phase)
     conditions:
-      - {feature: z_quote_vol_60, op: ">=", thr: 6}
+      - {feature: z_quote_vol_60, op: ">=", thr: 3}
       - {feature: ret_60, op: "<=", thr: -0.02}
       - {feature: z_sell_rush_60, op: ">=", thr: 4}
       - {feature: jump_1800, op: ">=", thr: 0.03}
@@ -21,7 +24,7 @@ signatures:
     rev: 1
     name: ทุบราคาแบบพุ่งเร็ว (bear raid burst)
     conditions:
-      - {feature: z_quote_vol_60, op: ">=", thr: 6}
+      - {feature: z_quote_vol_60, op: ">=", thr: 3}
       - {feature: ret_60, op: "<=", thr: -0.02}
       - {feature: z_sell_rush_60, op: ">=", thr: 4}
       - {feature: jump_1800, op: "<=", thr: 0.03}
