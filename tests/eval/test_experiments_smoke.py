@@ -15,6 +15,7 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 
+from idsai.ai.chief import AiFusion
 from idsai.config import config_hash, load_settings
 from idsai.contracts.frames import LABELS
 from idsai.data.store import Store
@@ -427,3 +428,99 @@ def test_m4_sell_two_variants_from_one_fit_with_per_phase_recall(world, monkeypa
     text = md.read_text(encoding="utf-8")
     assert "## m4_sell" in text and "accuracy" not in text.lower()
     assert "m4_sell" in data["experiments"]
+
+
+def test_m2_ai_fits_each_model_once_and_no_ai_equals_m1(world, monkeypatch):
+    """m2_ai: the four AI models are fit once per seed and every (symbol-day, scenario) is
+    scored once; the 16 fusion variants (and the two diagnostics `test:<m>:alone`) only re-fuse
+    those scores; `no_ai` reproduces m1_fusion's `no_ai` exactly."""
+    from idsai.ai.autoencoder import AutoencoderDetector
+    from idsai.ai.baselines import IsolationForestDetector
+    from idsai.eval import experiments as ex
+
+    cfg, app, research, tmp = world
+    m1 = {
+        (r["variant"], r["budget"]): r
+        for r in run_experiment("m1_fusion", cfg, app, seed=0, research=research)
+    }
+    fits, loads = [], []
+    real_ae_fit, real_if_fit, real_load = (
+        AutoencoderDetector.fit,
+        IsolationForestDetector.fit,
+        ex._Ctx.load,
+    )
+
+    def ae_fit(self, normal):
+        fits.append((self.name, self.cfg.hidden, self.cfg.bottleneck))
+        return real_ae_fit(self, normal)
+
+    def if_fit(self, normal):
+        fits.append((self.name, self.layer))
+        return real_if_fit(self, normal)
+
+    def load(self, items, detectors, **kw):
+        items = list(items)
+        if detectors:
+            loads.extend((sd, None if sc is None else sc.family) for sd, sc in items)
+        return real_load(self, items, detectors, **kw)
+
+    monkeypatch.setattr(AutoencoderDetector, "fit", ae_fit)
+    monkeypatch.setattr(IsolationForestDetector, "fit", if_fit)
+    monkeypatch.setattr(ex._Ctx, "load", load)
+    recs = run_experiment("m2_ai", cfg, app, seed=0, research=research)
+
+    # one fit per model per seed: today's AE, the two grid points, and iforest on the ai layer
+    assert sorted(fits, key=str) == sorted(
+        [
+            ("ai.autoencoder_trade", cfg.ae.hidden, cfg.ae.bottleneck),
+            ("ai.autoencoder_wide", 128, 16),
+            ("ai.autoencoder_narrow", 64, 8),
+            ("ai.iforest", "ai"),
+        ],
+        key=str,
+    )
+    assert len(loads) == len(set(loads))  # no symbol-day (or injected day) scored twice
+    sp = ex._Ctx(cfg, app, 0).split
+    n_days = len(sp.cal_normal) + len(sp.accept_events) + len(sp.accept_normal)
+    n_days += len(sp.test_events) + len(sp.test_normal) + len(sp.test_hard_negative)
+    assert len(loads) == n_days + len(ex.FAMILIES) * len(sp.test_normal)
+
+    want = {f"{s}:{m}:{f}" for s in ex.M2_SPLITS for m in ex.M2_MODELS for f in ex.M2_FUSIONS}
+    want |= {f"{s}:no_ai" for s in ex.M2_SPLITS}
+    want |= {f"test:{m}:alone" for m in ex.M2_ALONE}
+    assert len(ex.M2_MODELS) * len(ex.M2_FUSIONS) + 1 == 16
+    assert {r["variant"] for r in recs} == want
+    by = {(r["variant"], r["budget"]): r for r in recs}
+    mv_all = {}
+    for r in recs:
+        assert RECORD_KEYS <= set(r)
+        assert r["experiment"] == "m2_ai"
+        assert r["provenance"] == ("SEMI-SYN" if r["variant"].startswith("semisyn:") else "REAL")
+        mv_all.update(r["model_versions"])
+        parts = r["variant"].split(":")
+        if parts[1] == "no_ai":
+            assert r["ai_fusion"] == AiFusion("exclude").as_dict() and r["ai_model"] is None
+        elif parts[2] == "alone":
+            assert r["ai_model"] == parts[1] and all(n.startswith("ai.") for n in r["detectors"])
+        else:
+            assert r["ai_model"] == parts[1]
+            assert r["ai_fusion"] == ex.M2_FUSIONS[parts[2]].as_dict()
+            ai = {n for n in r["detectors"] if n.startswith("ai.")}
+            assert ai == {ex.M2_AI_NAMES[x] for x in ex.M2_MODELS[parts[1]]}
+        if r["budget"] == 10.0:
+            assert r["error"] is None, (r["variant"], r["error"])
+            assert "accuracy" not in json.dumps(r["metrics"])
+    assert set(mv_all) == set(ex.M2_AI_NAMES.values())  # four distinct fitted models
+    assert by[("accept:ae+iforest:shift2", 10.0)]["model_versions"].keys() == {
+        "ai.autoencoder_trade",
+        "ai.iforest",
+    }
+    k = ex.m1_hard_k(cfg, len(sp.accept_normal))
+    assert by[("accept:no_ai", 10.0)]["metrics"]["n_hard_days"] == k
+    # no_ai is M1's no_ai: the same detectors, fitted AE, calibration, tau and outcomes
+    for split in ex.M2_SPLITS:
+        for b in BUDGETS:
+            a, m = by[(f"{split}:no_ai", b)], m1[(f"{split}:no_ai", b)]
+            for key in ("metrics", "per_event", "fa_by_day", "tau", "tau_saturated", "n_cal",
+                        "detectors", "model_versions", "error", "n_events"):  # fmt: skip
+                assert a.get(key) == m.get(key), (split, b, key)

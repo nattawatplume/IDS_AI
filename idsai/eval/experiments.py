@@ -28,6 +28,19 @@ negatives and computed here, so `Split` and its sha are unchanged), `test:<v>` (
 `semisyn:<v>` (the injected test-normal days, scored once and shared like the ablation). Rows
 keep the regime feature (`m1_regime_feature`) for the Mondrian variant.
 
+`m2_ai` (M2: does an AI layer earn its place) fits four AI models once per seed: today's
+autoencoder (`ae`), two grid points of it (`ae_wide`: hidden 128 / bottleneck 16, `ae_narrow`:
+hidden 64 / bottleneck 8; every other `ae` setting as configured) and IsolationForest on the AI
+layer (`ai.iforest`). Every set is scored once with the rules, stats and all four models; each
+variant then fuses those scores through its own Chief: the AI set `ae`, `ae_wide`, `ae_narrow`,
+`iforest` or `ae+iforest` (both enter F) with fusion `fuse`, `shift1` or `shift2` (`AiFusion`;
+the shift applies to each AI detector), plus the reference `no_ai` (today's AE scored but
+excluded: exactly m1_fusion's `no_ai`). Records are `<split>:<model>:<fusion>` and
+`<split>:no_ai` for split accept (accept-hard as in m1_fusion), test (REAL) and semisyn (the
+injected test-normal days, scored in the same single pass), plus the diagnostics
+`test:ae:alone` and `test:iforest:alone` (that AI model alone through its own Chief, on the same
+scores) for the report's AE-vs-iforest line.
+
 `fa_by_day` holds per-day unmatched-episode counts; when several parts load the same symbol-day
 (the SEMI-SYN families of one variant) it also holds `normal_mult`, how many parts loaded each
 day (missing keys and older records: 1), so the report's FA CI is the ratio `sum n / sum m`.
@@ -131,6 +144,37 @@ SATURATION_WARNING = r"alert budget .* is at or above the peak episode rate"
 REAL, SEMI = "REAL", "SEMI-SYN"
 M1 = "m1_fusion"
 M1_SPLITS = ("accept", "test", "semisyn")
+M2 = "m2_ai"
+M2_SPLITS = ("accept", "test", "semisyn")
+# the AE grid (kept small on purpose: laptop CPU); `ae` is today's config
+M2_AE_GRID: dict[str, dict[str, int]] = {
+    "ae": {},
+    "ae_wide": {"hidden": 128, "bottleneck": 16},
+    "ae_narrow": {"hidden": 64, "bottleneck": 8},
+}
+IFOREST_AI = "ai.iforest"
+# detector name of each fitted AI model (the grid points need their own score columns)
+M2_AI_NAMES = {
+    "ae": AE,
+    "ae_wide": "ai.autoencoder_wide",
+    "ae_narrow": "ai.autoencoder_narrow",
+    "iforest": IFOREST_AI,
+}
+# the AI set of each variant model: which fitted models enter the fusion
+M2_MODELS: dict[str, tuple[str, ...]] = {
+    "ae": ("ae",),
+    "ae_wide": ("ae_wide",),
+    "ae_narrow": ("ae_narrow",),
+    "iforest": ("iforest",),
+    "ae+iforest": ("ae", "iforest"),
+}
+M2_FUSIONS = {
+    "fuse": AiFusion(),
+    "shift1": AiFusion("shift", 1.0),
+    "shift2": AiFusion("shift", 2.0),
+}
+M2_REF = "no_ai"
+M2_ALONE = ("ae", "iforest")  # diagnostics on test: the AI model alone, its own Chief
 M4 = "m4_sell"
 M4_VARIANTS = ("base", "sell")
 BEAR_RAID = "bear_raid"
@@ -1081,6 +1125,109 @@ def _exp_m1_fusion(ctx: _Ctx) -> list[dict]:
     return out
 
 
+def m2_ai_models(cfg: Settings, seed: int) -> dict[str, Detector]:
+    """The four unfitted M2 AI models (`M2_AI_NAMES`): today's AE, its grid points (only
+    `hidden` / `bottleneck` change, under their own detector names) and `ai.iforest`."""
+    from idsai.ai.autoencoder import AutoencoderDetector  # lazy: keeps torch off import path
+
+    out: dict[str, Detector] = {}
+    for key, grid in M2_AE_GRID.items():
+        if not grid:
+            (out[key],) = build_detectors([AE], cfg, seed)
+            continue
+        ae_cfg = cfg.ae.model_copy(update=grid)
+        det = AutoencoderDetector(model_features(cfg.features), ae_cfg, seed)
+        det.name = M2_AI_NAMES[key]
+        out[key] = det
+    (out["iforest"],) = build_detectors([IFOREST_AI], cfg, seed)
+    for key, det in out.items():
+        if det.name != M2_AI_NAMES[key] or det.layer != "ai":
+            raise ValueError(f"M2 model {key}: got {det.name} on layer {det.layer}")
+    return out
+
+
+def m2_variants() -> dict[str, tuple[str | None, AiFusion]]:
+    """`variant -> (model or None, AiFusion)`: `no_ai` and every `<model>:<fusion>`."""
+    out: dict[str, tuple[str | None, AiFusion]] = {M2_REF: (None, AiFusion("exclude"))}
+    for m in M2_MODELS:
+        for f, ai in M2_FUSIONS.items():
+            out[f"{m}:{f}"] = (m, ai)
+    return out
+
+
+def _m2_grid(cfg: Settings) -> dict[str, dict[str, int]]:
+    return {
+        k: {"hidden": cfg.ae.hidden, "bottleneck": cfg.ae.bottleneck, **g}
+        for k, g in M2_AE_GRID.items()
+    }
+
+
+def _exp_m2_ai(ctx: _Ctx) -> list[dict]:
+    sp, cfg = ctx.split, ctx.cfg
+    groups = ctx.build(cfg.detectors)
+    # the rules and stats of the configured set; the AI layer is the M2 models
+    base = [d for d in _flatten(groups, groups) if d.layer != "ai"]
+    models = m2_ai_models(cfg, ctx.seed)
+    variants = m2_variants()
+
+    def dets_of(model: str | None) -> list[Detector]:
+        keys = M2_MODELS[model] if model is not None else ("ae",)  # no_ai: today's AE, excluded
+        return [*base, *(models[k] for k in keys)]
+
+    def fields(model: str | None, ai: AiFusion | None) -> dict[str, Any]:
+        return {
+            "ai_model": model,
+            "ai_fusion": ai.as_dict() if ai is not None else None,
+            "ae_grid": _m2_grid(cfg),
+        }
+
+    every = [*base, *models.values()]
+    try:
+        mv, info = ctx.fit(every, sp.train_normal)
+    except _VariantError as err:
+        out = []
+        for v, (m, ai) in variants.items():
+            for split in M2_SPLITS:
+                prov = SEMI if split == "semisyn" else REAL
+                out += _error_records(
+                    ctx, M2, f"{split}:{v}", prov, err, dets_of(m), **fields(m, ai)
+                )
+        for m in M2_ALONE:
+            out += _error_records(
+                ctx, M2, f"test:{m}:alone", REAL, err, [models[m]], **fields(m, None)
+            )
+        return out
+    # every set is scored once with every detector; the variants only re-fuse these scores
+    cal = ctx.clean(sp.cal_normal, every)
+    acc = ctx.real_parts(sp.accept_events, sp.accept_normal, every)
+    hard_days = _most_volatile(ctx, sp.accept_normal, m1_hard_k(cfg, len(sp.accept_normal)))
+    acc_hard = _subpart(acc, hard_days)
+    test = ctx.real_parts(sp.test_events, sp.test_normal, every)
+    test_hard = ctx.clean(sp.test_hard_negative, every)
+    semi = ctx.semisyn_parts(every)
+    hard_keys = [_day_key(sd.symbol, sd.day) for sd in acc_hard.days]
+    sets = (
+        ("accept", REAL, [acc], acc_hard, {"accept_hard_days": hard_keys}),
+        ("test", REAL, [test], test_hard, {}),
+        ("semisyn", SEMI, semi, None, {"n_skipped_tick": sum(p.skipped_tick for p in semi)}),
+    )
+    out = []
+    for v, (m, ai) in variants.items():
+        dets = dets_of(m)
+        vmv = _versions_for(mv, dets)
+        for split, prov, parts, hard, more in sets:
+            extra = {**info, **fields(m, ai), **more}
+            out += _variant(
+                ctx, M2, f"{split}:{v}", prov, dets, vmv, cal, parts, hard, extra, ai=ai
+            )
+    for m in M2_ALONE:
+        dets = [models[m]]
+        extra = {**info, **fields(m, None)}
+        vmv = _versions_for(mv, dets)
+        out += _variant(ctx, M2, f"test:{m}:alone", REAL, dets, vmv, cal, [test], test_hard, extra)
+    return out
+
+
 def m4_sell_cfg(cfg: Settings) -> Settings:
     """`cfg` with `features.sell_side` on (the M4 eval computes every feature this way)."""
     return cfg.model_copy(update={"features": cfg.features.model_copy(update={"sell_side": True})})
@@ -1129,10 +1276,11 @@ _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "ref_supervised": _exp_ref_supervised,
     "retrain_drift": _exp_retrain_drift,
     M1: _exp_m1_fusion,
+    M2: _exp_m2_ai,
     M4: _exp_m4_sell,
 }
 EXPERIMENTS = tuple(_RUNNERS)
-INJECTING = ("semisyn", "ablation", M1, M4)  # experiments that run Red-Team injection
+INJECTING = ("semisyn", "ablation", M1, M2, M4)  # experiments that run Red-Team injection
 
 
 def run_experiment(
