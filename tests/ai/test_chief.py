@@ -959,3 +959,192 @@ def test_version_1_state_still_loads_as_fuse():
         ai_chief(AiFusion("exclude"), *dets).load_state_dict(old)
     with pytest.raises(ValueError, match="version"):
         chief(*dets).load_state_dict({**old, "version": 99})
+
+
+# ---------------------------------------------------------------- several AI detectors (M2)
+
+TWO_AI_MODES = {**MODES, "shift2": AiFusion("shift", 2.0)}
+
+
+def two_ai_chief(ai: AiFusion) -> Chief:
+    return ai_chief(ai, Stub("stat.a", "stat"), Stub("ai.c", "ai"), Stub("ai.e", "ai"))
+
+
+def two_ai_cal() -> pl.DataFrame:
+    return cal_with("stat.a", range(1000), extra={"ai.c": range(1000), "ai.e": range(1000)})
+
+
+def test_two_ai_detectors_fuse_shift_and_exclude_formula():
+    # row 0: ai.e is the rarest; row 1: ai.c; row 2: only stat.a; row 3: nothing is rare
+    sc = frame(
+        "A",
+        [0, 1000, 2000, 3000],
+        stat_a=[-1.0, -1.0, 995.0, -1.0],
+        ai_c=[950.0, 5000.0, -1.0, -1.0],
+        ai_e=[5000.0, 995.0, -1.0, -1.0],
+    )
+    nlp = {k: -np.log10(np.array(v) / 1001) for k, v in {
+        "stat": [1001, 1001, 6, 1001], "c": [51, 1, 1001, 1001], "e": [1, 6, 1001, 1001],
+    }.items()}  # fmt: skip
+    for name, ai in TWO_AI_MODES.items():
+        if name == "mondrian":
+            continue
+        ch = two_ai_chief(ai)
+        ch.calibrate(two_ai_cal())
+        out = ch.fuse(sc)
+        # raw anomaly p-values of both AI detectors are always kept
+        assert out["p__ai.c"].to_list() == pytest.approx([51 / 1001, 1 / 1001, 1.0, 1.0])
+        assert out["p__ai.e"].to_list() == pytest.approx([1 / 1001, 6 / 1001, 1.0, 1.0])
+        if ai.mode == "exclude":
+            want = nlp["stat"]
+            best = ["stat.a"] * 4
+            agree = [0, 0, 1, 0]  # neither AI detector counts
+        else:
+            c = np.maximum(nlp["c"] - ai.shift, 0.0)
+            e = np.maximum(nlp["e"] - ai.shift, 0.0)
+            want = np.maximum(nlp["stat"], np.maximum(c, e))
+            best = ["ai.e", "ai.c", "stat.a", "stat.a"]
+            thr = CFG.agreement_p * 10.0**-ai.shift
+            # the ai layer counts once, when any of its detectors is below its threshold
+            ai_hit = (np.array([51, 1, 1001, 1001]) / 1001 < thr) | (
+                np.array([1, 6, 1001, 1001]) / 1001 < thr
+            )
+            agree = (ai_hit.astype(int) + np.array([0, 0, 1, 0])).tolist()
+        np.testing.assert_allclose(out["F"].to_numpy(), want, rtol=0, atol=1e-12)
+        assert out["best_detector"].to_list() == best, name
+        assert out["agreement"].to_list() == agree, name
+        assert set(out["technique"].to_list()) == {"MM-T000"}  # AI never names a technique
+
+
+def test_two_ai_detectors_exclude_drops_both_and_resolution_ignores_them():
+    ch = two_ai_chief(AiFusion("exclude"))
+    cal = cal_with(
+        "stat.a", range(100), extra={"ai.c": [1.0] + [NAN] * 99, "ai.e": [2.0] + [NAN] * 99}
+    )
+    ch.calibrate(cal)
+    assert ch.n_cal == 100
+    ch_fuse = two_ai_chief(AiFusion())
+    ch_fuse.calibrate(cal)
+    assert ch_fuse.n_cal == 1  # fused AI detectors limit the resolution of F
+
+
+def _two_ai_world(seed: int):
+    dets, sc = _mixed_world(seed)
+    rng = np.random.default_rng(seed + 100)
+    sc = sc.with_columns(pl.Series("score__ai.e", rng.standard_normal(sc.height)))
+    return [*dets[:3], Stub("ai.e", "ai", requires=("fb",)), dets[3]], sc
+
+
+@pytest.mark.parametrize("mode", list(TWO_AI_MODES))
+def test_two_ai_detectors_stream_matches_batch(mode):
+    dets, sc = _two_ai_world(11)
+    ch = ai_chief(TWO_AI_MODES[mode], *dets)
+    ch.calibrate(sc)
+    fused = ch.fuse(sc)
+    ch.fit_threshold(fused, 15.0)
+    batch = ch.episodes(fused)
+    assert len(batch) > 10
+    st = ChiefStream(ch, provenance="replay")
+    emitted = [a for r in sc.to_dicts() for a in st.step(r)] + st.flush()
+    closed = [a for a in emitted if a.status == "closed"]
+    assert sorted(a.model_dump_json() for a in closed) == sorted(a.model_dump_json() for a in batch)
+    alone = [float(ch.fuse(sc[i : i + 1])["F"][0]) for i in range(0, sc.height, 97)]
+    assert alone == fused["F"].to_list()[::97]
+    if mode == "mondrian":
+        assert set(ch.state_dict()["mondrian"]) == {"ai.c", "ai.e"}  # one binning per AI model
+
+
+@pytest.mark.parametrize("mode", list(TWO_AI_MODES))
+def test_two_ai_detectors_state_round_trip(mode):
+    dets, sc = _two_ai_world(12)
+    ch = ai_chief(TWO_AI_MODES[mode], *dets)
+    ch.calibrate(sc)
+    ch.fit_threshold(ch.fuse(sc), 15.0)
+    state = pickle.loads(pickle.dumps(ch.state_dict()))
+    assert state["version"] == 2  # the state layout is unchanged by several AI detectors
+    ch2 = ai_chief(TWO_AI_MODES[mode], *dets)
+    ch2.load_state_dict(state)
+    assert (ch2.tau, ch2.n_cal) == (ch.tau, ch.n_cal)
+    assert ch2.fuse(sc).equals(ch.fuse(sc))
+
+
+def test_one_ai_version_2_state_still_loads():
+    """A version-2 state written for one AI detector (the M1 layout) loads unchanged."""
+    dets, sc = _mixed_world(seed=5)
+    ch = ai_chief(AiFusion("shift", 2.0), *dets)
+    ch.calibrate(sc)
+    ch.fit_threshold(ch.fuse(sc), 15.0)
+    v2 = {
+        "version": 2,
+        "detector_names": [d.name for d in dets],
+        "cal": {d.name: a.copy() for d, a in zip(dets, ch._cal, strict=True)},
+        "n_cal": ch.n_cal,
+        "cal_symbol_days": ch.cal_symbol_days,
+        "tau": ch.tau,
+        "tau_saturated": ch.tau_saturated,
+        "config_hash": "cfg123",
+        "model_versions": VERSIONS,
+        "ai": {"mode": "shift", "shift": 2.0, "regime_feature": None},
+        "mondrian": {},
+    }
+    ch2 = ai_chief(AiFusion("shift", 2.0), *dets)
+    ch2.load_state_dict(v2)
+    assert ch2.fuse(sc).equals(ch.fuse(sc)) and ch2.tau == ch.tau
+
+
+def _iforest_world(seed: int = 21) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    rng = np.random.default_rng(seed)
+
+    def rows(n: int, t0: int, shift: float = 0.0) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "symbol": np.tile(["S0USDT", "S1USDT"], n // 2),
+                "t_end_us": np.repeat(t0 + np.arange(n // 2, dtype=np.int64) * 10 * S_US, 2),
+                "fa": rng.standard_normal(n) + shift,
+                "fb": rng.standard_normal(n),
+                "score__stat.a": rng.standard_normal(n),
+            }
+        )
+
+    train, cal, test = rows(2000, T0_US), rows(4000, T0_US + DAY_US), rows(4000, T0_US + 2 * DAY_US)
+    test = test.with_columns(  # a few very unusual rows, and a NaN feature row
+        pl.when(pl.int_range(pl.len()) % 500 == 0).then(9.0).otherwise(pl.col("fa")).alias("fa")
+    ).with_columns(
+        pl.when(pl.int_range(pl.len()) == 7).then(None).otherwise(pl.col("fb")).alias("fb")
+    )
+    return train, cal, test
+
+
+def test_iforest_as_ai_layer_goes_through_the_conformal_path():
+    from idsai.ai.baselines import AiIsolationForestDetector, IsolationForestDetector
+
+    train, cal, test = _iforest_world()
+    ifo = AiIsolationForestDetector(["fa", "fb"], seed=3)
+    assert (ifo.name, ifo.layer) == ("ai.iforest", "ai")
+    ifo.fit(train)
+    base = IsolationForestDetector(["fa", "fb"], seed=3)
+    base.fit(train)
+    # the raw score is the baseline iforest's; only the name and the layer differ
+    np.testing.assert_array_equal(ifo.score(test), base.score(test))
+    cal = cal.with_columns(pl.Series("score__ai.iforest", ifo.score(cal)))
+    test = test.with_columns(pl.Series("score__ai.iforest", ifo.score(test)))
+    for ai in (AiFusion(), AiFusion("shift", 1.0), AiFusion("exclude")):
+        ch = ai_chief(ai, Stub("stat.a", "stat"), ifo)
+        ch.calibrate(cal)
+        out = ch.fuse(test)
+        p = out["p__ai.iforest"].to_numpy()
+        assert ((p > 0) & (p <= 1)).all()
+        assert p[7] == 1.0  # a NaN feature scores NaN: p = 1
+        n = ch._cal[1].size
+        assert p.min() == pytest.approx(1 / (n + 1))  # the unusual rows beat every cal score
+        np.testing.assert_array_equal(p, ch.pvalues("ai.iforest", test["score__ai.iforest"]))
+        ch.fit_threshold(ch.fuse(cal), 20.0)
+        fused = ch.fuse(test)
+        batch = ch.episodes(fused)
+        assert batch
+        st = ChiefStream(ch, provenance="replay")
+        emitted = [a for r in test.to_dicts() for a in st.step(r)] + st.flush()
+        closed = [a for a in emitted if a.status == "closed"]
+        assert sorted(a.model_dump_json() for a in closed) == sorted(
+            a.model_dump_json() for a in batch
+        )

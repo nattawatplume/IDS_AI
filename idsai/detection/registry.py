@@ -9,7 +9,12 @@ and `idsai.ai.autoencoder` never has to import this module.
 
 from collections.abc import Callable
 
-from idsai.ai.baselines import IsolationForestDetector, PCADetector, RandomDetector
+from idsai.ai.baselines import (
+    AiIsolationForestDetector,
+    IsolationForestDetector,
+    PCADetector,
+    RandomDetector,
+)
 from idsai.config import Settings
 from idsai.contracts.detector import Detector
 from idsai.detection.features.registry import model_features
@@ -81,6 +86,10 @@ def _iforest(cfg: Settings, seed: int) -> Detector:
     return IsolationForestDetector(model_features(cfg.features), seed)
 
 
+def _ai_iforest(cfg: Settings, seed: int) -> Detector:
+    return AiIsolationForestDetector(model_features(cfg.features), seed)
+
+
 def _pca(cfg: Settings, seed: int) -> Detector:
     return PCADetector(model_features(cfg.features))
 
@@ -96,6 +105,7 @@ register("baseline.kk", _kk)
 register("stat.robust_z", _robust_z)
 register("stat.cusum", lambda cfg, seed: CusumDetector())
 register("baseline.iforest", _iforest)
+register("ai.iforest", _ai_iforest)
 register("baseline.pca", _pca)
 register("baseline.random", lambda cfg, seed: RandomDetector(seed))
 register("ai.autoencoder_trade", _autoencoder)

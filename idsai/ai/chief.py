@@ -43,6 +43,12 @@ AI fusion mode (`AiFusion`, M1; the default `"fuse"` is the fusion above, unchan
   `agreement` only when `p < agreement_p * 10**-shift`.
 Every mode reads `-log10 p` from lookup tables built at calibration (per bin, already shifted),
 so batch/stream parity holds in each.
+
+Several AI detectors (M2, e.g. the autoencoder and `ai.iforest`): every `ai`-layer detector gets
+its own conformal p-value; `"fuse"` and `"shift"` put each of them in `F` (the shift applies to
+each), `"exclude"` drops them all, `"mondrian"` bins each on its own cal scores, and the `ai`
+layer still counts once in `agreement` (any of its detectors below its threshold). The state
+layout is unchanged (one entry per detector name), so `STATE_VERSION` stays 2.
 """
 
 import math

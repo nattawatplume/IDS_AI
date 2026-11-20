@@ -1,9 +1,13 @@
 """Non-AI-layer baselines (IsolationForest, PCA, random) for the baselines experiment.
 
-Baselines run alone and never take part in fusion. Rows with any NaN feature score NaN (NaN-only
-masking, as in rules/stats: ±inf is an extreme value, its standardized value is clipped to
-±`Z_CAP` so it scores finite and high). `fit` uses only fully finite rows, since mean/std and
-the sklearn models cannot be fit on inf.
+Baselines run alone and never take part in fusion. The one exception is
+`AiIsolationForestDetector` (M2): the same IsolationForest as `baseline.iforest`, named
+`ai.iforest` on the `ai` layer so the Chief fuses it like the autoencoder (its raw score goes
+through the same split-conformal p-value path; the Chief is score-agnostic).
+
+Rows with any NaN feature score NaN (NaN-only masking, as in rules/stats: ±inf is an extreme
+value, its standardized value is clipped to ±`Z_CAP` so it scores finite and high). `fit` uses
+only fully finite rows, since mean/std and the sklearn models cannot be fit on inf.
 """
 
 import hashlib
@@ -107,6 +111,13 @@ class IsolationForestDetector(_FeatureModel):
         self.requires = list(d["features"])
         self.seed = d["seed"]
         self._mu, self._sd, self._model = d["mu"], d["sd"], d["model"]
+
+
+class AiIsolationForestDetector(IsolationForestDetector):
+    """`baseline.iforest` as an AI-layer detector (M2): identical model and raw scores."""
+
+    name = "ai.iforest"
+    layer = "ai"
 
 
 class PCADetector(_FeatureModel):

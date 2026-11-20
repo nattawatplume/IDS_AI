@@ -410,3 +410,11 @@ def test_every_signature_technique_is_in_taxonomy():
     for s in load_signatures():
         assert s.technique in ids, s.sid
         assert s.technique.split(".")[0] in ids
+
+
+def test_build_ai_iforest_is_the_baseline_iforest_on_the_ai_layer():
+    (ai,) = build_detectors(["ai.iforest"], CFG, seed=4)
+    (base,) = build_detectors(["baseline.iforest"], CFG, seed=4)
+    assert (ai.name, ai.layer) == ("ai.iforest", "ai")
+    assert (base.name, base.layer) == ("baseline.iforest", "baseline")
+    assert ai.requires == base.requires == model_features(CFG.features) and ai.seed == 4
