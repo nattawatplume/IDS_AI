@@ -1094,3 +1094,28 @@ def test_m4_report_without_records(research, tmp_path):
     write(research, [rec("real_t001", "full", 2, 0, [1, 0])])
     data, _ = _report(research, tmp_path)
     assert data["m4_sell"] is None
+
+
+def test_m4_report_paired_sell_phase_differences(research, tmp_path):
+    pump = [1] * 20
+    sell_base = [False] * 18 + [None] * 2
+    sell_sell = [True] * 15 + [False] * 3 + [None] * 2
+    write(
+        research,
+        [
+            *_m4_recs("base", pump, sell_base, [False] * 20),
+            *_m4_recs("sell", pump, sell_sell, [True] * 15 + [False] * 5),
+        ],
+    )
+    data, text = _report(research, tmp_path)
+    paired = data["m4_sell"]["paired"]
+    assert set(paired) == {"recall_pump_phase", "recall_sell_phase", "recall_sell_phase_correct"}
+    sp = paired["recall_sell_phase"]
+    assert sp["n_clusters"] == 18  # events without a sell window are left out
+    assert sp["diff_mean"] == pytest.approx(15 / 18) and sp["rise"] is True
+    assert paired["recall_sell_phase_correct"]["diff_mean"] == pytest.approx(15 / 18)
+    assert paired["recall_pump_phase"]["diff_mean"] == 0.0
+    section = _section(text, "m4_sell")
+    assert "ผลต่าง recall ช่วงเทขาย (sell − base)" in section
+    assert "recall ช่วงเทขายสูงขึ้นอย่างมีนัย" in section
+    assert "ผลต่าง ระบุช่วงเทขายถูก (sell − base)" in section

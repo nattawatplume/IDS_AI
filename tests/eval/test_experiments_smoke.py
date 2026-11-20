@@ -399,6 +399,12 @@ def test_m4_sell_two_variants_from_one_fit_with_per_phase_recall(world, monkeypa
     for k in ("recall_any", "recall_correct", "fa_per_symbol_day", "fa_per_symbol_day_hard"):
         assert base["metrics"][k] == real[10.0]["metrics"][k], k
     assert base["fa_by_day"] == real[10.0]["fa_by_day"]
+    sell_keys = {"sell_status", "dump_censored", "sell_window_short", "detected_sell_phase",
+                 "detected_sell_phase_correct"}  # fmt: skip
+    assert {
+        lid: {k: v for k, v in pe.items() if k not in sell_keys}
+        for lid, pe in base["per_event"].items()
+    } == real[10.0]["per_event"]
     assert base["tau"] == real[10.0]["tau"]
     # per-phase recall on the REAL test label (pumped at noon of day 13, 120 s ramp)
     for r in (base, sell):

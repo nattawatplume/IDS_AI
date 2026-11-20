@@ -617,7 +617,12 @@ def _evaluate(
     for fused, part in zip(fused_parts, parts, strict=True):
         alerts = _episodes(chief, fused, tau)
         if phase is not None:
-            phase_pe.update(phase.per_event(alerts, part.labels))
+            ex = fused.filter((pl.col("F") >= tau) & (pl.col("F") > 0))  # the episodes' rows
+            exceed = {
+                str(k[0]): g["t_end_us"].to_numpy()
+                for k, g in ex.select("symbol", "t_end_us").group_by("symbol")
+            }
+            phase_pe.update(phase.per_event(alerts, part.labels, exceed))
         mr = match_events(alerts, part.labels, before_s, after_s)
         det_any.update(mr.detected_any)
         det_ok.update(mr.detected_correct)

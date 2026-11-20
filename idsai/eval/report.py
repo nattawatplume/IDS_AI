@@ -48,10 +48,11 @@ REAL recall_any is not significantly below V0 (paired event bootstrap, `signific
 
 M4 (`m4_sell`, budget 2): one table of the `base` (no sell-side rules) and `sell` variants on
 the REAL test split: recall per phase with a 95 % CI (pump phase = recall_any on the label's onset
-window; sell phase = an episode of any technique overlapping the measured sell window; "correct" =
-that episode names the sell phase), FA and FA-hard with their CI, and the `bear_raid` SEMI-SYN
-recall of the same variant. The paired difference `sell - base` of pump-phase recall uses the
-ablation's paired bootstrap (`_ablation_pair`); the sell rules must not lower it significantly.
+window; sell phase = an episode of any technique with an exceedance row in
+`(t_peak + 60 s, t_peak + dump_tau]`; "correct" = that episode names the sell phase), FA and
+FA-hard with their CI, and the `bear_raid` SEMI-SYN recall of the same variant. The paired
+differences `sell - base` of pump-phase, sell-phase and sell-phase-correct recall use the
+ablation's paired bootstrap (`_ablation_pair`); the sell rules must not lower pump recall.
 Sell-phase CIs use only the events with a sell window (one cluster per REAL event).
 
 Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
@@ -519,9 +520,14 @@ def paired_ratio_bootstrap(
 
 
 def _ablation_pair(
-    full: dict[int, dict], other: dict[int, dict], n_boot: int, min_effect: float
+    full: dict[int, dict],
+    other: dict[int, dict],
+    n_boot: int,
+    min_effect: float,
+    key: str = "detected_any",
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """One `all` vs subset row (or None and a Thai reason it was skipped).
+    """One `all` vs subset row (or None and a Thai reason it was skipped), on per-event `key`
+    (default `detected_any`; events whose `key` is None in any record are left out, M4).
 
     REAL events (label_id) are shared by every seed, so like `_paired` only the events every
     record of both arms has are kept. SEMI-SYN scenarios are drawn per seed (their ids differ
@@ -538,14 +544,23 @@ def _ablation_pair(
         events = {s: sorted(common) for s in seeds}
     else:
         events = {s: sorted(set(full[s]["per_event"]) & set(other[s]["per_event"])) for s in seeds}
+    if key != "detected_any":
+        events = {
+            s: [
+                e
+                for e in ev
+                if all(arm[s]["per_event"][e].get(key) is not None for arm in (full, other))
+            ]
+            for s, ev in events.items()
+        }
     if not any(events.values()):
         return None, "ไม่มีเหตุการณ์ร่วมกัน"
 
     def aligned(arm: dict[int, dict]) -> list[dict]:
         return [{"per_event": {e: arm[s]["per_event"][e] for e in events[s]}} for s in seeds]
 
-    keys_a, hits_a, n = _cluster_counts_keyed(aligned(full), "detected_any", unit)
-    keys_b, hits_b, n_b = _cluster_counts_keyed(aligned(other), "detected_any", unit)
+    keys_a, hits_a, n = _cluster_counts_keyed(aligned(full), key, unit)
+    keys_b, hits_b, n_b = _cluster_counts_keyed(aligned(other), key, unit)
     # same events, different (symbol, day): not comparable (equal sizes alone are not enough)
     if keys_a != keys_b or not np.array_equal(n, n_b):
         return None, "เหตุการณ์เดียวกันอยู่คนละ symbol-day ในสองฝั่ง"
@@ -843,11 +858,20 @@ M4_SELL_KEYS = {
     "recall_sell_phase_correct": "detected_sell_phase_correct",
 }
 NO_M4_TH = "ยังไม่มีผล m4_sell"
+# paired sell - base differences: metric -> per-event key
+M4_PAIRED = {"recall_pump_phase": "detected_any", **M4_SELL_KEYS}
+M4_PAIRED_TH = {
+    "recall_pump_phase": "recall ช่วงพุ่ง",
+    "recall_sell_phase": "recall ช่วงเทขาย",
+    "recall_sell_phase_correct": "ระบุช่วงเทขายถูก",
+}
 M4_NOTES_TH = [
     "ช่วงพุ่ง (pump phase) = recall_any บนหน้าต่างรอบเวลาประกาศของเหตุการณ์ (เหมือน real_t001)",
-    "ช่วงเทขาย (sell phase) = มีตอนแจ้งเตือนใดก็ได้ซ้อนกับช่วง [จุดสูงสุด, จุดสูงสุด + dump_tau] "
-    "ที่วัดจากราคาจริง (อย่างน้อย 60 วินาที ไม่เกิน 1 ชั่วโมง; ถ้าราคาไม่กลับลงภายใน 1 ชั่วโมงใช้ 1 ชั่วโมงเต็ม) "
-    "และ 'ระบุช่วงถูก' = ตอนแจ้งเตือนนั้นระบุว่าเป็นช่วงกำลังเทขาย (กฎ MM-T001.003 หรือ MM-T006)",
+    "ช่วงเทขาย (sell phase) = มีตอนแจ้งเตือนใดก็ได้ที่มีแถวเกินเกณฑ์ในช่วง (จุดสูงสุด + 60 วินาที, "
+    "จุดสูงสุด + dump_tau] ที่วัดจากราคาจริง (dump_tau อย่างน้อย 60 วินาที ไม่เกิน 1 ชั่วโมง; "
+    "ถ้าราคาไม่กลับลงภายใน 1 ชั่วโมงใช้ 1 ชั่วโมงเต็ม) ส่วนหางของตอนแจ้งเตือนช่วงพุ่งที่เลยจุดสูงสุด"
+    "ไม่ถึง 60 วินาทีจึงไม่นับ และ 'ระบุช่วงถูก' = ตอนแจ้งเตือนนั้นระบุว่าเป็นช่วงกำลังเทขาย "
+    "(แถวล่าสุดที่กฎจัดประเภทเป็น MM-T001.003 หรือ MM-T006)",
     "เหตุการณ์ที่วัดช่วงเทขายไม่ได้ไม่นับใน recall ช่วงเทขาย (นับจำนวนตามสถานะไว้ในคอลัมน์สุดท้าย)",
     "bear raid เป็นข้อมูลกึ่งสังเคราะห์ (SEMI-SYN) ทั้งหมด: ฉีดแรงขายเข้าไปในวัน test-normal จริง",
     "ทุกตัวเลขเป็นความผิดปกติทางสถิติ ไม่ใช่ความน่าจะเป็นว่ามีการปั่นหรือทุบราคา และไม่ได้บอกว่าใครทำอะไร",
@@ -930,20 +954,28 @@ def _m4(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
                 "bear_raid_provenance": "SEMI-SYN",
             }
         rows.append(row)
-    paired = None
+    pairs: dict[str, Any] = dict.fromkeys(M4_PAIRED)
     if "base" in test and "sell" in test:
-        pair, why = _ablation_pair(test["sell"], test["base"], n_boot, min_effect)
-        if pair is None:
-            paired = {"reason_th": why}
-        else:
+        for metric, key in M4_PAIRED.items():
+            pair, why = _ablation_pair(test["sell"], test["base"], n_boot, min_effect, key)
+            if pair is None:
+                pairs[metric] = {"reason_th": why}
+                continue
             # diff_mean = sell - base; `significant_reverse` = base detects significantly more
-            paired = {
+            p = {
                 k: pair[k]
                 for k in ("diff_mean", "ci", "ci_unit", "n_clusters", "n_seeds", "reason_th")
             }
-            paired["drop"] = bool(pair["significant_reverse"])
-            paired["rise"] = bool(pair["significant"])
-    return {"budget": PAIRED_BUDGET, "rows": rows, "paired_pump": paired, "notes": notes}
+            p["drop"] = bool(pair["significant_reverse"])
+            p["rise"] = bool(pair["significant"])
+            pairs[metric] = p
+    return {
+        "budget": PAIRED_BUDGET,
+        "rows": rows,
+        "paired_pump": pairs["recall_pump_phase"],
+        "paired": pairs,
+        "notes": notes,
+    }
 
 
 def _m4_md(m4: dict[str, Any] | None, min_effect: float) -> list[str]:
@@ -972,26 +1004,36 @@ def _m4_md(m4: dict[str, Any] | None, min_effect: float) -> list[str]:
             f"{_fmt_ci(r.get('bear_raid_recall_correct'), r.get('bear_raid_recall_correct_ci'))} | "
             f"{status or '–'} |"
         )
-    p = m4["paired_pump"]
-    if p is None:
-        lines += ["", "- ผลต่าง recall ช่วงพุ่ง (sell − base): ต้องมีผลทั้งสองตัวแปร"]
-    elif "diff_mean" not in p:
-        lines += ["", f"- ผลต่าง recall ช่วงพุ่ง (sell − base): {p['reason_th']}"]
-    else:
+    lines.append("")
+    for metric, p in m4["paired"].items():
+        name = M4_PAIRED_TH[metric]
+        if p is None:
+            lines.append(f"- ผลต่าง {name} (sell − base): ต้องมีผลทั้งสองตัวแปร")
+            continue
+        if "diff_mean" not in p:
+            lines.append(f"- ผลต่าง {name} (sell − base): {p['reason_th']}")
+            continue
         if p["reason_th"]:
             verdict = p["reason_th"]
         elif p["drop"]:
-            verdict = "กฎฝั่งขายทำให้ recall ช่วงพุ่งลดลงอย่างมีนัย"
+            verdict = (
+                "กฎฝั่งขายทำให้ recall ช่วงพุ่งลดลงอย่างมีนัย"
+                if metric == "recall_pump_phase"
+                else f"{name}ลดลงอย่างมีนัย"
+            )
         elif p["rise"]:
-            verdict = "recall ช่วงพุ่งสูงขึ้นอย่างมีนัย"
+            verdict = f"{name}สูงขึ้นอย่างมีนัย"
         else:
-            verdict = "recall ช่วงพุ่งไม่ลดลงอย่างมีนัย"
-        lines += [
-            "",
-            f"- ผลต่าง recall ช่วงพุ่ง (sell − base): {_fmt_ci(p['diff_mean'], p['ci'])} "
+            verdict = (
+                "recall ช่วงพุ่งไม่ลดลงอย่างมีนัย"
+                if metric == "recall_pump_phase"
+                else f"{name}ไม่ต่างกันอย่างมีนัย"
+            )
+        lines.append(
+            f"- ผลต่าง {name} (sell − base): {_fmt_ci(p['diff_mean'], p['ci'])} "
             f"({p['n_clusters']} {p['ci_unit']}, paired bootstrap) → {verdict} "
-            f"(min_effect = {min_effect:g})",
-        ]
+            f"(min_effect = {min_effect:g})"
+        )
     lines += [f"- {n}" for n in [*M4_NOTES_TH, *m4["notes"]]]
     return lines
 

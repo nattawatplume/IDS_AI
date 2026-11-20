@@ -58,22 +58,36 @@ def test_sell_phase_per_event_and_summary():
         schema=LABELS,
         orient="row",
     )
+    # windows in µs: credit only rows with t_end in (t_peak + 60 s, hi]
     sell = {
-        "A": {"status": "measured", "sell_window": [100, 200], "dump_censored": False},
-        "B": {"status": "measured", "sell_window": [1000, 2000], "dump_censored": True},
+        "A": {"status": "measured", "sell_window": [0, 300 * S], "dump_censored": False},
+        "B": {"status": "measured", "sell_window": [1000 * S, 2000 * S], "dump_censored": True},
         "C": {"status": "no_rise", "sell_window": None, "dump_censored": False},
     }
     ph = SellPhase(sell)
-    alerts = [_alert("X", 150, 160, "sell"), _alert("X", 900, 1000), _alert("Y", 0, 10**9)]
-    pe = ph.per_event(alerts, labels)
+    alerts = [
+        _alert("X", 70 * S, 200 * S, "sell"),  # fires during A's fall
+        _alert("X", 900 * S, 1050 * S),  # B: its rows end at t_peak + 50 s: a pump tail
+        _alert("Y", 0, 10**15),
+    ]
+    exceed = {"X": np.array([70, 200, 900, 1050], dtype=np.int64) * S, "Y": np.array([0])}
+    pe = ph.per_event(alerts, labels, exceed)
     assert pe["A"]["detected_sell_phase"] and pe["A"]["detected_sell_phase_correct"]
-    assert pe["B"]["detected_sell_phase"] and not pe["B"]["detected_sell_phase_correct"]
-    assert pe["B"]["dump_censored"] is True
+    assert not pe["B"]["detected_sell_phase"] and not pe["B"]["detected_sell_phase_correct"]
+    assert pe["B"]["dump_censored"] is True and pe["B"]["sell_window_short"] is False
     assert pe["C"]["detected_sell_phase"] is None and pe["C"]["sell_status"] == "no_rise"
+    # the same B with a row inside its fall is credited (any technique), but not as "correct"
+    pe2 = ph.per_event(alerts[:1] + [_alert("X", 900 * S, 1100 * S)], labels,
+                       {"X": np.array([70, 1100]) * S})  # fmt: skip
+    assert pe2["B"]["detected_sell_phase"] and not pe2["B"]["detected_sell_phase_correct"]
+    pe = pe2
     full = {k: {**v, "detected_any": k != "B"} for k, v in pe.items()}
     m = ph.summarize(full)
     assert m["recall_pump_phase"] == 2 / 3
     assert m["recall_sell_phase"] == 1.0 and m["recall_sell_phase_correct"] == 0.5
+    short = SellPhase({"A": {"status": "measured", "sell_window": [0, 60 * S]}})
+    got = short.per_event(alerts[:1], labels.head(1), {"X": np.array([30, 60]) * S})["A"]
+    assert got["sell_window_short"] is True and got["detected_sell_phase"] is False
     assert m["n_sell_events"] == 2
     assert m["sell_status_counts"] == {"measured": 2, "no_rise": 1}
     assert math.isnan(ph.summarize({})["recall_sell_phase"])
