@@ -46,6 +46,14 @@ REAL recall_any is not significantly below V0 (paired event bootstrap, `signific
 `min_effect`), the lowest accept-hard FA; ties go to the simpler one, `all` < `no_ai` <
 `ai_shift1` < `ai_shift2` < `ai_mondrian` (V0 < V1 < V3 < V2). Test numbers are only reported.
 
+M4 (`m4_sell`, budget 2): one table of the `base` (no sell-side rules) and `sell` variants on
+the REAL test split: recall per phase with a 95 % CI (pump phase = recall_any on the label's onset
+window; sell phase = an episode of any technique overlapping the measured sell window; "correct" =
+that episode names the sell phase), FA and FA-hard with their CI, and the `bear_raid` SEMI-SYN
+recall of the same variant. The paired difference `sell - base` of pump-phase recall uses the
+ablation's paired bootstrap (`_ablation_pair`); the sell rules must not lower it significantly.
+Sell-phase CIs use only the events with a sell window (one cluster per REAL event).
+
 Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
 label family, the share of events whose matched episodes carry each parent technique (or none),
 averaged over seeds; an event with several techniques counts once in each column. Needs
@@ -827,6 +835,167 @@ def _m1_md(m1: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
+M4 = "m4_sell"
+M4_VARIANTS = ("base", "sell")
+M4_LABEL = {"base": "base (ไม่มีกฎฝั่งขาย)", "sell": "sell (มีกฎฝั่งขาย)"}
+M4_SELL_KEYS = {
+    "recall_sell_phase": "detected_sell_phase",
+    "recall_sell_phase_correct": "detected_sell_phase_correct",
+}
+NO_M4_TH = "ยังไม่มีผล m4_sell"
+M4_NOTES_TH = [
+    "ช่วงพุ่ง (pump phase) = recall_any บนหน้าต่างรอบเวลาประกาศของเหตุการณ์ (เหมือน real_t001)",
+    "ช่วงเทขาย (sell phase) = มีตอนแจ้งเตือนใดก็ได้ซ้อนกับช่วง [จุดสูงสุด, จุดสูงสุด + dump_tau] "
+    "ที่วัดจากราคาจริง (อย่างน้อย 60 วินาที ไม่เกิน 1 ชั่วโมง; ถ้าราคาไม่กลับลงภายใน 1 ชั่วโมงใช้ 1 ชั่วโมงเต็ม) "
+    "และ 'ระบุช่วงถูก' = ตอนแจ้งเตือนนั้นระบุว่าเป็นช่วงกำลังเทขาย (กฎ MM-T001.003 หรือ MM-T006)",
+    "เหตุการณ์ที่วัดช่วงเทขายไม่ได้ไม่นับใน recall ช่วงเทขาย (นับจำนวนตามสถานะไว้ในคอลัมน์สุดท้าย)",
+    "bear raid เป็นข้อมูลกึ่งสังเคราะห์ (SEMI-SYN) ทั้งหมด: ฉีดแรงขายเข้าไปในวัน test-normal จริง",
+    "ทุกตัวเลขเป็นความผิดปกติทางสถิติ ไม่ใช่ความน่าจะเป็นว่ามีการปั่นหรือทุบราคา และไม่ได้บอกว่าใครทำอะไร",
+    "เกณฑ์ผลต่าง sell − base: ลดลงอย่างมีนัย = CI บนของผลต่าง < 0 และผลต่าง ≤ −min_effect",
+]
+
+
+def _m4_arms(recs: list[dict], split: str) -> dict[str, dict[int, dict]]:
+    return _m1_arms(recs, split)
+
+
+def _sell_ci(records: list[dict], key: str, n_boot: int) -> tuple[float | None, list | None, int]:
+    """Cluster-ratio recall and 95 % CI of a sell-phase key over the events that have it (REAL:
+    one cluster per label_id; None values are events without a sell window)."""
+    hits: dict[str, float] = defaultdict(float)
+    n: dict[str, int] = defaultdict(int)
+    for r in records:
+        for lid, pe in r["per_event"].items():
+            if pe.get(key) is None:
+                continue
+            hits[lid] += float(pe[key])
+            n[lid] += 1
+    keys = sorted(n)
+    if not keys:
+        return None, None, 0
+    h = np.array([hits[k] for k in keys], dtype=np.float64)
+    m = np.array([n[k] for k in keys], dtype=np.float64)
+    mean, (lo, hi) = ratio_bootstrap_ci(h, m, n_boot, CI_SEED)
+    return (
+        mean if math.isfinite(mean) else None,
+        [lo, hi] if math.isfinite(lo) else None,
+        len(keys),
+    )
+
+
+def _m4(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """M4 table (budget 2): per variant the per-phase recall, FA, FA-hard, bear-raid recall."""
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == M4 and float(r["budget"]) == PAIRED_BUDGET]
+    )
+    if not recs:
+        return None
+    notes = [config_note] if config_note else []
+    test, raid = _m4_arms(recs, "test"), _m4_arms(recs, "bear_raid")
+    rows = []
+    for v in [x for x in M4_VARIANTS if x in test or x in raid] + sorted(
+        (set(test) | set(raid)) - set(M4_VARIANTS)
+    ):
+        row: dict[str, Any] = {"variant": v, "label": M4_LABEL.get(v, v)}
+        if v in test:
+            tr = list(test[v].values())
+            c = _cell(tr, n_boot)
+            m, ci, fa_ci = c["mean"] or {}, c["ci"] or {}, c["fa_ci"] or {}
+            row |= {
+                "n_seeds": c["n_seeds"],
+                "n_events": c["n_events"],
+                "recall_pump_phase": m.get("recall_any"),
+                "recall_pump_phase_ci": ci.get("recall_any"),
+                "fa": m.get("fa_per_symbol_day"),
+                "fa_ci": fa_ci.get("fa_per_symbol_day"),
+                "fa_hard": m.get("fa_per_symbol_day_hard"),
+                "fa_hard_ci": fa_ci.get("fa_per_symbol_day_hard"),
+            }
+            for metric, key in M4_SELL_KEYS.items():
+                mean, sci, k = _sell_ci(tr, key, n_boot)
+                row[metric], row[f"{metric}_ci"] = mean, sci
+                row["n_sell_events"] = k
+            status: dict[str, int] = {}
+            for r in tr[:1]:  # the same labels in every seed
+                status = dict((r["metrics"] or {}).get("sell_status_counts") or {})
+            row["sell_status_counts"] = status
+        if v in raid:
+            c = _cell(list(raid[v].values()), n_boot)
+            m, ci = c["mean"] or {}, c["ci"] or {}
+            row |= {
+                "bear_raid_recall_any": m.get("recall_any"),
+                "bear_raid_recall_any_ci": ci.get("recall_any"),
+                "bear_raid_recall_correct": m.get("recall_correct"),
+                "bear_raid_recall_correct_ci": ci.get("recall_correct"),
+                "bear_raid_provenance": "SEMI-SYN",
+            }
+        rows.append(row)
+    paired = None
+    if "base" in test and "sell" in test:
+        pair, why = _ablation_pair(test["sell"], test["base"], n_boot, min_effect)
+        if pair is None:
+            paired = {"reason_th": why}
+        else:
+            # diff_mean = sell - base; `significant_reverse` = base detects significantly more
+            paired = {
+                k: pair[k]
+                for k in ("diff_mean", "ci", "ci_unit", "n_clusters", "n_seeds", "reason_th")
+            }
+            paired["drop"] = bool(pair["significant_reverse"])
+            paired["rise"] = bool(pair["significant"])
+    return {"budget": PAIRED_BUDGET, "rows": rows, "paired_pump": paired, "notes": notes}
+
+
+def _m4_md(m4: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = ["", f"### m4_sell: ตรวจช่วงกำลังพุ่งและช่วงกำลังเทขาย (budget {PAIRED_BUDGET:g})"]
+    if m4 is None:
+        return [*lines, "", f"- {NO_M4_TH}"]
+    lines += [
+        "",
+        "| ตัวแปร | seeds | events (REAL) | recall ช่วงพุ่ง [95% CI] | recall ช่วงเทขาย [95% CI] | "
+        "ระบุช่วงเทขายถูก [95% CI] | FA/symbol-day [95% CI] | FA hard [95% CI] | "
+        "bear raid recall_any [95% CI] (SEMI-SYN) | bear raid recall_correct [95% CI] (SEMI-SYN) | "
+        "สถานะการวัดช่วงเทขาย |",
+        "|" + "---|" * 11,
+    ]
+    for r in m4["rows"]:
+        g = r.get
+        status = ", ".join(f"{k} {v}" for k, v in (r.get("sell_status_counts") or {}).items())
+        lines.append(
+            f"| {r['label']} | {r.get('n_seeds', '–')} | {r.get('n_events', '–')} | "
+            f"{_fmt_ci(r.get('recall_pump_phase'), r.get('recall_pump_phase_ci'))} | "
+            f"{_fmt_ci(r.get('recall_sell_phase'), r.get('recall_sell_phase_ci'))} | "
+            f"{_fmt_ci(g('recall_sell_phase_correct'), g('recall_sell_phase_correct_ci'))} | "
+            f"{_fmt_ci(r.get('fa'), r.get('fa_ci'))} | "
+            f"{_fmt_ci(r.get('fa_hard'), r.get('fa_hard_ci'))} | "
+            f"{_fmt_ci(r.get('bear_raid_recall_any'), r.get('bear_raid_recall_any_ci'))} | "
+            f"{_fmt_ci(r.get('bear_raid_recall_correct'), r.get('bear_raid_recall_correct_ci'))} | "
+            f"{status or '–'} |"
+        )
+    p = m4["paired_pump"]
+    if p is None:
+        lines += ["", "- ผลต่าง recall ช่วงพุ่ง (sell − base): ต้องมีผลทั้งสองตัวแปร"]
+    elif "diff_mean" not in p:
+        lines += ["", f"- ผลต่าง recall ช่วงพุ่ง (sell − base): {p['reason_th']}"]
+    else:
+        if p["reason_th"]:
+            verdict = p["reason_th"]
+        elif p["drop"]:
+            verdict = "กฎฝั่งขายทำให้ recall ช่วงพุ่งลดลงอย่างมีนัย"
+        elif p["rise"]:
+            verdict = "recall ช่วงพุ่งสูงขึ้นอย่างมีนัย"
+        else:
+            verdict = "recall ช่วงพุ่งไม่ลดลงอย่างมีนัย"
+        lines += [
+            "",
+            f"- ผลต่าง recall ช่วงพุ่ง (sell − base): {_fmt_ci(p['diff_mean'], p['ci'])} "
+            f"({p['n_clusters']} {p['ci_unit']}, paired bootstrap) → {verdict} "
+            f"(min_effect = {min_effect:g})",
+        ]
+    lines += [f"- {n}" for n in [*M4_NOTES_TH, *m4["notes"]]]
+    return lines
+
+
 RETRAIN = "retrain_drift"
 RETRAIN_PAIRS = {"primary": ("v1", "v2"), "ai_only": ("v1:ai", "v2:ai")}
 AI_ONLY_LABEL = "AE alone (diagnostic)"
@@ -1153,6 +1322,7 @@ def build_report(
     paired_ablation = _paired_ablation(runs, n_boot, cfg.eval.min_effect)
     retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
     m1 = _m1(runs, n_boot, cfg.eval.min_effect)
+    m4 = _m4(runs, n_boot, cfg.eval.min_effect)
     confusion = _confusion(runs)
     data = {
         "header": header,
@@ -1165,6 +1335,7 @@ def build_report(
         "paired_ablation": paired_ablation,
         "retrain_decision": retrain,
         "m1_fusion": m1,
+        "m4_sell": m4,
         "confusion": confusion,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
@@ -1209,6 +1380,8 @@ def build_report(
             lines += _paired_ablation_md(paired_ablation, cfg.eval.min_effect)
         if exp == M1:
             lines += _m1_md(m1, cfg.eval.min_effect)
+        if exp == M4:
+            lines += _m4_md(m4, cfg.eval.min_effect)
     lines += [
         "",
         f"## AE vs baselines (paired bootstrap, budget {PAIRED_BUDGET:g}, real_t001 events)",

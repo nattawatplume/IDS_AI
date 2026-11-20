@@ -1010,3 +1010,87 @@ def test_m1_report_excludes_undecided_variants_with_a_thai_reason(research, tmp_
     section = _section(text, "m1_fusion")
     assert "ตัดออก V1 no_ai: ตัดสิน recall เทียบ V0 ไม่ได้" in section
     assert "**ผลการเลือก (accept):** V0 all" in section
+
+
+# ---------------------------------------------------------------- M4 sell side
+
+
+def _m4_recs(variant, pump, sell, sell_ok, seeds=(0, 1), fa=1.0):
+    """test:<variant> records; `sell[i]` None = event i has no sell window."""
+    out = []
+    for s in seeds:
+        r = rec("m4_sell", f"test:{variant}", 2, s, pump, sell_side=variant == "sell")
+        r["metrics"]["fa_per_symbol_day"] = fa
+        for i, pe in enumerate(r["per_event"].values()):
+            pe["sell_status"] = "measured" if sell[i] is not None else "no_rise"
+            pe["detected_sell_phase"] = sell[i]
+            pe["detected_sell_phase_correct"] = None if sell[i] is None else sell_ok[i]
+        n_none = sum(x is None for x in sell)
+        r["metrics"]["sell_status_counts"] = {"measured": len(sell) - n_none, "no_rise": n_none}
+        out.append(r)
+    return out
+
+
+def _raid_recs(variant, detected, seeds=(0, 1)):
+    days = [("ABCBTC", f"2021-01-{1 + i:02d}") for i in range(len(detected))]
+    return [
+        rec("m4_sell", f"bear_raid:{variant}", 2, s, detected, provenance="SEMI-SYN", days=days)
+        for s in seeds
+    ]
+
+
+def test_m4_report_section_per_phase_and_paired_pump_recall(research, tmp_path):
+    pump = [1] * 15 + [0] * 5
+    sell = [True] * 6 + [False] * 10 + [None] * 4
+    records = [
+        *_m4_recs("base", pump, sell, [False] * 20),
+        *_m4_recs(
+            "sell", pump, [True] * 12 + [False] * 4 + [None] * 4, [True] * 10 + [False] * 10, fa=1.2
+        ),  # fmt: skip
+        *_raid_recs("base", [0] * 12),
+        *_raid_recs("sell", [1] * 9 + [0] * 3),
+    ]
+    write(research, records)
+    data, text = _report(research, tmp_path)
+    m4 = data["m4_sell"]
+    rows = {r["variant"]: r for r in m4["rows"]}
+    assert [r["variant"] for r in m4["rows"]] == ["base", "sell"]
+    b, s = rows["base"], rows["sell"]
+    assert b["recall_pump_phase"] == pytest.approx(0.75) and b["recall_pump_phase_ci"]
+    assert b["n_sell_events"] == 16  # events without a sell window are left out
+    assert b["recall_sell_phase"] == pytest.approx(6 / 16)
+    assert s["recall_sell_phase"] == pytest.approx(12 / 16)
+    assert b["recall_sell_phase_correct"] == 0.0
+    assert s["recall_sell_phase_correct"] == pytest.approx(10 / 16)
+    assert s["fa"] == pytest.approx(1.2) and b["fa_hard"] == pytest.approx(3.0)
+    assert b["sell_status_counts"] == {"measured": 16, "no_rise": 4}
+    assert s["bear_raid_recall_any"] == pytest.approx(0.75) and s["bear_raid_recall_any_ci"]
+    assert b["bear_raid_recall_any"] == 0.0 and s["bear_raid_provenance"] == "SEMI-SYN"
+    p = m4["paired_pump"]
+    assert p["diff_mean"] == 0.0 and p["drop"] is False and p["n_clusters"] == 20
+    section = _section(text, "m4_sell")
+    assert "### m4_sell" in section and "recall ช่วงเทขาย" in section
+    assert "recall ช่วงพุ่งไม่ลดลงอย่างมีนัย" in section
+    assert "ความผิดปกติทางสถิติ" in section and "ไม่ใช่ความน่าจะเป็น" in section
+    assert "SEMI-SYN" in section and "accuracy" not in section.lower()
+
+
+def test_m4_report_flags_a_significant_pump_recall_drop(research, tmp_path):
+    sell = [True] * 20
+    write(
+        research,
+        [
+            *_m4_recs("base", [1] * 18 + [0] * 2, sell, sell),
+            *_m4_recs("sell", [1] * 8 + [0] * 12, sell, sell),
+        ],
+    )
+    data, text = _report(research, tmp_path)
+    p = data["m4_sell"]["paired_pump"]
+    assert p["diff_mean"] == pytest.approx(-0.5) and p["drop"] is True
+    assert "กฎฝั่งขายทำให้ recall ช่วงพุ่งลดลงอย่างมีนัย" in _section(text, "m4_sell")
+
+
+def test_m4_report_without_records(research, tmp_path):
+    write(research, [rec("real_t001", "full", 2, 0, [1, 0])])
+    data, _ = _report(research, tmp_path)
+    assert data["m4_sell"] is None
