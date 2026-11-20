@@ -19,6 +19,12 @@ batch run to reproduce it bit-for-bit (the baseline schedule itself is start-ind
 Memory: after every `extend` the bar and KK-history buffers are trimmed to what later rows can
 read (`Kernel._bars_keep` bars, `Kernel._rows_keep` rows). Only the front of a buffer is dropped:
 prefix values are never rebased, so the kept values, and every later row, stay bit-identical.
+
+Sell side (M4, `FeatureCfg.sell_side`): the raw vector gets `sell_rush_*` and `drop_*` appended
+(`sell_raw_vector`), the baseline z-scores them like the others (every baseline statistic is per
+column, so the existing columns do not change), and `cusum_sell` is the one-sided CUSUM of the
+negative 10 s imbalance z. The row is `raw, z, state, sell raw, sell z, cusum_sell`. With the flag
+off none of this runs: the code path and the rows are the pre-M4 ones.
 """
 
 import math
@@ -30,6 +36,7 @@ import polars as pl
 from idsai.config import FeatureCfg
 from idsai.detection.features.registry import (
     REGISTRY,
+    SELL_WINDOW_BASES,
     WINDOW_BASES,
     feature_columns,
     raw_columns,
@@ -68,6 +75,8 @@ _RAW_ORDER = (
     "jump",
 )
 assert WINDOW_BASES == _RAW_ORDER, "registry window-feature order changed; update raw_vector"
+_SELL_RAW_ORDER = ("sell_rush", "drop")
+assert SELL_WINDOW_BASES == _SELL_RAW_ORDER, "sell feature order changed; update sell_raw_vector"
 
 
 # ---------------------------------------------------------------- primitives
@@ -158,6 +167,41 @@ def raw_vector(
     return raw
 
 
+def sell_raw_vector(
+    pcs: np.ndarray,
+    close: np.ndarray,
+    low: np.ndarray,
+    i_end: int,
+    windows: np.ndarray,
+) -> np.ndarray:
+    """Sell-side raw window features for the row ending at bar index `i_end` (M4).
+
+    `pcs` = int64 prefix sums of `sell_rush_orders` (leading zero). Returns `sell_rush_<W>` for
+    every window, then `drop_<W>` = lowest low of bars `[i_end - W, i_end)` / close before the
+    window - 1 (the mirror of `jump`). Windows longer than `i_end` are NaN; reads only bar
+    indices < i_end (and `pcs[:i_end + 1]`).
+    """
+    w = windows
+    ok = w <= i_end
+    lo = np.where(ok, i_end - w, 0)
+    srush = (pcs[i_end] - pcs[lo]).astype(np.float64)
+    pi = i_end - 1 - w
+    c_prev = np.where(pi >= 0, close[np.maximum(pi, 0)], np.nan)
+    c_prev = np.where(c_prev > 0, c_prev, np.nan)
+    ls = low[max(i_end - int(w.max()), 0) : i_end][::-1]
+    if len(ls):
+        cm = np.minimum.accumulate(ls)  # cm[k] = min(low[i_end-1-k : i_end]); NaN propagates
+        lmin = np.where(ok, cm[np.clip(w, 1, len(ls)) - 1], np.nan)
+    else:
+        lmin = np.full(len(w), np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        drop = lmin / c_prev - 1.0
+    raw = np.concatenate([srush, drop])
+    if not ok.all():
+        raw[np.tile(~ok, len(_SELL_RAW_ORDER))] = np.nan
+    return raw
+
+
 def kk_row(
     hist_qv: np.ndarray, hist_close: np.ndarray, r: int, step: int, qv_now: float, close_now: float
 ) -> tuple[float, float]:
@@ -217,13 +261,19 @@ class BarArrays:
     rush_orders: np.ndarray
     pingpong: np.ndarray
     n_round: np.ndarray
+    # read only with `sell_side` (M4); None when the source has no such column
+    low: np.ndarray | None = None
+    sell_rush_orders: np.ndarray | None = None
 
-    _INT = ("t_us", "n_trades", "rush_orders", "pingpong", "n_round")
+    _INT = ("t_us", "n_trades", "rush_orders", "pingpong", "n_round", "sell_rush_orders")
+    _OPTIONAL = ("low", "sell_rush_orders")
 
     @classmethod
     def from_frame(cls, bars: pl.DataFrame) -> "BarArrays":
         cols = {}
         for f in fields(cls):
+            if f.name in cls._OPTIONAL and f.name not in bars.columns:
+                continue
             s = bars[f.name]
             if f.name in cls._INT:
                 if s.null_count():
@@ -237,7 +287,12 @@ class BarArrays:
         return len(self.t_us)
 
     def slice(self, i: int, j: int) -> "BarArrays":
-        return BarArrays(**{f.name: getattr(self, f.name)[i:j] for f in fields(self)})
+        return BarArrays(
+            **{
+                f.name: None if (a := getattr(self, f.name)) is None else a[i:j]
+                for f in fields(self)
+            }
+        )
 
 
 # ---------------------------------------------------------------- baseline
@@ -371,6 +426,8 @@ class Kernel:
         self.quote_unit = float(quote_unit)
         self.columns = feature_columns(cfg)
         self.raw_cols = raw_columns(cfg)
+        self._sell = bool(cfg.sell_side)
+        self._n_main = len(WINDOW_BASES) * len(cfg.windows_s)  # raw columns before the sell ones
         self._w = np.array(cfg.windows_s, dtype=np.int64)
         self._max_w = int(self._w.max())
         self._stride_us = cfg.stride_s * S_US
@@ -409,6 +466,11 @@ class Kernel:
         self._hist_close = _Buf(np.float64)
         self._s_ret = 0.0
         self._s_imb = 0.0
+        if self._sell:
+            self._pcs = _Buf(np.int64)
+            self._pcs.extend(np.zeros(1, dtype=np.int64))
+            self._low = _Buf(np.float64)
+            self._s_sell = 0.0
 
     @property
     def n_bars(self) -> int:
@@ -430,8 +492,12 @@ class Kernel:
         rush_orders: int,
         pingpong: int,
         n_round: int,
+        low: float | None = None,
+        sell_rush_orders: int | None = None,
     ) -> tuple[int, np.ndarray] | None:
-        """Append one bar; return `(t_end_us, row)` if a row ends at `t_us + 1 s`, else None."""
+        """Append one bar; return `(t_end_us, row)` if a row ends at `t_us + 1 s`, else None.
+
+        `low` and `sell_rush_orders` are required with `sell_side` and ignored without it."""
         a = BarArrays(
             t_us=np.array([t_us], dtype=np.int64),
             n_trades=np.array([n_trades], dtype=np.int64),
@@ -443,6 +509,10 @@ class Kernel:
             rush_orders=np.array([rush_orders], dtype=np.int64),
             pingpong=np.array([pingpong], dtype=np.int64),
             n_round=np.array([n_round], dtype=np.int64),
+            low=None if low is None else np.array([low], dtype=np.float64),
+            sell_rush_orders=(
+                None if sell_rush_orders is None else np.array([sell_rush_orders], dtype=np.int64)
+            ),
         )
         t_end, rows = self.extend(a)
         return (int(t_end[0]), rows[0]) if len(t_end) else None
@@ -461,6 +531,8 @@ class Kernel:
         expect = self.t0_us + (n0 + np.arange(m, dtype=np.int64)) * S_US
         if not np.array_equal(t, expect):
             raise ValueError("bars must be contiguous 1 s bars in time order")
+        if self._sell and (bars.low is None or bars.sell_rush_orders is None):
+            raise ValueError("sell_side needs the bars' low and sell_rush_orders")
 
         counts = np.column_stack([bars.n_trades, bars.rush_orders, bars.pingpong, bars.n_round])
         flows = np.column_stack([bars.buy_quote, bars.sell_quote, bars.quote_vol])
@@ -474,6 +546,10 @@ class Kernel:
         self._close.extend(close)
         self._high.extend(bars.high.astype(np.float64, copy=False))
         self._rel.extend(rel)
+        if self._sell:
+            srush = bars.sell_rush_orders.astype(np.int64, copy=False)
+            self._pcs.extend(prefix(srush, start=self._pcs.data[self._pcs.n - 1])[1:])
+            self._low.extend(bars.low.astype(np.float64, copy=False))
 
         t_end = t + S_US
         due = (t_end % self._stride_us == 0) & (t_end >= self.t0_us + self._max_w * S_US)
@@ -488,7 +564,10 @@ class Kernel:
         """Drop buffer fronts no later row can read; never changes a kept value."""
         k = self._close.n - self._bars_keep
         if k >= TRIM_SLACK_S:
-            for buf in (self._pc, self._pf, self._close, self._high, self._rel):
+            bufs = [self._pc, self._pf, self._close, self._high, self._rel]
+            if self._sell:
+                bufs += [self._pcs, self._low]
+            for buf in bufs:
                 buf.drop_front(k)
             self._dropped_bars += k
         k = self._hist_qv.n - self._rows_keep
@@ -511,6 +590,11 @@ class Kernel:
             i_end,
             self._w,
         )
+        if self._sell:
+            sell = sell_raw_vector(
+                self._pcs.data[: i_end + 1], close, self._low.data[:i_end], i_end, self._w
+            )
+            raw = np.concatenate([raw, sell])
         xt = raw.copy()
         xt[self._log_idx] = np.log1p(raw[self._log_idx])
         xt[self._q_idx] = np.log1p(raw[self._q_idx] / self.quote_unit)
@@ -538,7 +622,14 @@ class Kernel:
         )
         self._hist_qv.extend(np.array([qv_now]))
         self._hist_close.extend(np.array([c_now]))
-        return np.concatenate([raw, z, [self._s_ret, self._s_imb, kk_v, kk_p]])
+        if not self._sell:
+            return np.concatenate([raw, z, [self._s_ret, self._s_imb, kk_v, kk_p]])
+        # selling pressure = a negative imbalance z: CUSUM of -z (NaN counts as 0)
+        self._s_sell = cusum_step(self._s_sell, -z[self._i_imb])
+        n = self._n_main
+        return np.concatenate(
+            [raw[:n], z[:n], [self._s_ret, self._s_imb, kk_v, kk_p], raw[n:], z[n:], [self._s_sell]]
+        )
 
 
 def raw_row(bar_arrays: BarArrays, i_end: int, cfg: FeatureCfg, quote_unit: float) -> dict:
@@ -553,4 +644,7 @@ def raw_row(bar_arrays: BarArrays, i_end: int, cfg: FeatureCfg, quote_unit: floa
     pf = prefix(np.column_stack([a.buy_quote, a.sell_quote, a.quote_vol]))
     w = np.array(cfg.windows_s, dtype=np.int64)
     v = raw_vector(pc, pf, a.close, a.high, i_end, w)
+    if cfg.sell_side:
+        sell = sell_raw_vector(prefix(a.sell_rush_orders), a.close, a.low, i_end, w)
+        v = np.concatenate([v, sell])
     return dict(zip(raw_columns(cfg), v.tolist(), strict=True))

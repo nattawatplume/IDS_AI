@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+    model_serializer,
+    model_validator,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
@@ -43,6 +51,18 @@ class FeatureCfg(_Cfg):
     baseline_refresh_s: int = 300
     min_baseline_samples: int = 360
     quote_unit: dict[str, float] = {"BTC": 1e-4, "USDT": 1.0}
+    # M4: sell-side features (`sell_rush`, `drop`, `cusum_sell`) and the sell-side signatures
+    # (`configs/signatures_sell.yaml`). Off by default; off leaves every output bit-identical.
+    sell_side: bool = False
+
+    @model_serializer(mode="wrap")
+    def _drop_default_sell_side(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # off = absent from every dump, so config_hash, the feature-cache key and every stored
+        # config stay byte-identical to the ones made before the flag existed
+        out = handler(self)
+        if not self.sell_side:
+            out.pop("sell_side", None)
+        return out
 
     @model_validator(mode="after")
     def _check_grid(self) -> "FeatureCfg":

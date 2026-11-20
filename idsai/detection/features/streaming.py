@@ -37,6 +37,8 @@ class StreamingWindows:
             rush_orders=bar["rush_orders"],
             pingpong=bar["pingpong"],
             n_round=bar["n_round"],
+            low=bar.get("low"),
+            sell_rush_orders=bar.get("sell_rush_orders"),  # needed only with sell_side
         )
         if out is None:
             return None
