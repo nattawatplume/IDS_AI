@@ -81,21 +81,25 @@ Source: `docs/ROADMAP.md` M4. Branch `feat/m4` (worktree), cut from `feat/m1`.
   the signatures sha.
 
 ### Thresholds (train split only, `scripts/tune_sell_rules.py`)
-- Data: the first 30 REAL train labels (<= 2019-06-30) measured as pumps
+- Data: the first 30 REAL train labels (<= 2019-06-30) **in time order** that measure as pumps
   (`pump_measure`, statuses on the way: 30 measured, 1 late_peak, 2 no_rise, 1 missing_day) and
   20 train normal days (one stored day per symbol, >= 3 days from any label). Read-only from the
   main checkout's Parquet partitions; no DuckDB opened; output JSON in a scratch dir.
 - Grid of the shared falling conditions: `ret_60 <= {-0.01, -0.02, -0.03}` x
   `z_sell_rush_60 >= {2, 3, 4}` x `z_quote_vol_60 >= {2, 3, 4, 6}`. Score: share of measured
-  pumps where the conditions fire inside the sell window, and fired episodes per normal day.
-- Result: the mirrored `z_quote_vol_60 >= 6` never fired in a sell window (0/30). `>= 3` fired in
-  9/30 (at ret -0.02, sell-rush 4) with 0 episodes on the 20 normal days; `>= 2` reaches 19/30 but
-  costs 0.25-1.3 episodes per normal day. `ret_60` and `z_sell_rush_60` barely mattered (one event
-  of 30 between -0.01 and -0.02).
+  pumps where the conditions fire in the eval's sell-phase credit interval
+  `(t_peak + 60 s, t_peak + clip(dump_tau, 60 s, 1 h)]` (review fix: the first run used
+  `(t_peak, hi + 60 s]` and counted 9/30), and fired episodes per normal day.
+- Result (re-run with the eval interval): the mirrored `z_quote_vol_60 >= 6` never fired (0/30).
+  `>= 3` fired in 5/30 (any ret / sell-rush value in the grid) with 0 episodes on the 20 normal
+  days; `>= 2` reaches 13/30 but costs 0.15-1.3 episodes per normal day. `ret_60` and
+  `z_sell_rush_60` made no difference at `>= 3`. The choice did not change.
+- FA bound from the normal days: 0 episodes on 20 days gives, by the rule of three, a 95 % upper
+  bound of about 3 / 20 = 0.15 episodes per symbol-day for the sell rules' falling conditions.
 - Chosen (rule: change as few mirrored thresholds as possible; keep 0 normal-day episodes): only
   `z_quote_vol_60` 6 -> 3. Final, both rules: `z_quote_vol_60 >= 3`, `ret_60 <= -0.02`,
-  `z_sell_rush_60 >= 4`, plus `jump_1800 >= 0.03` (dump, sid 100104) or `jump_1800 <= 0.03`
-  (bear raid, sid 100601). `rev: 1`.
+  `z_sell_rush_60 >= 4`, plus `jump_1800 >= 0.03` (dump, sid 100104) or `jump_1800 <= 0.0299999`
+  (bear raid, sid 100601, strictly below the dump rule). `rev: 1`.
 - Caveat: 30 events / 20 normal days is a small sample; the FA cost on the full test split is what
   `m4_sell` will show. No train bear raids exist (the real labels are pumps), so the bear-raid
   rule is only checked on SEMI-SYN.
@@ -110,18 +114,31 @@ Source: `docs/ROADMAP.md` M4. Branch `feat/m4` (worktree), cut from `feat/m1`.
    set only when the Chief has at least one sell-side rule; otherwise every pump alert would gain
    `phase: "pump"` with the flag off and the alerts would no longer be bit-identical. `phase` None
    is also left out of the JSON dump, so old and flag-off alerts serialize exactly as before.
-   Episodes attributed by `stat.cusum` (no signature) have phase None.
+   Review fix: the phase follows the episode's **latest rule-classified row** (`last_sig`, folded
+   in the shared `_Attribution.merge`, batch and stream alike), while `technique_id` /
+   `signature_id` stay the highest-F classified row's. A pump episode that turns into a dump now
+   reports `phase: "sell"` (tested, with and without `stat.cusum`, batch == stream); `ChiefStream`
+   emits an `updated` alert when the phase changes. Rows classified only by `stat.cusum` (no
+   signature) do not move `last_sig`; an episode with no rule row has phase None.
 3. Signatures are conjunctions only, so the spec's "`z_sell_rush_60 >= 4` or `z_quote_vol_60 >= 6`"
-   became both conditions (the pump-burst rule's shape). `jump_1800 < 0.03` is written `<= 0.03`
-   (the only ops are >=, <=, abs<=); at exactly 0.03 both rules can fire and the Chief takes the
-   first (dump).
+   became both conditions (the pump-burst rule's shape). `jump_1800 < 0.03` is written
+   `<= 0.0299999` (the only ops are >=, <=, abs<=), so the two rules never both fire. The
+   bear-raid rule is named after the taxonomy: "ทุบราคา (bear raid) เทขายแบบพุ่งเร็ว (burst)".
 4. Dump-phase sid is 100104: 100103 (the family's next number) is the Kamps-Kleinberg baseline.
 5. Sell window: `[t_peak, t_peak + clip(dump_tau_s, 60 s, 1 h)]`; a right-censored dump
    (`dump_tau_s` None) gets the full hour and is flagged `dump_censored`. Labels with any other
-   status are excluded from the sell-phase recall and counted per status. `recall_pump_phase` is
-   `recall_any` (no extra per-event key). The measurement code moved from
-   `scripts/measure_pumps.py` to `idsai/eval/pump_measure.py` (the script re-exports it; its tests
-   pass unchanged).
+   status are excluded from the sell-phase recall and counted per status. Review fix: an episode
+   counts for the sell phase only if it has an exceedance row with `t_end` in
+   `(t_peak + 60 s, hi]`, so the tail of a pump episode does not earn credit; a label whose window
+   is at most 60 s (`dump_tau_s <= 60`) has an empty interval, is flagged `sell_window_short` and
+   can only count as missed. `recall_pump_phase` is `recall_any` (no extra per-event key). The
+   report adds paired `sell - base` differences for pump-phase, sell-phase and
+   sell-phase-correct recall (same paired bootstrap; events without a sell window left out).
+   The measurement code moved from `scripts/measure_pumps.py` to `idsai/eval/pump_measure.py`
+   (the script re-exports it through `__all__`; its tests pass unchanged). The eval reads trades
+   through `Store`; the script reads the Parquet partitions directly (same files, same
+   measurement core `measure_trades`). Measurements are cached per (data dir, label_id), so a
+   multi-seed run measures each label once.
 6. `m4_sell` computes every feature with the flag on and scores once; `base` = the configured
    detectors minus the sell rules, `sell` = all. Because existing columns are bit-identical,
    `test:base` reproduces `real_t001 full` exactly (asserted in the smoke test). All records keep
@@ -130,13 +147,16 @@ Source: `docs/ROADMAP.md` M4. Branch `feat/m4` (worktree), cut from `feat/m1`.
    as reference).
 7. The bear-raid scenario ranges reuse the `pump_burst` test ranges for both regions (there are no
    measured bear raids to fit).
+8. Bars always carry `sell_rush_orders`, but the live / replay pipeline publishes it on the `bars`
+   bus topic (SSE) only with the flag on, so the product API is unchanged with the flag off.
 
 ### Open risks
-- A real dump usually follows its pump within the Chief's 300 s suppression, so the pump and dump
-  rows merge into one episode named by its highest-F classified row (often a pump rule): such an
-  episode overlaps the sell window (counts for `recall_sell_phase`) but its phase is "pump", so
-  `recall_sell_phase_correct` can stay low by construction. The synthetic test shows exactly this
-  (rise-then-crash -> one "pump" episode).
+- A real dump usually follows its pump within the Chief's 300 s suppression, so pump and dump
+  rows merge into one episode. Its `technique_id` / `signature_id` stay those of the highest-F
+  classified row (often a pump rule), while its phase follows the latest rule row (the dump). The
+  phase therefore says "sell" once the dump rule has fired, but the technique shown may still be
+  a pump sub-technique's parent; readers should take the phase badge as the current phase.
+- Labels with `dump_tau_s <= 60 s` cannot be credited for the sell phase (empty credit interval).
 - The head's `m4_sell` run writes a second feature cache (`data/features/fs1-<hash with
   sell_side>`), about the size of the existing one, and adds one SEMI-SYN family's worth of loads.
 - Not run here: the real `m4_sell` eval (only the synthetic smoke test).
