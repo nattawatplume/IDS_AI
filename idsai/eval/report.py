@@ -46,6 +46,16 @@ REAL recall_any is not significantly below V0 (paired event bootstrap, `signific
 `min_effect`), the lowest accept-hard FA; ties go to the simpler one, `all` < `no_ai` <
 `ai_shift1` < `ai_shift2` < `ai_mondrian` (V0 < V1 < V3 < V2). Test numbers are only reported.
 
+M2 (`m2_ai`, budget 2): one table per split (accept, test, semisyn) of every `<model>:<fusion>`
+variant and the reference `no_ai`, with the paired recall_any difference `X - no_ai`. The
+variant is chosen on the accept split only, by a rule fixed in advance (`m2_select`): eligible
+are the variants whose accept-hard FA and accept FA are each at most `M2_FA_FACTOR` (1.10) times
+`no_ai`'s; among them the one with the largest paired recall_any gain over `no_ai` (ties go to
+the simpler: fewer AI models, then AE before iforest (`ae` < `ae_narrow` < `ae_wide`), then
+`fuse` < `shift1` < `shift2`) wins only if that gain is significant (`significant` with
+`min_effect`); otherwise the pick is `no_ai`. A variant without a paired gain is not eligible.
+A paired line `test:ae:alone` vs `test:iforest:alone` answers the ROADMAP M2 question.
+
 M4 (`m4_sell`, budget 2): one table of the `base` (no sell-side rules) and `sell` variants on
 the REAL test split: recall per phase with a 95 % CI (pump phase = recall_any on the label's onset
 window; sell phase = an episode of any technique with an exceedance row in
@@ -74,7 +84,16 @@ import numpy as np
 from idsai.ai.learning import compare
 from idsai.config import Settings, load_settings
 from idsai.data.store import Store
-from idsai.eval.experiments import AE, BASELINES, EXPERIMENTS
+from idsai.eval.experiments import (
+    AE,
+    BASELINES,
+    EXPERIMENTS,
+    M2_AE_GRID,
+    M2_ALONE,
+    M2_FUSIONS,
+    M2_MODELS,
+    M2_REF,
+)
 from idsai.eval.metrics import (
     MIN_EVENTS,
     UNCLASSIFIED,
@@ -850,6 +869,253 @@ def _m1_md(m1: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
+M2 = "m2_ai"
+M2_FA_FACTOR = 1.10
+M2_TOL = 1e-12
+M2_SPLITS = (("accept", "REAL"), ("test", "REAL"), ("semisyn", "SEMI-SYN"))
+# tie order of the selection rule: AE before iforest; within the AE grid today's config first,
+# then the smaller net; the AI set size and the fusion are ranked separately (`_m2_rank`)
+M2_MODEL_ORDER = ("ae", "ae_narrow", "ae_wide", "iforest", "ae+iforest")
+M2_RULE_TH = (
+    "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัวอ้างอิงคือ no_ai (กฎ + สถิติ; "
+    "AE ถูกคำนวณแต่ไม่เข้า F); ตัวแปรที่มีสิทธิ์ต้องมี FA ของวันผันผวนสูงของ accept (accept-hard) "
+    f"≤ {M2_FA_FACTOR:.2f} เท่าของ no_ai และ FA ของ accept (ทุกวัน) ≤ {M2_FA_FACTOR:.2f} เท่าของ no_ai "
+    "ที่งบ 2; ในกลุ่มนี้เลือกตัวที่ recall_any บน accept เพิ่มจาก no_ai มากที่สุด (paired bootstrap "
+    "ข้ามเหตุการณ์) และจะชนะก็ต่อเมื่อผลเพิ่มนั้นมีนัย (CI ล่างของ (X − no_ai) > 0 และผลต่าง ≥ min_effect) "
+    "ไม่เช่นนั้นเลือก no_ai; ถ้าผลเพิ่มเท่ากันเลือกตัวที่ง่ายกว่า: จำนวนโมเดล AI น้อยกว่า, "
+    "AE ก่อน iforest (ae < ae_narrow < ae_wide), แล้ว fuse < shift1 < shift2"
+)
+M2_NOTES_TH = [
+    "ผล test และ semisyn รายงานไว้ดูเท่านั้น ไม่ได้ใช้เลือกตัวแปร",
+    "ทุกตัวแปรใช้คะแนนชุดเดียวกัน: โมเดล AI 4 ตัว (ae, ae_wide, ae_narrow, iforest) fit ครั้งเดียวต่อ seed "
+    "และทุกชุดข้อมูลถูกคำนวณคะแนนครั้งเดียว ต่างกันเฉพาะชุด AI ที่เข้า F, วิธีรวมคะแนน "
+    "และ τ ที่ fit ใหม่บนข้อมูลสอบเทียบของแต่ละตัวแปร",
+    "fuse: AI เข้า F ตามปกติ; shiftδ: AI แต่ละตัวต้องหายากขึ้น (ส่วนของ AI ใน F = max(0, −log10 p − δ)); "
+    "ae+iforest: ทั้งสองโมเดลเข้า F และนับเป็นชั้น AI ชั้นเดียวใน agreement",
+    "iforest ในชั้น AI ผ่านเส้นทาง split-conformal p-value เดียวกับ AE (Chief ไม่ขึ้นกับชนิดคะแนน)",
+    "F คือ −log10 ของ anomaly p-value ซึ่งบอกระดับความผิดปกติทางสถิติเทียบตลาดปกติ "
+    "ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา และไม่ใช่ข้อกล่าวหาผู้ใด",
+    "accept-hard = วัน accept-normal ที่ผันผวนสูงสุดตามเกณฑ์เดียวกับ m1_fusion "
+    "และยังนับรวมใน FA ของ accept ด้วย",
+    "การเปลี่ยนชั้น AI ของระบบจริง (configs/default.yaml) เป็นขั้นตอนแยกหลังดูผลนี้",
+]
+NO_M2_TH = "ยังไม่มีผล m2_ai"
+
+
+def _m2_rank(variant: str) -> tuple[int, int, int, str]:
+    model, _, fusion = variant.partition(":")
+    fusions = list(M2_FUSIONS)
+    return (
+        len(M2_MODELS[model]) if model in M2_MODELS else len(M2_MODEL_ORDER),
+        M2_MODEL_ORDER.index(model) if model in M2_MODEL_ORDER else len(M2_MODEL_ORDER),
+        fusions.index(fusion) if fusion in fusions else len(fusions),
+        variant,
+    )
+
+
+def m2_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The M2 selection rule on accept rows (`variant`, `fa`, `fa_hard`, `gain` = paired
+    recall_any of X minus `no_ai` or None, `gain_significant`); see the module docstring.
+
+    Returns `chosen` (`no_ai` when nothing wins; None without a usable `no_ai` row), `top` (the
+    eligible variant with the largest gain, None if none), `eligible` and `excluded` (Thai
+    reason per variant)."""
+    ref = next((r for r in rows if r["variant"] == M2_REF), None)
+    if ref is None or ref["fa"] is None or ref["fa_hard"] is None:
+        return {"chosen": None, "top": None, "eligible": [], "excluded": {}}
+    hard_cap = M2_FA_FACTOR * ref["fa_hard"] + M2_TOL
+    fa_cap = M2_FA_FACTOR * ref["fa"] + M2_TOL
+    excluded: dict[str, str] = {}
+    eligible = []
+    for r in rows:
+        v = r["variant"]
+        if v == M2_REF:
+            continue
+        if r["fa_hard"] is None or r["fa"] is None:
+            excluded[v] = "ไม่มีค่า FA หรือ FA-hard"
+        elif r["fa_hard"] > hard_cap:
+            excluded[v] = (
+                f"FA-hard {r['fa_hard']:.3g} เกิน {M2_FA_FACTOR:.2f} เท่าของ no_ai "
+                f"({ref['fa_hard']:.3g})"
+            )
+        elif r["fa"] > fa_cap:
+            excluded[v] = f"FA {r['fa']:.3g} เกิน {M2_FA_FACTOR:.2f} เท่าของ no_ai ({ref['fa']:.3g})"
+        elif r["gain"] is None:
+            excluded[v] = "ไม่มีผลเทียบแบบจับคู่กับ no_ai จึงจัดอันดับผลเพิ่มไม่ได้"
+        else:
+            eligible.append(r)
+    out = {
+        "chosen": M2_REF,
+        "top": None,
+        "eligible": sorted((r["variant"] for r in eligible), key=_m2_rank),
+        "excluded": excluded,
+    }
+    if eligible:
+        best = max(r["gain"] for r in eligible)
+        tied = [r for r in eligible if r["gain"] >= best - M2_TOL]
+        top = min(tied, key=lambda r: _m2_rank(r["variant"]))
+        out["top"] = top["variant"]
+        if top["gain_significant"]:
+            out["chosen"] = top["variant"]
+    return out
+
+
+def _m2(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """M2 tables per split, paired recall_any vs `no_ai`, the accept-only selection and the
+    AE-alone vs iforest-alone line on test (budget 2)."""
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == M2 and float(r["budget"]) == PAIRED_BUDGET]
+    )
+    if not recs:
+        return None
+    notes = [config_note] if config_note else []
+    grid = next((r["ae_grid"] for r in recs if r.get("ae_grid")), None)
+    splits: dict[str, Any] = {}
+    for split, provenance in M2_SPLITS:
+        arms = _m1_arms(recs, split)
+        arms = {v: a for v, a in arms.items() if not v.endswith(":alone")}
+        if not arms:
+            continue
+        rows = []
+        order = sorted(arms, key=lambda v: (v != M2_REF, _m2_rank(v)))
+        for v in order:
+            c = _cell(list(arms[v].values()), n_boot)
+            m, ci, fa_ci = c["mean"] or {}, c["ci"] or {}, c["fa_ci"] or {}
+            row: dict[str, Any] = {
+                "variant": v,
+                "n_seeds": c["n_seeds"],
+                "n_events": c["n_events"],
+                "recall_any": m.get("recall_any"),
+                "recall_any_ci": ci.get("recall_any"),
+                "recall_correct": m.get("recall_correct"),
+                "fa": m.get("fa_per_symbol_day"),
+                "fa_ci": fa_ci.get("fa_per_symbol_day"),
+                "fa_hard": m.get("fa_per_symbol_day_hard"),
+                "fa_hard_ci": fa_ci.get("fa_per_symbol_day_hard"),
+                "vs_ref": None,
+                "gain": None,
+                "gain_significant": False,
+                "below_ref": False,
+                "reason_th": None,
+            }
+            if v != M2_REF and M2_REF in arms:
+                pair, why = _ablation_pair(arms[v], arms[M2_REF], n_boot, min_effect)
+                if pair is None:
+                    row["reason_th"] = why
+                else:
+                    # diff_mean = X - no_ai; `significant` = X detects significantly more
+                    row["vs_ref"] = {k: pair[k] for k in ("diff_mean", "ci", "ci_unit")}
+                    row["gain"] = pair["diff_mean"]
+                    row["gain_significant"] = bool(pair["significant"])
+                    row["below_ref"] = bool(pair["significant_reverse"])
+                    row["reason_th"] = pair["reason_th"]
+            rows.append(row)
+        splits[split] = {"provenance": provenance, "rows": rows}
+    selection = None
+    if "accept" in splits:
+        if M2_REF not in _m1_arms(recs, "accept"):
+            notes.append("เลือกตัวแปรไม่ได้: ไม่มีผล accept:no_ai ที่งบ 2")
+        else:
+            selection = m2_select(splits["accept"]["rows"])
+    alone = None
+    test = _m1_arms(recs, "test")
+    a, b = (f"{m}:alone" for m in M2_ALONE)
+    if a in test and b in test:
+        pair, why = _ablation_pair(test[a], test[b], n_boot, min_effect)
+        if pair is None:
+            notes.append(f"ข้าม AE เดี่ยว เทียบ iforest เดี่ยว: {why}")
+        else:
+            alone = {"a": a, "b": b, "provenance": "REAL", **pair}
+    elif any(v.endswith(":alone") for v in test):
+        notes.append("ข้าม AE เดี่ยว เทียบ iforest เดี่ยว: มีผลไม่ครบทั้งสองฝั่ง")
+    return {
+        "budget": PAIRED_BUDGET,
+        "splits": splits,
+        "selection": selection,
+        "ae_vs_iforest": alone,
+        "ae_grid": grid,
+        "rule_th": M2_RULE_TH,
+        "notes": notes,
+    }
+
+
+def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = ["", f"### m2_ai: ชั้น AI และการรวมคะแนน เทียบ no_ai (budget {PAIRED_BUDGET:g})"]
+    if m2 is None:
+        return [*lines, "", f"- {NO_M2_TH}"]
+    default = {"hidden": "config", "bottleneck": "config"}
+    grid = m2["ae_grid"] or {k: g or default for k, g in M2_AE_GRID.items()}
+    lines += [
+        "",
+        "- กริด AE (ทุกจุดรายงานในตาราง): "
+        + "; ".join(
+            f"{k} hidden {g['hidden']} / bottleneck {g['bottleneck']}" for k, g in grid.items()
+        )
+        + "; ค่าอื่น (epochs, lr ฯลฯ) ตาม config; iforest = IsolationForest ในชั้น AI",
+    ]
+    for split, block in m2["splits"].items():
+        lines += [
+            "",
+            f"#### {split} ({block['provenance']})",
+            "",
+            "| ตัวแปร | seeds | events | recall_any [95% CI] | recall_correct | "
+            "FA/symbol-day [95% CI] | FA hard [95% CI] | "
+            "ผลต่าง recall_any (X − no_ai) [95% CI] | อ่านว่า |",
+            "|" + "---|" * 9,
+        ]
+        for r in block["rows"]:
+            if r["variant"] == M2_REF:
+                diff, verdict = "–", "ตัวอ้างอิง"
+            elif r["vs_ref"] is None:
+                diff, verdict = "–", r["reason_th"] or "–"
+            else:
+                diff = _fmt_ci(r["vs_ref"]["diff_mean"], r["vs_ref"]["ci"])
+                if r["reason_th"]:
+                    verdict = r["reason_th"]
+                elif r["gain_significant"]:
+                    verdict = "สูงกว่า no_ai อย่างมีนัย"
+                elif r["below_ref"]:
+                    verdict = "ต่ำกว่า no_ai อย่างมีนัย"
+                else:
+                    verdict = "ไม่ต่างจาก no_ai อย่างมีนัย"
+            lines.append(
+                f"| {r['variant']} | {r['n_seeds']} | {r['n_events']} | "
+                f"{_fmt_ci(r['recall_any'], r['recall_any_ci'])} | {_fmt(r['recall_correct'])} | "
+                f"{_fmt_ci(r['fa'], r['fa_ci'])} | {_fmt_ci(r['fa_hard'], r['fa_hard_ci'])} | "
+                f"{diff} | {verdict} |"
+            )
+    lines += ["", f"- {m2['rule_th']} (min_effect = {min_effect:g})"]
+    sel = m2["selection"]
+    if sel is not None:
+        for v, why in sorted(sel["excluded"].items(), key=lambda kv: _m2_rank(kv[0])):
+            lines.append(f"- ตัดออก {v}: {why}")
+        if sel["chosen"] is None:
+            lines.append("- **ผลการเลือก (accept):** เลือกไม่ได้ (ไม่มีค่า FA ของ no_ai)")
+        else:
+            if sel["top"] is not None and sel["chosen"] == M2_REF:
+                lines.append(f"- ตัวที่ผลเพิ่มมากที่สุดในกลุ่มที่มีสิทธิ์คือ {sel['top']} แต่ผลเพิ่มไม่มีนัย จึงคง no_ai")
+            lines.append(f"- **ผลการเลือก (accept):** {sel['chosen']}")
+    alone = m2["ae_vs_iforest"]
+    if alone is not None:
+        if alone["reason_th"]:
+            verdict = alone["reason_th"]
+        elif alone["significant"]:
+            verdict = "AE ตรวจพบมากกว่าอย่างมีนัย"
+        elif alone["significant_reverse"]:
+            verdict = "iforest ตรวจพบมากกว่าอย่างมีนัย"
+        else:
+            verdict = "ไม่ต่างกันอย่างมีนัย"
+        lines += [
+            "",
+            f"- **AE เดี่ยว เทียบ iforest เดี่ยว (test, REAL, paired bootstrap):** ผลต่าง recall_any "
+            f"(AE − iforest) {_fmt_ci(alone['diff_mean'], alone['ci'])} "
+            f"จาก {alone['n_events']} เหตุการณ์, {alone['n_seeds']} seed: {verdict} "
+            "(แต่ละโมเดลผ่าน Chief ของตัวเอง ไม่มีกฎและสถิติ)",
+        ]
+    lines += [f"- {n}" for n in [*M2_NOTES_TH, *m2["notes"]]]
+    return lines
+
+
 M4 = "m4_sell"
 M4_VARIANTS = ("base", "sell")
 M4_LABEL = {"base": "base (ไม่มีกฎฝั่งขาย)", "sell": "sell (มีกฎฝั่งขาย)"}
@@ -1379,6 +1645,7 @@ def build_report(
     paired_ablation = _paired_ablation(runs, n_boot, cfg.eval.min_effect)
     retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
     m1 = _m1(runs, n_boot, cfg.eval.min_effect)
+    m2 = _m2(runs, n_boot, cfg.eval.min_effect)
     m4 = _m4(runs, n_boot, cfg.eval.min_effect)
     confusion = _confusion(runs)
     data = {
@@ -1392,6 +1659,7 @@ def build_report(
         "paired_ablation": paired_ablation,
         "retrain_decision": retrain,
         "m1_fusion": m1,
+        "m2_ai": m2,
         "m4_sell": m4,
         "confusion": confusion,
         "labels": _labels_summary(runs),
@@ -1437,6 +1705,8 @@ def build_report(
             lines += _paired_ablation_md(paired_ablation, cfg.eval.min_effect)
         if exp == M1:
             lines += _m1_md(m1, cfg.eval.min_effect)
+        if exp == M2:
+            lines += _m2_md(m2, cfg.eval.min_effect)
         if exp == M4:
             lines += _m4_md(m4, cfg.eval.min_effect)
     lines += [

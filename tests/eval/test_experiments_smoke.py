@@ -524,3 +524,9 @@ def test_m2_ai_fits_each_model_once_and_no_ai_equals_m1(world, monkeypatch):
             for key in ("metrics", "per_event", "fa_by_day", "tau", "tau_saturated", "n_cal",
                         "detectors", "model_versions", "error", "n_events"):  # fmt: skip
                 assert a.get(key) == m.get(key), (split, b, key)
+
+    md, js = tmp / "m2.md", tmp / "m2.json"
+    data = build_report(research, md, js, cfg=cfg)
+    text = md.read_text(encoding="utf-8")
+    assert "### m2_ai" in text and "accuracy" not in text.lower()
+    assert data["m2_ai"] is None  # the smoke budgets (0.1, 10) have no budget-2 records
