@@ -10,6 +10,10 @@ with `ts >= t_start` has its price multiplied by `m(t)`: linear `1 -> 1 + impact
 duration, then `1 + impact * exp(-(t - t_peak) / dump_tau)` (`dump_tau <= 0`: back to 1 at once).
 Prices are rounded to the symbol's observed tick (never below one tick).
 
+Bear raid model (`bear_raid`, M4): the mirror of `pump_burst`: taker-SELL fills in clusters of
+`rush_size` per millisecond, and the real prices are multiplied by `1 - impact * ...` instead of
+`1 + impact * ...` (down by `impact` over the duration, then back with time constant `dump_tau`).
+
 Wash model (`wash_pingpong`): pairs of a taker buy then a taker sell 1-20 ms later, equal round
 quantity, at the current real price; real trades are untouched.
 """
@@ -102,9 +106,10 @@ def _multiplier(ts_us: np.ndarray, sc: Scenario) -> np.ndarray:
     """Price multiplier `m(t)` for trades at `ts_us >= t_start`."""
     t = (ts_us - sc.t_start_us) / 1e6
     dur = sc.duration_s
-    ramp = 1.0 + sc.impact * np.clip(t / dur, 0.0, 1.0)
+    imp = -sc.impact if sc.family == "bear_raid" else sc.impact  # a bear raid pushes down
+    ramp = 1.0 + imp * np.clip(t / dur, 0.0, 1.0)
     if sc.dump_tau_s > 0:
-        post = 1.0 + sc.impact * np.exp(-np.clip(t - dur, 0.0, None) / sc.dump_tau_s)
+        post = 1.0 + imp * np.exp(-np.clip(t - dur, 0.0, None) / sc.dump_tau_s)
     else:
         post = np.ones_like(t)
     return np.where(t < dur, ramp, post)
@@ -144,7 +149,8 @@ def _pump(
     tick: float,
     real_price_at,
 ) -> dict[str, np.ndarray]:
-    """Synthetic taker-buy fills in `[t0, t0 + dur)`, in clusters of `rush_size` per millisecond."""
+    """Synthetic taker fills in `[t0, t0 + dur)`, in clusters of `rush_size` per millisecond:
+    buys for a pump, sells for a bear raid."""
     rush = 1 if sc.family == "pump_stealth" else max(1, int(sc.rush_size))
     mean_quote = max(med_quote, expected_quote / MAX_SYNTH_TRADES)
     ms_lo = -(-t0 // 1000)
@@ -162,7 +168,8 @@ def _pump(
     quote *= expected_quote / quote.sum()  # exact injected volume, lognormal shape kept
     px = _snap(real_price_at(ts) * _multiplier(ts, sc), tick)
     qty = quote / px
-    return {"ts_us": ts, "price": px, "qty": qty, "side": np.full(len(ts), "buy", dtype=object)}
+    side = "sell" if sc.family == "bear_raid" else "buy"
+    return {"ts_us": ts, "price": px, "qty": qty, "side": np.full(len(ts), side, dtype=object)}
 
 
 def _next_round(q: float) -> float:

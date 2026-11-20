@@ -36,3 +36,19 @@ wash_pingpong:
   test:
     duration_s: [300, 1800]
     vol_mult: [1.5, 2]
+bear_raid:
+  # M4: the sell-side mirror of pump_burst (taker-sell rush clusters pushing the price DOWN by
+  # `impact`, then recovering with time constant `dump_tau_s`). No real bear raids are labelled,
+  # so both regions use the pump_burst test ranges (SEMI-SYN evaluation only, never training).
+  train:
+    duration_s: [30, 180]
+    impact: [0.03, 0.05]
+    vol_mult: [5, 30]
+    rush_size: [3, 8]
+    dump_tau_s: [120, 600]
+  test:
+    duration_s: [30, 180]
+    impact: [0.03, 0.05]
+    vol_mult: [5, 30]
+    rush_size: [3, 8]
+    dump_tau_s: [120, 600]
