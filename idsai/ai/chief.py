@@ -28,6 +28,19 @@ is unclassified still names the technique a less extreme row found; `MM-T000` on
 classifies. `fused_p`, `detectors`, `agreement`, `severity`, `evidence` and `peak_technique_id`
 (the peak row's own technique) stay from the peak row; `window` spans the episode's first and last
 rows. Batch and stream both fold rows through `_Attribution.merge`.
+
+AI fusion mode (`AiFusion`, M1; the default `"fuse"` is the fusion above, unchanged):
+- `"exclude"`: the `ai` layer still gets `p__` and is listed in the alert detectors, but never
+  enters `F`, `best_detector`, `agreement` or `technique`.
+- `"mondrian"`: regime-conditional conformal for the `ai` layer only. `calibrate` cuts the cal
+  rows (finite AE score and finite regime) at the terciles of `regime_feature` into 3 bins; a
+  row's AE p-value is computed against the cal AE scores of its own bin (`bin = #edges <= x`, so
+  values below / above the edges fall in the first / last bin). A row with a NaN regime, or one
+  whose bin holds no cal score, uses the pooled cal AE scores (the `"fuse"` p-value).
+- `"shift"`: the AE contribution to `F` is `max(0, -log10 p - shift)`, and the AE counts for
+  `agreement` only when `p < agreement_p * 10**-shift`.
+Every mode reads `-log10 p` from lookup tables built at calibration (per bin, already shifted),
+so batch/stream parity holds in each.
 """
 
 import math
@@ -48,9 +61,13 @@ CUSUM_NAME = "stat.cusum"
 CUSUM_TECHNIQUE = "MM-T001"
 DAY_US = 86_400_000_000
 DEDUP_BUCKET_US = 300_000_000
-STATE_VERSION = 1
+STATE_VERSION = 2
+LOADABLE_STATE_VERSIONS = (1, 2)  # version 1: before AiFusion, always mode "fuse"
+REGIME_BINS = 3
+AI_MODES = ("fuse", "exclude", "mondrian", "shift")
 
 Provenance = Literal["live", "replay", "sim"]
+AiMode = Literal["fuse", "exclude", "mondrian", "shift"]
 
 
 class CalibrationError(ValueError):
@@ -82,6 +99,75 @@ def alert_id_for(provenance: str, symbol: str, first_us: int) -> str:
 
 def _parent_technique(technique_id: str) -> str:
     return technique_id.split(".")[0]
+
+
+def _nlp_table(n: int) -> np.ndarray:
+    """`table[k] = -log10(k / (n + 1))` for k = 1..n+1 (`table[0]` unused); `table[n+1]` is +0.0."""
+    table = np.full(n + 2, np.nan)
+    table[1:] = -np.log10(np.arange(1, n + 2, dtype=np.float64) / (n + 1))
+    table[n + 1] = 0.0
+    return table
+
+
+@dataclass(frozen=True)
+class AiFusion:
+    """How the `ai` layer enters the fusion (see the module docstring); default: unchanged."""
+
+    mode: AiMode = "fuse"
+    shift: float = 0.0
+    regime_feature: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in AI_MODES:
+            raise ValueError(f"unknown ai mode {self.mode!r}; valid: {AI_MODES}")
+        if not (math.isfinite(self.shift) and self.shift >= 0):
+            raise ValueError(f"ai shift must be finite and >= 0, got {self.shift}")
+        if self.mode != "shift" and self.shift != 0:
+            raise ValueError(f"ai shift {self.shift} needs mode 'shift', got {self.mode!r}")
+        if (self.mode == "mondrian") != (self.regime_feature is not None):
+            raise ValueError("ai mode 'mondrian' needs a regime_feature (and only it takes one)")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "shift": float(self.shift),
+            "regime_feature": self.regime_feature,
+        }
+
+
+@dataclass
+class _Bins:
+    """Mondrian calibration of one detector: tercile edges and sorted cal scores per bin."""
+
+    edges: np.ndarray  # (REGIME_BINS - 1,)
+    cal: list[np.ndarray]  # REGIME_BINS sorted finite score arrays
+    tables: list[np.ndarray]  # -log10 p lookup table per bin
+
+    @classmethod
+    def build(cls, edges: Any, cal: list[Any]) -> "_Bins":
+        arrays = [np.asarray(a, dtype=np.float64) for a in cal]
+        if len(arrays) != REGIME_BINS:
+            raise ValueError(f"Mondrian state needs {REGIME_BINS} bins, got {len(arrays)}")
+        return cls(
+            np.asarray(edges, dtype=np.float64), arrays, [_nlp_table(a.size) for a in arrays]
+        )
+
+    @classmethod
+    def fit(cls, scores: np.ndarray, regime: np.ndarray) -> "_Bins":
+        ok = np.isfinite(scores) & np.isfinite(regime)
+        if ok.any():
+            edges = np.quantile(regime[ok], np.arange(1, REGIME_BINS) / REGIME_BINS)
+        else:
+            edges = np.full(REGIME_BINS - 1, np.nan)
+        b = cls.bin_of(edges, regime)
+        return cls.build(edges, [np.sort(scores[ok & (b == i)]) for i in range(REGIME_BINS)])
+
+    @staticmethod
+    def bin_of(edges: np.ndarray, regime: np.ndarray) -> np.ndarray:
+        """Bin index per row (`#edges <= x`); -1 for a NaN regime."""
+        r = np.asarray(regime, dtype=np.float64)
+        b = np.searchsorted(edges, r, side="right").astype(np.int64)
+        return np.where(np.isnan(r), -1, b)
 
 
 @dataclass
@@ -136,6 +222,7 @@ class Chief:
         cfg: ChiefCfg,
         config_hash: str,
         model_versions: dict[str, str],
+        ai: AiFusion | None = None,
     ):
         if not detectors:
             raise ValueError("Chief needs at least one detector")
@@ -167,6 +254,24 @@ class Chief:
         self._cusum = cusum[0] if cusum else None
         self._index = {n: j for j, n in enumerate(names)}
 
+        self.ai = ai if ai is not None else AiFusion()
+        self._ai = self._by_layer["ai"]
+        exclude = self.ai.mode == "exclude"
+        # detectors whose -log10 p enters F (and best_detector); "exclude" drops the ai layer
+        self._in_F = [j for j in self._fused if not (exclude and j in self._ai)]
+        if not self._in_F:
+            raise ValueError("ai mode 'exclude' leaves no detector to fuse")
+        self._agree = {
+            layer: cols for layer, cols in self._by_layer.items() if not (exclude and layer == "ai")
+        }
+        self._agree_ai_p = self.cfg.agreement_p
+        if self.ai.mode == "shift":
+            self._agree_ai_p = self.cfg.agreement_p * 10.0 ** (-self.ai.shift)
+        self._regime_feature = (
+            self.ai.regime_feature if self.ai.mode == "mondrian" and self._ai else None
+        )
+        self._mondrian: dict[int, _Bins] = {}
+
     # ------------------------------------------------------------ calibration
 
     @property
@@ -186,22 +291,33 @@ class Chief:
                 raise KeyError(f"calibration frame lacks column {col!r}")
             s = feature_matrix(cal, [col])[:, 0]
             arrays.append(np.sort(s[np.isfinite(s)]))
-        self._set_calibration(arrays, _symbol_days(cal))
+        mondrian = {}
+        regime = self._regime(cal)
+        if regime is not None:
+            for j in self._ai:
+                s = feature_matrix(cal, [score_column(self.detectors[j].name)])[:, 0]
+                mondrian[j] = _Bins.fit(s, regime)
+        self._set_calibration(arrays, _symbol_days(cal), mondrian)
         self.tau = None
         self.tau_saturated = False
 
-    def _set_calibration(self, arrays: list[np.ndarray], cal_symbol_days: int) -> None:
+    def _set_calibration(
+        self,
+        arrays: list[np.ndarray],
+        cal_symbol_days: int,
+        mondrian: dict[int, _Bins] | None = None,
+    ) -> None:
         self._cal = [np.asarray(a, dtype=np.float64) for a in arrays]
-        self.n_cal = min(self._cal[j].size for j in self._fused)
+        self._mondrian = dict(mondrian or {})
+        # the coarsest p-value resolution of anything that enters F (non-empty Mondrian bins too)
+        sizes = [self._cal[j].size for j in self._in_F]
+        sizes += [a.size for b in self._mondrian.values() for a in b.cal if a.size]
+        self.n_cal = min(sizes)
         self.cal_symbol_days = int(cal_symbol_days)
-        # table[k] = -log10(k / (n + 1)) for k = 1..n+1 (table[0] unused); table[n+1] is +0.0
-        self._nlp_tables = []
-        for a in self._cal:
-            n = a.size
-            table = np.full(n + 2, np.nan)
-            table[1:] = -np.log10(np.arange(1, n + 2, dtype=np.float64) / (n + 1))
-            table[n + 1] = 0.0
-            self._nlp_tables.append(table)
+        self._nlp_tables = [_nlp_table(a.size) for a in self._cal]
+        if self.ai.mode == "shift":
+            for j in self._ai:
+                self._nlp_tables[j] = np.maximum(self._nlp_tables[j] - self.ai.shift, 0.0)
 
     def _require_calibration(self) -> list[np.ndarray]:
         if self._cal is None:
@@ -210,7 +326,12 @@ class Chief:
 
     def _ranks(self, j: int, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """`(k, fired)`: p = k / (n + 1); NaN or unfired scores get k = n + 1 (p = 1)."""
-        cal = self._require_calibration()[j]
+        return self._ranks_in(self._require_calibration()[j], j, scores)
+
+    def _ranks_in(
+        self, cal: np.ndarray, j: int, scores: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """`_ranks` of detector `j` against the sorted calibration scores `cal`."""
         n = cal.size
         s = np.asarray(scores, dtype=np.float64)
         fired = np.asarray(self.detectors[j].fired(s), dtype=bool) & ~np.isnan(s)
@@ -218,15 +339,29 @@ class Chief:
         return np.where(fired, k, n + 1), fired
 
     def pvalues(self, name: str, scores: np.ndarray) -> np.ndarray:
-        """Anomaly p-values `(1 + #{s_i >= s}) / (n + 1)`; NaN or unfired scores give 1.0."""
+        """Anomaly p-values `(1 + #{s_i >= s}) / (n + 1)`; NaN or unfired scores give 1.0.
+
+        Always against the pooled calibration scores (a Mondrian bin needs the regime: `fuse`).
+        """
         j = self._index[name]
         k, _ = self._ranks(j, scores)
         return k / (self._require_calibration()[j].size + 1)
 
+    def _regime(self, frame: pl.DataFrame) -> np.ndarray | None:
+        """The regime feature of `frame` in Mondrian mode (KeyError if absent), else None."""
+        if self._regime_feature is None:
+            return None
+        if self._regime_feature not in frame.columns:
+            raise KeyError(f"frame lacks regime feature column {self._regime_feature!r}")
+        return feature_matrix(frame, [self._regime_feature])[:, 0]
+
     # ------------------------------------------------------------ fusion
 
-    def _fuse_matrix(self, scores: np.ndarray) -> _Fusion:
-        """Shared fusion math for batch (`fuse`) and stream (`ChiefStream.step`)."""
+    def _fuse_matrix(self, scores: np.ndarray, regime: np.ndarray | None = None) -> _Fusion:
+        """Shared fusion math for batch (`fuse`) and stream (`ChiefStream.step`).
+
+        `regime`: the regime feature per row, required in Mondrian mode (ignored otherwise).
+        """
         cal = self._require_calibration()
         n_rows, n_det = scores.shape
         p = np.empty((n_rows, n_det))
@@ -236,16 +371,29 @@ class Chief:
             k, fired[:, j] = self._ranks(j, scores[:, j])
             p[:, j] = k / (cal[j].size + 1)
             nlp[:, j] = self._nlp_tables[j][k]
+        if self._mondrian:
+            if regime is None:
+                raise ValueError("ai mode 'mondrian' needs the regime feature of every row")
+            for j, bins in self._mondrian.items():
+                b = _Bins.bin_of(bins.edges, regime)
+                for i, (bcal, table) in enumerate(zip(bins.cal, bins.tables, strict=True)):
+                    m = b == i
+                    if bcal.size == 0 or not m.any():
+                        continue  # empty bin (and NaN regime, b = -1): the pooled p stays
+                    k, _ = self._ranks_in(bcal, j, scores[m, j])
+                    p[m, j] = k / (bcal.size + 1)
+                    nlp[m, j] = table[k]
 
-        fused = np.asarray(self._fused)
+        fused = np.asarray(self._in_F)
         best_local = np.argmax(nlp[:, fused], axis=1)  # ties -> first fused detector
         rows = np.arange(n_rows)
         F = nlp[rows, fused[best_local]]
 
         agreement = np.zeros(n_rows, dtype=np.int64)
-        for cols in self._by_layer.values():
+        for layer, cols in self._agree.items():
             if cols:
-                agreement += np.any(p[:, cols] < self.cfg.agreement_p, axis=1)
+                thr = self._agree_ai_p if layer == "ai" else self.cfg.agreement_p
+                agreement += np.any(p[:, cols] < thr, axis=1)
 
         technique = np.full(n_rows, UNCLASSIFIED, dtype=object)
         if self._cusum is not None:
@@ -281,7 +429,7 @@ class Chief:
 
         All input columns are kept, in input row order.
         """
-        fu = self._fuse_matrix(self._score_matrix(scored))
+        fu = self._fuse_matrix(self._score_matrix(scored), self._regime(scored))
         names = np.array([d.name for d in self.detectors], dtype=object)
         return scored.with_columns(
             *[
@@ -418,7 +566,8 @@ class Chief:
         pos, starts, ends = self._group(sym, t, F, tau)
         if starts.size == 0:
             return []
-        fu = self._fuse_matrix(self._score_matrix(fused[order[pos].tolist()]))
+        ex = fused[order[pos].tolist()]
+        fu = self._fuse_matrix(self._score_matrix(ex), self._regime(ex))
         out = []
         for a, b in zip(starts, ends, strict=True):
             seg = pos[a:b]
@@ -455,7 +604,7 @@ class Chief:
             raise CalibrationError("cannot fit a threshold on an empty frame")
         symbol_days = _symbol_days(cal_fused)
         rows_per_symbol_day = cal_fused.height / symbol_days
-        n_fused = len(self._fused)
+        n_fused = len(self._in_F)
         assert self.n_cal is not None
         floor = n_fused / (self.n_cal + 1)
         if budget / rows_per_symbol_day < floor:
@@ -536,16 +685,26 @@ class Chief:
             "tau_saturated": self.tau_saturated,
             "config_hash": self.config_hash,
             "model_versions": dict(self.model_versions),
+            "ai": self.ai.as_dict(),
+            "mondrian": {
+                self.detectors[j].name: {"edges": b.edges.copy(), "cal": [a.copy() for a in b.cal]}
+                for j, b in self._mondrian.items()
+            },
         }
 
     def load_state_dict(self, d: dict[str, Any]) -> None:
         """Restore `state_dict` output.
 
         The detector names (in order), `config_hash` and `model_versions` must equal this
-        Chief's: a calibration is valid only for the exact config and models it was made with.
+        Chief's: a calibration is valid only for the exact config and models it was made with, and
+        so must its `AiFusion` (a version-1 state predates it and means the default `"fuse"`).
         """
-        if d.get("version") != STATE_VERSION:
-            raise ValueError(f"unsupported Chief state version {d.get('version')!r}")
+        version = d.get("version")
+        if version not in LOADABLE_STATE_VERSIONS:
+            raise ValueError(f"unsupported Chief state version {version!r}")
+        state_ai = AiFusion(**d["ai"]) if version >= 2 else AiFusion()
+        if state_ai != self.ai:
+            raise ValueError(f"ai fusion mismatch: state {state_ai}, Chief {self.ai}")
         names = [det.name for det in self.detectors]
         if list(d["detector_names"]) != names:
             raise ValueError(f"detector names {d['detector_names']} do not match Chief's {names}")
@@ -557,7 +716,12 @@ class Chief:
             raise ValueError(
                 f"model_versions mismatch: state {d['model_versions']}, Chief {self.model_versions}"
             )
-        self._set_calibration([d["cal"][n] for n in names], d["cal_symbol_days"])
+        stored = d.get("mondrian") or {}
+        want = {names[j] for j in self._ai} if self._regime_feature is not None else set()
+        if set(stored) != want:
+            raise ValueError(f"Mondrian state covers {sorted(stored)}, expected {sorted(want)}")
+        mondrian = {self._index[n]: _Bins.build(b["edges"], b["cal"]) for n, b in stored.items()}
+        self._set_calibration([d["cal"][n] for n in names], d["cal_symbol_days"], mondrian)
         if self.n_cal != d["n_cal"]:
             raise ValueError(f"n_cal mismatch: state says {d['n_cal']}, arrays give {self.n_cal}")
         self.tau = None if d["tau"] is None else float(d["tau"])
@@ -623,7 +787,11 @@ class ChiefStream:
             ],
             dtype=np.float64,
         )
-        fu = ch._fuse_matrix(scores)
+        regime = None
+        if ch._regime_feature is not None:
+            v = row[ch._regime_feature]
+            regime = np.array([math.nan if v is None else v], dtype=np.float64)
+        fu = ch._fuse_matrix(scores, regime)
         F = float(fu.F[0])
         if not (F >= tau and F > 0):
             return out

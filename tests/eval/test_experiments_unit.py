@@ -10,7 +10,7 @@ import pytest
 from idsai.ai.chief import Chief
 from idsai.config import load_settings
 from idsai.contracts.detector import Detector, Evidence
-from idsai.contracts.frames import LABELS
+from idsai.contracts.frames import LABELS, empty
 from idsai.data.store import Store
 from idsai.detection.simulator import EthicsError, load_scenario_ranges
 from idsai.eval.experiments import (
@@ -363,3 +363,25 @@ def test_label_of_a_neighbouring_period_is_not_an_event_of_this_set(tmp_path):
         assert test.labels["label_id"].to_list() == ["b"]
     finally:
         s.close()
+
+
+def test_fa_by_day_records_the_multiplicity_of_days_loaded_by_several_parts():
+    """Three SEMI-SYN family parts over the same two days: `normal` sums their counts, so
+    `normal_mult` says how many parts loaded each day (the rate is sum n / sum m)."""
+    chief, _ = calibrated_chief()
+    days = [SymDay("ABCBTC", N1), SymDay("ABCBTC", N2)]
+    parts = [
+        _Part(frame([(N1, 0, 0, 0), (N1, 6, 0, 5), (N2, 0, 0, 0)]), empty(LABELS), days=days)
+        for _ in FAMILIES
+    ]
+    metrics, _, fa_by_day = _evaluate(
+        chief, 3.0, [chief.fuse(p.frame) for p in parts], parts, None, 120, 300
+    )
+    assert fa_by_day["normal"] == {f"ABCBTC|{N1}": 3, f"ABCBTC|{N2}": 0}
+    assert fa_by_day["normal_mult"] == {f"ABCBTC|{N1}": 3, f"ABCBTC|{N2}": 3}
+    assert metrics["fa_per_symbol_day"] == 0.5  # 3 false alerts over 6 part-days
+    n, m = fa_by_day["normal"], fa_by_day["normal_mult"]
+    assert sum(n.values()) / sum(m.values()) == metrics["fa_per_symbol_day"]
+    # one part per day: no multiplicity key (older readers see the same record shape)
+    _, _, single = _evaluate(chief, 3.0, [chief.fuse(parts[0].frame)], parts[:1], None, 120, 300)
+    assert "normal_mult" not in single

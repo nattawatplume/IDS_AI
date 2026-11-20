@@ -8,7 +8,13 @@ from idsai.ai.chief import Chief
 from idsai.config import load_settings
 from idsai.data.store import Store
 from idsai.detection.rules import Condition, Signature, SignatureDetector
-from idsai.eval.metrics import MIN_EVENTS, bootstrap_ci, few_events_th, paired_bootstrap
+from idsai.eval.metrics import (
+    MIN_EVENTS,
+    bootstrap_ci,
+    few_events_th,
+    paired_bootstrap,
+    ratio_bootstrap_ci,
+)
 from idsai.eval.report import (
     AGNOSTIC_NOTE,
     DETERMINISTIC_NOTE,
@@ -19,6 +25,7 @@ from idsai.eval.report import (
     UNIT_LEGACY,
     build_report,
     cluster_counts,
+    m1_select,
     paired_ratio_bootstrap,
 )
 
@@ -843,3 +850,163 @@ def test_confusion_needs_a_rerun_for_records_without_techniques(research, tmp_pa
     assert data["confusion"]["semisyn"]["rows"] == []
     section = _section(text, "confusion: family ของป้ายกำกับ × เทคนิคที่ระบุ (budget 2)")
     assert section.count("ต้องรัน `idsai eval` ใหม่") == 2
+
+
+# ---------------------------------------------------------------- FA multiplicity (M1 fix)
+def test_fa_ci_divides_by_the_parts_that_loaded_each_day(research, tmp_path):
+    """An ablation SEMI-SYN arm sums three family parts per symbol-day: without `normal_mult`
+    its FA CI reads three times the rate; with it the CI is the ratio sum n / sum m."""
+    rng = np.random.default_rng(0)
+    n_days, n_parts = 12, 3
+    days = [("ABCBTC", f"2020-07-{1 + i:02d}") for i in range(4)]
+    counts = {s: rng.integers(0, 3, size=(n_parts, n_days)) for s in (0, 1)}
+    records = {"legacy": [], "fixed": []}
+    for kind, recs in records.items():
+        for s in (0, 1):
+            r = rec(
+                "ablation", f"semisyn:{kind}", 2, s, [1, 0, 1, 0], provenance="SEMI-SYN", days=days
+            )
+            summed = counts[s].sum(axis=0)
+            r["fa_by_day"] = {"normal": _fa_days(summed.tolist()), "hard": {}}
+            if kind == "fixed":
+                r["fa_by_day"]["normal_mult"] = _fa_days([n_parts] * n_days)
+            r["metrics"]["fa_per_symbol_day"] = summed.sum() / (n_parts * n_days)
+            recs.append(r)
+    write(research, [*records["legacy"], *records["fixed"]])
+    data, _ = _report(research, tmp_path, n_boot=400)
+    cells = data["experiments"]["ablation"]
+    legacy, fixed = cells["semisyn:legacy"]["2"], cells["semisyn:fixed"]["2"]
+    rate = np.mean([counts[s].sum() / (n_parts * n_days) for s in (0, 1)])
+    assert legacy["mean"]["fa_per_symbol_day"] == pytest.approx(rate)
+    lo, hi = legacy["fa_ci"]["fa_per_symbol_day"]
+    assert lo > 2 * rate  # the bug: the CI sits around 3x the rate it brackets
+    n = counts[0].sum(axis=0) + counts[1].sum(axis=0)
+    m = np.full(n_days, 2.0 * n_parts)
+    want = ratio_bootstrap_ci(n.astype(float), m, 400, 0)
+    assert want[0] == pytest.approx(rate)
+    assert fixed["fa_ci"]["fa_per_symbol_day"] == pytest.approx(list(want[1]))
+    lo, hi = fixed["fa_ci"]["fa_per_symbol_day"]
+    assert lo <= rate <= hi
+
+
+def test_fa_ci_multiplicity_defaults_to_one_for_missing_keys(research, tmp_path):
+    r = rec("ablation", "semisyn:all", 2, 0, [1, 0], provenance="SEMI-SYN")
+    r["fa_by_day"] = {"normal": _fa_days([3, 1, 2]), "hard": {}, "normal_mult": _fa_days([3])}
+    write(research, [r])
+    data, _ = _report(research, tmp_path, n_boot=200)
+    got = data["experiments"]["ablation"]["semisyn:all"]["2"]["fa_ci"]["fa_per_symbol_day"]
+    want = ratio_bootstrap_ci(np.array([3.0, 1.0, 2.0]), np.array([3.0, 1.0, 1.0]), 200, 0)
+    assert got == pytest.approx(list(want[1]))
+
+
+# ---------------------------------------------------------------- M1 selection
+def _m1_row(variant, fa_hard, below=False):
+    return {"variant": variant, "fa_hard": fa_hard, "below_v0": below}
+
+
+def test_m1_select_lowest_fa_among_not_worse_with_simplicity_ties():
+    rows = [
+        _m1_row("all", 11.0),
+        _m1_row("no_ai", 5.0),
+        _m1_row("ai_shift1", 5.0),
+        _m1_row("ai_shift2", 6.0),
+        _m1_row("ai_mondrian", 5.0),
+    ]
+    assert m1_select(rows)["chosen"] == "no_ai"  # tie: V1 < V3 < V2
+    assert m1_select([r for r in rows if r["variant"] != "no_ai"])["chosen"] == "ai_shift1"
+    assert m1_select([rows[0], rows[4], _m1_row("ai_shift2", 5.0)])["chosen"] == "ai_shift2"
+    assert m1_select([rows[0], rows[4]])["chosen"] == "ai_mondrian"
+    # significantly lower recall: excluded even with the lowest FA
+    sel = m1_select([*rows[:1], _m1_row("no_ai", 1.0, below=True), *rows[2:]])
+    assert sel["chosen"] == "ai_shift1"
+    assert "no_ai" in sel["excluded"] and "no_ai" not in sel["candidates"]
+    # V0 wins a tie with any variant (nothing gained), and when all others are worse
+    assert m1_select([_m1_row("all", 5.0), _m1_row("no_ai", 5.0)])["chosen"] == "all"
+    only_v0 = m1_select([_m1_row("all", 9.0), _m1_row("no_ai", 1.0, below=True)])
+    assert only_v0["chosen"] == "all"
+    assert m1_select([_m1_row("no_ai", None)])["chosen"] is None
+
+
+def _m1_recs(split, variant, detected, fa_hard, seeds=(0, 1)):
+    out = []
+    for s in seeds:
+        r = rec("m1_fusion", f"{split}:{variant}", 2, s, detected)
+        r["metrics"]["fa_per_symbol_day_hard"] = fa_hard
+        out.append(r)
+    return out
+
+
+def test_m1_report_selects_on_accept_only(research, tmp_path):
+    v0 = [1] * 16 + [0] * 4
+    worse = [1] * 6 + [0] * 14  # significantly below V0
+    records = [
+        *_m1_recs("accept", "all", v0, 11.0),
+        *_m1_recs("accept", "no_ai", v0, 6.0),
+        *_m1_recs("accept", "ai_shift1", v0[:-1] + [1], 6.0),  # tie with no_ai on FA-hard
+        *_m1_recs("accept", "ai_shift2", worse, 1.0),  # lowest FA but recall drops
+        *_m1_recs("accept", "ai_mondrian", v0, 7.0),
+        # test numbers would favour ai_mondrian: they must not change the choice
+        *_m1_recs("test", "all", v0, 11.0),
+        *_m1_recs("test", "no_ai", v0, 9.0),
+        *_m1_recs("test", "ai_mondrian", v0, 0.5),
+    ]
+    write(research, records)
+    data, text = _report(research, tmp_path)
+    m1 = data["m1_fusion"]
+    assert m1["selection"]["chosen"] == "no_ai"
+    assert set(m1["selection"]["excluded"]) == {"ai_shift2"}
+    acc = {r["variant"]: r for r in m1["splits"]["accept"]["rows"]}
+    assert [r["variant"] for r in m1["splits"]["accept"]["rows"]] == [
+        "all",
+        "no_ai",
+        "ai_shift1",
+        "ai_shift2",
+        "ai_mondrian",
+    ]
+    assert acc["ai_shift2"]["below_v0"] is True and acc["ai_shift2"]["vs_v0"]["diff_mean"] > 0
+    assert acc["no_ai"]["vs_v0"]["diff_mean"] == 0.0 and acc["all"]["vs_v0"] is None
+    assert acc["no_ai"]["fa_hard"] == 6.0
+    assert set(m1["splits"]) == {"accept", "test"}
+    section = _section(text, "m1_fusion")
+    assert "### m1_fusion" in section and "#### accept (REAL)" in section
+    assert "**ผลการเลือก (accept):** V1 no_ai" in section
+    assert "ตัดออก V3 ai_shift2" in section
+    assert "ไม่ใช่ความน่าจะเป็น" in section and "accuracy" not in section.lower()
+
+
+def test_m1_report_without_v0_does_not_select(research, tmp_path):
+    write(research, _m1_recs("accept", "no_ai", [1] * 12, 3.0))
+    data, text = _report(research, tmp_path)
+    assert data["m1_fusion"]["selection"] is None
+    assert any("V0" in n for n in data["m1_fusion"]["notes"])
+
+
+def test_m1_select_excludes_variants_whose_recall_vs_v0_is_undecided():
+    rows = [
+        _m1_row("all", 11.0),
+        {**_m1_row("no_ai", 1.0), "undecided": True, "reason_th": "few"},
+        _m1_row("ai_shift1", 6.0),
+    ]
+    sel = m1_select(rows)
+    assert sel["chosen"] == "ai_shift1"  # no_ai cannot win on FA alone
+    assert "no_ai" in sel["excluded"] and "few" in sel["excluded"]["no_ai"]
+    # V0 always stays eligible, even if flagged
+    only = m1_select([{**_m1_row("all", 9.0), "undecided": True}, rows[1]])
+    assert only["chosen"] == "all" and "all" not in only["excluded"]
+
+
+def test_m1_report_excludes_undecided_variants_with_a_thai_reason(research, tmp_path):
+    few = [1, 0, 1, 0, 1]  # fewer than MIN_EVENTS events: the paired comparison is undecided
+    write(
+        research,
+        [*_m1_recs("accept", "all", few, 11.0), *_m1_recs("accept", "no_ai", few, 1.0)],
+    )
+    data, text = _report(research, tmp_path)
+    m1 = data["m1_fusion"]
+    row = {r["variant"]: r for r in m1["splits"]["accept"]["rows"]}["no_ai"]
+    assert row["undecided"] is True and row["below_v0"] is False
+    assert m1["selection"]["chosen"] == "all"
+    assert "no_ai" in m1["selection"]["excluded"]
+    section = _section(text, "m1_fusion")
+    assert "ตัดออก V1 no_ai: ตัดสิน recall เทียบ V0 ไม่ได้" in section
+    assert "**ผลการเลือก (accept):** V0 all" in section
