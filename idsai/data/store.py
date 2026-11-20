@@ -22,6 +22,8 @@ from idsai.contracts.frames import LABELS, TRADES, conform, empty
 from idsai.data.accounts import AccountBackend
 
 log = logging.getLogger(__name__)
+# the Telegram chat a user is linked to (idsai.product.notify): a disabled account loses it
+TELEGRAM_CHAT_PREF = "tg_chat_id"
 DAY_US = 86_400_000_000
 _EPOCH = date(1970, 1, 1)
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -629,6 +631,11 @@ class Store:
             self._db().execute("UPDATE users SET disabled = ? WHERE username = ?", [flag, username])
             if flag:
                 self._drop_user_sessions(username)
+                user = self.get_user_by_name(username)
+                if user is not None:  # re-enabling must not revive the old Telegram link
+                    prefs = self.get_prefs(user["user_id"])
+                    if prefs.pop(TELEGRAM_CHAT_PREF, None) is not None:
+                        self.set_prefs(user["user_id"], prefs)
 
     def set_password(self, username: str, pw_hash: str) -> None:
         with self._lock:
@@ -694,6 +701,12 @@ class Store:
                 .fetchone()
             )
         return json.loads(row[0]) if row else {}
+
+    def list_prefs(self) -> dict[str, dict]:
+        """Every user's prefs (the built-in `local` user included), keyed by user_id."""
+        with self._lock:
+            rows = self._db().execute("SELECT user_id, json FROM user_prefs").fetchall()
+        return {r[0]: json.loads(r[1]) for r in rows}
 
     def set_prefs(self, user_id: str, prefs: dict) -> None:
         text = json.dumps(prefs, sort_keys=True)

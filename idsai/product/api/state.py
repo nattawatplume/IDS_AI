@@ -28,6 +28,7 @@ class AppState:
     `auth_enabled` turns on sign-in (off: every request is the built-in admin `local`); `limiter`
     holds the in-memory login lock of this app. `allow_signup` opens self sign-up (viewer role,
     rate limited by `signup_limiter`); `env_usernames` are the names seeded from IDSAI_USERS.
+    `telegram` is the Telegram service (idsai.product.notify) or None when the feature is off.
     """
 
     cfg: Settings
@@ -44,6 +45,7 @@ class AppState:
     allow_signup: bool = False
     signup_limiter: SignupLimiter = field(default_factory=SignupLimiter)
     env_usernames: frozenset[str] = frozenset()
+    telegram: Any = None  # a TelegramService when TELEGRAM_BOT_TOKEN is set, else None (off)
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:

@@ -21,10 +21,25 @@ of one point, so `rule_of_three` adds the bound `3 / n` over the same independen
 Retrain decision: `retrain_drift` records at budget 2 on the accept split give the
 champion/challenger verdict (`idsai.ai.learning.compare`, a paired event bootstrap): full stack
 `v1` vs `v2` (what would be deployed), and the AE alone `v1:ai` vs `v2:ai` as a diagnostic.
-The retrain and AE-vs-baselines blocks each use only the records of the most recent
-`config_hash` feeding them, with a note counting the older-config records ignored.
 Its `series` block (recall_any per version, same ratio estimator as the tables) feeds the
 dashboard's before/after chart.
+
+Ablation: `paired_ablation` (budget 2) compares `all` with each subset on REAL (paired event
+bootstrap) and SEMI-SYN (per-seed pairing, symbol-day clusters resampled with the same indices
+for both arms, `paired_ratio_bootstrap`).
+
+The retrain, AE-vs-baselines and ablation blocks each use only the records of the most recent
+`config_hash` feeding them, with a note counting the older-config records ignored.
+
+False alerts: when every record of a cell carries `fa_by_day` (per symbol-day unmatched-episode
+counts, zero days included), FA and FA-hard get a 95 % CI: per symbol-day the mean over the
+cell's records (seeds), then symbol-days resampled with replacement (`bootstrap_ci`). Older
+records without it show the mean alone.
+
+Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
+label family, the share of events whose matched episodes carry each parent technique (or none),
+averaged over seeds; an event with several techniques counts once in each column. Needs
+`per_event[*]["techniques"]` (records written after Part C).
 """
 
 import json
@@ -43,6 +58,9 @@ from idsai.data.store import Store
 from idsai.eval.experiments import AE, BASELINES, EXPERIMENTS
 from idsai.eval.metrics import (
     MIN_EVENTS,
+    UNCLASSIFIED,
+    _parent,
+    bootstrap_ci,
     few_events_th,
     paired_bootstrap,
     ratio_bootstrap_ci,
@@ -102,6 +120,9 @@ NOTES_TH = [
     f"การเปรียบเทียบสองฝั่งต้องมีอย่างน้อย {MIN_EVENTS} เหตุการณ์ ถ้าน้อยกว่านั้นจะไม่สรุปว่าดีกว่า",
     "TTD ติดลบหมายความว่าการแจ้งเตือนเริ่มก่อนเวลาเริ่มของป้ายกำกับ (label)",
     "งบการแจ้งเตือนเป็นเพดาน ไม่ใช่เป้าหมาย: อัตรา FA ที่วัดได้จึงอาจต่ำกว่างบที่ตั้งไว้",
+    "FA/symbol-day [95% CI]: เมื่อผลมีจำนวนการแจ้งเตือนเท็จรายวัน (fa_by_day) จะเฉลี่ยข้าม seed "
+    "ในแต่ละ symbol-day แล้ว bootstrap สุ่มซ้ำทีละ symbol-day (นับวันที่ไม่มีการแจ้งเตือนด้วย); "
+    "ผลรุ่นเก่าที่ไม่มีข้อมูลนี้แสดงเฉพาะค่าเฉลี่ย; (n วัน) คือจำนวน symbol-day ที่ใช้นับ",
     "recall_correct นับเหตุการณ์ที่มีการแจ้งเตือนทับช่วงเหตุการณ์และระบุเทคนิคตรงกับป้ายกำกับ: "
     "เทคนิคของการแจ้งเตือนมาจากแถวที่จัดประเภทได้และมีค่า F สูงสุดของ episode "
     "ส่วนหลักฐานมาจากแถวจุดสูงสุดของ episode ซึ่งอาจเป็นคนละแถวกัน",
@@ -132,6 +153,14 @@ def cluster_counts(records: list[dict], key: str, unit: str) -> tuple[np.ndarray
     `unit == "symbol-day"` clusters by `(symbol, day)` of the event; otherwise by label_id.
     Clusters are returned in sorted key order.
     """
+    _, hits, n = _cluster_counts_keyed(records, key, unit)
+    return hits, n
+
+
+def _cluster_counts_keyed(
+    records: list[dict], key: str, unit: str
+) -> tuple[list[tuple], np.ndarray, np.ndarray]:
+    """`cluster_counts` plus the sorted cluster keys (`(symbol, day)` or `(label_id,)`)."""
     hits: dict[tuple, float] = defaultdict(float)
     n: dict[tuple, int] = defaultdict(int)
     for r in records:
@@ -141,6 +170,7 @@ def cluster_counts(records: list[dict], key: str, unit: str) -> tuple[np.ndarray
             n[k] += 1
     keys = sorted(n)
     return (
+        keys,
         np.array([hits[k] for k in keys], dtype=np.float64),
         np.array([n[k] for k in keys], dtype=np.float64),
     )
@@ -190,8 +220,15 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
         "ci": None,
         "std": None,
         "rule_of_three": None,
+        "fa_ci": None,
+        "n_fa_days": None,
+        "n_hard_days": None,
     }
     if ok:
+        out["fa_ci"] = {m: _fa_ci(ok, which, n_boot) for m, which in FA_DAYS.items()}
+        for k in ("n_fa_days", "n_hard_days"):
+            vals = [r["metrics"].get(k) for r in ok if r["metrics"].get(k) is not None]
+            out[k] = int(max(vals)) if vals else None
         out["mean"] = {m: _finite_mean([r["metrics"].get(m) for r in ok]) for m in MEAN_METRICS}
         ci, std, r3 = {}, {}, {}
         for metric, key in CI_METRICS.items():
@@ -210,6 +247,114 @@ def _cell(records: list[dict], n_boot: int) -> dict[str, Any]:
             std["recall_correct"] = None
             r3["recall_correct"] = None
     return out
+
+
+FA_DAYS = {"fa_per_symbol_day": "normal", "fa_per_symbol_day_hard": "hard"}
+
+
+def _fa_ci(records: list[dict], which: str, n_boot: int) -> list[float] | None:
+    """95 % CI of a cell's FA rate from `fa_by_day[which]` (None unless every record has it).
+
+    Per symbol-day the mean over the records that list it (seeds), then a bootstrap over days.
+    """
+    days = [(r.get("fa_by_day") or {}).get(which) for r in records]
+    if not days or not all(days):
+        return None
+    per_day: dict[str, list[float]] = defaultdict(list)
+    for d in days:
+        for k, v in d.items():
+            per_day[k].append(float(v))
+    means = np.array([np.mean(per_day[k]) for k in sorted(per_day)], dtype=np.float64)
+    _, (lo, hi) = bootstrap_ci(means, n_boot, CI_SEED)
+    return [lo, hi] if math.isfinite(lo) else None
+
+
+CONFUSION_SETS = (("real_t001", "full"), ("semisyn", None))  # None: every variant (family)
+NONE_COL = "none"
+NO_TECHNIQUES_TH = (
+    "ยังไม่มีข้อมูลเทคนิคที่ระบุต่อเหตุการณ์ (techniques) ในผลชุดนี้ "
+    "ต้องรัน `idsai eval` ใหม่จึงจะสร้างตาราง confusion ได้"
+)
+CONFUSION_NOTE_TH = (
+    "ค่าในตาราง = สัดส่วนเหตุการณ์ของ family นั้น (เฉลี่ยข้าม seed) ที่ episode ที่จับคู่ได้ระบุเทคนิคหลัก "
+    f"(parent) ตามคอลัมน์; {UNCLASSIFIED} = ระบุเทคนิคไม่ได้; {NONE_COL} = ตรวจไม่พบ; "
+    "เหตุการณ์ที่ถูกระบุหลายเทคนิคนับในทุกคอลัมน์ของเทคนิคเหล่านั้น ผลรวมของแถวจึงอาจเกิน 1"
+)
+
+
+def _confusion(runs: list[dict]) -> dict[str, Any]:
+    """Label family x predicted parent technique (budget 2), see the module docstring."""
+    out: dict[str, Any] = {}
+    for exp, variant in CONFUSION_SETS:
+        name = exp if variant is None else f"{exp} {variant}"
+        recs = [
+            r
+            for r in runs
+            if r["experiment"] == exp
+            and (variant is None or r["variant"] == variant)
+            and float(r["budget"]) == PAIRED_BUDGET
+            and r.get("metrics") is not None
+            and r.get("per_event")
+        ]
+        usable = [r for r in recs if all("techniques" in pe for pe in r["per_event"].values())]
+        block: dict[str, Any] = {"budget": PAIRED_BUDGET, "columns": [], "rows": [], "notes": []}
+        if usable and len(usable) < len(recs):
+            block["notes"].append(f"ไม่นับ {len(recs) - len(usable)} run ที่ไม่มีข้อมูล techniques")
+        # per seed and label family: events, and events per predicted column
+        n: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        cnt: dict[int, dict[str, dict[str, int]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(int))
+        )
+        cols: set[str] = set()
+        for r in usable:
+            for pe in r["per_event"].values():
+                fam = pe.get("family") or "?"
+                n[r["seed"]][fam] += 1
+                parents = sorted({_parent(t) for t in pe["techniques"]}) or [NONE_COL]
+                for c in parents:
+                    cnt[r["seed"]][fam][c] += 1
+                cols.update(parents)
+        cols.discard(NONE_COL)
+        columns = [*sorted(cols), NONE_COL]
+        for fam in sorted({f for by_fam in n.values() for f in by_fam}):
+            seeds = sorted(s for s in n if n[s].get(fam))
+            block["rows"].append(
+                {
+                    "family": fam,
+                    "n_seeds": len(seeds),
+                    "n_events": max(n[s][fam] for s in seeds),
+                    "share": {
+                        c: float(np.mean([cnt[s][fam].get(c, 0) / n[s][fam] for s in seeds]))
+                        for c in columns
+                    },
+                }
+            )
+        if block["rows"]:
+            block["columns"] = columns
+        out[name] = block
+    return out
+
+
+def _confusion_md(conf: dict[str, Any]) -> list[str]:
+    lines = ["", f"## confusion: family ของป้ายกำกับ × เทคนิคที่ระบุ (budget {PAIRED_BUDGET:g})"]
+    for name, block in conf.items():
+        lines += ["", f"### {name}", ""]
+        if not block["rows"]:
+            lines.append(f"- {NO_TECHNIQUES_TH}")
+            continue
+        cols = block["columns"]
+        lines += [
+            "| family | seeds | events | " + " | ".join(cols) + " |",
+            "|" + "---|" * (3 + len(cols)),
+        ]
+        lines += [
+            f"| {row['family']} | {row['n_seeds']} | {row['n_events']} | "
+            + " | ".join(_fmt(row["share"][c]) for c in cols)
+            + " |"
+            for row in block["rows"]
+        ]
+        lines += ["", f"- {CONFUSION_NOTE_TH}", *[f"- {n}" for n in block["notes"]]]
+    return lines
 
 
 def _labels_summary(runs: list[dict]) -> list[dict[str, Any]]:
@@ -307,6 +452,175 @@ def _paired(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
             }
         )
     return {"budget": PAIRED_BUDGET, "metric": "recall_any", "rows": rows, "notes": notes}
+
+
+ABLATION = "ablation"
+ABLATION_FULL = "all"
+ABLATION_ARMS = ("rules+stats", "rules", "stats", "ai")
+ABLATION_SETS = (("real_t001", "REAL"), ("semisyn", "SEMI-SYN"))
+NO_PAIRED_ABLATION_TH = (
+    f"ยังไม่มี paired bootstrap ของ ablation ที่งบ {PAIRED_BUDGET:g} "
+    "จึงไม่สรุปว่าความต่างใดมีนัย (ห้ามใช้ CI ไม่ทับกันแทน)"
+)
+
+
+def paired_ratio_bootstrap(
+    hits_a: np.ndarray, hits_b: np.ndarray, n: np.ndarray, n_boot: int, seed: int
+) -> tuple[float, tuple[float, float]]:
+    """`((sum(hits_a) - sum(hits_b)) / sum(n), 95 % CI)` resampling clusters with replacement.
+
+    Both arms share the clusters and `n` (aligned `(seed, event)` values), and each resample
+    uses the same cluster indices for both, so the difference is that of two cluster ratio
+    estimators (`ratio_bootstrap_ci`). With one cluster per event and equal `n` this equals
+    `paired_bootstrap` draw for draw. No clusters gives NaNs.
+    """
+    d = np.asarray(hits_a, dtype=np.float64) - np.asarray(hits_b, dtype=np.float64)
+    n = np.asarray(n, dtype=np.float64)
+    if d.shape != n.shape or d.ndim != 1:
+        raise ValueError(f"hits and n must be equal-length 1-D arrays: {d.shape} {n.shape}")
+    if n.size == 0 or n.sum() <= 0:
+        return math.nan, (math.nan, math.nan)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n.size, size=(n_boot, n.size))
+    lo, hi = np.percentile(d[idx].sum(axis=1) / n[idx].sum(axis=1), [2.5, 97.5])
+    return float(d.sum() / n.sum()), (float(lo), float(hi))
+
+
+def _ablation_pair(
+    full: dict[int, dict], other: dict[int, dict], n_boot: int, min_effect: float
+) -> tuple[dict[str, Any] | None, str | None]:
+    """One `all` vs subset row (or None and a Thai reason it was skipped).
+
+    REAL events (label_id) are shared by every seed, so like `_paired` only the events every
+    record of both arms has are kept. SEMI-SYN scenarios are drawn per seed (their ids differ
+    across seeds), so the events are intersected per seed; the `(seed, event)` values are then
+    clustered by `(symbol, day)` as in `_cell`.
+    """
+    seeds = sorted(set(full) & set(other))
+    if not seeds:
+        return None, "ไม่มี seed ที่มีผลทั้งสองฝั่ง"
+    recs = [arm[s] for arm in (full, other) for s in seeds]
+    unit = _bootstrap_unit(recs)
+    if unit == UNIT_EVENT:
+        common = set.intersection(*[set(r["per_event"]) for r in recs])
+        events = {s: sorted(common) for s in seeds}
+    else:
+        events = {s: sorted(set(full[s]["per_event"]) & set(other[s]["per_event"])) for s in seeds}
+    if not any(events.values()):
+        return None, "ไม่มีเหตุการณ์ร่วมกัน"
+
+    def aligned(arm: dict[int, dict]) -> list[dict]:
+        return [{"per_event": {e: arm[s]["per_event"][e] for e in events[s]}} for s in seeds]
+
+    keys_a, hits_a, n = _cluster_counts_keyed(aligned(full), "detected_any", unit)
+    keys_b, hits_b, n_b = _cluster_counts_keyed(aligned(other), "detected_any", unit)
+    # same events, different (symbol, day): not comparable (equal sizes alone are not enough)
+    if keys_a != keys_b or not np.array_equal(n, n_b):
+        return None, "เหตุการณ์เดียวกันอยู่คนละ symbol-day ในสองฝั่ง"
+    diff, (lo, hi) = paired_ratio_bootstrap(hits_a, hits_b, n, n_boot, CI_SEED)
+    k = int(n.size)  # independent clusters: events (REAL) or symbol-days (SEMI-SYN)
+    enough = k >= MIN_EVENTS
+    if enough:
+        reason = None
+    elif unit == UNIT_EVENT:
+        reason = few_events_th(k)
+    else:
+        reason = f"ยังตัดสินไม่ได้ มีเพียง {k} กลุ่ม ({unit}) ต้องมีอย่างน้อย {MIN_EVENTS} กลุ่มจึงจะตัดสินได้"
+    row = {
+        "n_seeds": len(seeds),
+        "n_events": max(len(v) for v in events.values()),
+        "n_values": int(n.sum()),
+        "n_clusters": k,
+        "ci_unit": unit,
+        "diff_mean": diff,
+        "ci": [lo, hi],
+        "significant": enough and significant(diff, (lo, hi), min_effect),
+        "significant_reverse": enough and significant(-diff, (-hi, -lo), min_effect),
+        "reason_th": reason,
+    }
+    return row, None
+
+
+def _paired_ablation(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any]:
+    """`all` vs each of rules+stats, rules, stats, ai (ablation experiment, budget 2).
+
+    REAL (`real_t001:*`) pairs events like `_paired`; SEMI-SYN (`semisyn:*`) pairs the
+    `(seed, event)` values of each seed and resamples symbol-day clusters with the same
+    indices for both arms (`paired_ratio_bootstrap`). `diff_mean` is recall_any of `all` minus
+    that of the subset; `significant` means `all` is better, `significant_reverse` the subset.
+    Only records of the most recent `config_hash` feeding this block are used.
+    """
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == ABLATION and float(r["budget"]) == PAIRED_BUDGET]
+    )
+    arms: dict[str, dict[int, dict]] = defaultdict(dict)
+    for r in recs:
+        if r.get("metrics") is not None:
+            arms[r["variant"]][r["seed"]] = r
+    rows: list[dict[str, Any]] = []
+    notes = [config_note] if config_note else []
+    for set_name, provenance in ABLATION_SETS:
+        full = f"{set_name}:{ABLATION_FULL}"
+        if full not in arms:
+            if any(v.startswith(f"{set_name}:") for v in arms):
+                notes.append(f"ข้าม {set_name}: ไม่มีผล {full} ที่งบ {PAIRED_BUDGET:g}")
+            continue
+        for sub in ABLATION_ARMS:
+            variant = f"{set_name}:{sub}"
+            row, why = _ablation_pair(arms[full], arms.get(variant, {}), n_boot, min_effect)
+            if row is None:
+                notes.append(f"ข้าม {variant}: {why}")
+                continue
+            if row["ci_unit"] == UNIT_LEGACY:
+                notes.append(f"{variant}: ผล SEMI-SYN รุ่นเก่าไม่มีวันกำกับ CI จึงแคบเกินจริง")
+            rows.append({"set": set_name, "variant": variant, "provenance": provenance, **row})
+    return {
+        "budget": PAIRED_BUDGET,
+        "metric": "recall_any",
+        "full": ABLATION_FULL,
+        "rows": rows,
+        "notes": notes,
+    }
+
+
+def _paired_ablation_md(pa: dict[str, Any], min_effect: float) -> list[str]:
+    lines = [
+        "",
+        f"### ablation: all เทียบชุดย่อย (paired bootstrap, budget {PAIRED_BUDGET:g})",
+        "",
+    ]
+    if not pa["rows"]:
+        return [*lines, f"- {NO_PAIRED_ABLATION_TH}", *[f"- {n}" for n in pa["notes"]]]
+    lines += [
+        "| เทียบ | provenance | seeds | events | bootstrap unit (กลุ่ม) | "
+        "ผลต่าง recall_any (all − X) [95 % CI] | อ่านว่า |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for row in pa["rows"]:
+        sub = row["variant"].split(":", 1)[1]
+        if row["reason_th"]:
+            verdict = row["reason_th"]
+        elif row["significant"]:
+            verdict = f"all ดีกว่า {sub} อย่างมีนัย"
+        elif row["significant_reverse"]:
+            verdict = f"{sub} ดีกว่า all อย่างมีนัย"
+        else:
+            verdict = "ไม่มีนัยสำคัญ"
+        lines.append(
+            f"| all vs {row['variant']} | {row['provenance']} | {row['n_seeds']} | "
+            f"{row['n_events']} | {row['ci_unit']} ({row['n_clusters']}) | "
+            f"{_fmt_ci(row['diff_mean'], row['ci'])} | {verdict} |"
+        )
+    lines += [
+        "",
+        "- ผลต่าง > 0 แปลว่าชุดเต็ม (all) ตรวจพบมากกว่า; ผลต่าง < 0 แปลว่าชุดย่อยตรวจพบมากกว่า",
+        f"- เกณฑ์ (ทั้งสองทิศ): CI ล่างของผลต่าง > 0 และผลต่าง ≥ {min_effect:g} (ห้ามใช้ CI ไม่ทับกันแทน)",
+        "- REAL: สุ่มซ้ำทีละเหตุการณ์ด้วยดัชนีเดียวกันทั้งสองฝั่ง; SEMI-SYN: จับคู่ (seed, เหตุการณ์) "
+        "ของแต่ละ seed แล้วสุ่มซ้ำทีละ symbol-day ด้วยดัชนีเดียวกันทั้งสองฝั่ง "
+        "(ตัวประมาณแบบอัตราส่วนเดียวกับตาราง)",
+        *[f"- {n}" for n in pa["notes"]],
+    ]
+    return lines
 
 
 RETRAIN = "retrain_drift"
@@ -506,6 +820,12 @@ def _fmt_ci(mean: float | None, ci: list[float] | None) -> str:
     return f"{s} [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci else s
 
 
+def _fmt_fa(mean: float | None, ci: list[float] | None, n_days: int | None) -> str:
+    """`x [lo, hi] (n วัน)`; the CI and the day count only when known."""
+    s = _fmt_ci(mean, ci)
+    return f"{s} ({n_days} วัน)" if mean is not None and n_days else s
+
+
 def _fmt_recall(mean: float | None, std: float | None, ci: list[float] | None) -> str:
     if mean is None:
         return "–"
@@ -553,6 +873,7 @@ def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
     flags += [f"error: {_error_th(e)}" for e in c["errors"]]
     flags += [_rule_of_three_th(metric, r) for metric, r in (c["rule_of_three"] or {}).items() if r]
     m, ci, std = c["mean"], c["ci"] or {}, c["std"] or {}
+    fa_ci = c.get("fa_ci") or {}
     if m is None:
         cells = ["–"] * 8
     else:
@@ -561,8 +882,12 @@ def _row_md(variant: str, budget: str, c: dict[str, Any]) -> str:
             _fmt_recall(m["recall_correct"], std.get("recall_correct"), ci.get("recall_correct")),
             c["ci_unit"],
             f"{_fmt(m['precision'])} (prevalence {_fmt(m['prevalence'], 4)})",
-            _fmt(m["fa_per_symbol_day"]),
-            _fmt(m["fa_per_symbol_day_hard"]),
+            _fmt_fa(m["fa_per_symbol_day"], fa_ci.get("fa_per_symbol_day"), c.get("n_fa_days")),
+            _fmt_fa(
+                m["fa_per_symbol_day_hard"],
+                fa_ci.get("fa_per_symbol_day_hard"),
+                c.get("n_hard_days"),
+            ),
             f"{_fmt(m['ttd_median_s'], 0)} / {_fmt(m['ttd_p90_s'], 0)}",
             _fmt(m["pr_auc"]),
         ]
@@ -621,7 +946,9 @@ def build_report(
             for v, by_b in sorted(grouped[exp].items())
         }
     paired = _paired(runs, n_boot, cfg.eval.min_effect)
+    paired_ablation = _paired_ablation(runs, n_boot, cfg.eval.min_effect)
     retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
+    confusion = _confusion(runs)
     data = {
         "header": header,
         "runs": len(runs),
@@ -630,7 +957,9 @@ def build_report(
         "config_hash": _uniq(runs, "config_hash"),
         "experiments": experiments,
         "paired_bootstrap": paired,
+        "paired_ablation": paired_ablation,
         "retrain_decision": retrain,
+        "confusion": confusion,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
     }
@@ -662,13 +991,16 @@ def build_report(
     ]
     cols = (
         "| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | "
-        "recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | "
-        "FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |"
+        "recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | "
+        "FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | "
+        "TTD median / p90 (s) | PR-AUC | notes |"
     )
     for exp in order:
         lines += ["", f"## {exp}", "", cols, "|" + "---|" * 14]
         for v, by_b in experiments[exp].items():
             lines += [_row_md(v, b, c) for b, c in by_b.items()]
+        if exp == ABLATION:
+            lines += _paired_ablation_md(paired_ablation, cfg.eval.min_effect)
     lines += [
         "",
         f"## AE vs baselines (paired bootstrap, budget {PAIRED_BUDGET:g}, real_t001 events)",
@@ -688,6 +1020,7 @@ def build_report(
         lines += ["", *[f"- {n}" for n in paired["notes"]]]
     lines += ["", f"เกณฑ์: CI ล่าง > 0 และผลต่าง ≥ {cfg.eval.min_effect:g}"]
     lines += _retrain_md(retrain, cfg.eval.min_effect)
+    lines += _confusion_md(confusion)
     lines += [
         "",
         "## หมายเหตุ",

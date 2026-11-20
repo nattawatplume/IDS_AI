@@ -74,6 +74,7 @@ from idsai.product.auth import (
     verify_or_dummy,
 )
 from idsai.product.explainer import explain
+from idsai.product.notify.telegram import PREF_KEY as TG_PREF_KEY
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 S_US = 1_000_000
@@ -98,6 +99,10 @@ SIGNUP_FAILED_TH = "บันทึกบัญชีไม่สำเร็จ
 LAST_ADMIN_TH = "ต้องมีผู้ดูแลอย่างน้อย 1 คน"
 DISPLAY_NAME_MAX = 40
 WS_RECHECK_S = 60  # an open WebSocket re-reads its session this often; gone or disabled: 4401
+WATCH_MAX = 50
+TG_OFF_TH = "ระบบแจ้งเตือน Telegram ปิดอยู่"
+TG_NOT_READY_TH = "ยังเชื่อมต่อ Telegram ไม่สำเร็จ ลองใหม่อีกครั้งในอีกสักครู่"
+SERVER_PREFS = frozenset({TG_PREF_KEY})  # set by the server only: never accepted, never returned
 LOCAL_USER = {"user_id": "local", "username": "local", "display_name": "local", "role": "admin"}
 _USER_KEYS = ("user_id", "username", "display_name", "role")
 
@@ -170,6 +175,15 @@ class PrefsIn(_Body):
     eval_budget: StrictInt | Annotated[StrictFloat, Field(allow_inf_nan=False)] | None = None
     tour_done: StrictBool | None = None
     fx_off: StrictBool | None = None
+    # the symbols Telegram alerts cover (each must be the app's); absent: all, empty: none
+    watch: list[Annotated[str, StringConstraints(max_length=32)]] | None = Field(
+        default=None, max_length=WATCH_MAX
+    )
+
+
+def public_prefs(prefs: dict) -> dict:
+    """`prefs` without the server-only keys: what every response that carries prefs sends."""
+    return {k: v for k, v in prefs.items() if k not in SERVER_PREFS}
 
 
 class _ClientGone(Exception):
@@ -384,7 +398,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         store.create_session(user["user_id"], token_hash(token), now, now + life_s * S_US, remember)
         me = {k: user[k] for k in _USER_KEYS}  # never pw_hash
         out = {k: me[k] for k in ("username", "display_name", "role")}
-        resp = _json({**out, "prefs": store.get_prefs(me["user_id"])})
+        resp = _json({**out, "prefs": public_prefs(store.get_prefs(me["user_id"]))})
         resp.set_cookie(COOKIE, token, max_age=life_s if remember else None, **cookie_flags())
         return resp
 
@@ -467,6 +481,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
 
     @app.get("/api/me")
     async def me(user: Signed):
+        prefs = state.store.get_prefs(user["user_id"])
         return _json(
             {
                 "username": user["username"],
@@ -474,9 +489,35 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                 "role": user["role"],
                 "auth_enabled": state.auth_enabled,
                 "signup": state.auth_enabled and state.allow_signup,
-                "prefs": state.store.get_prefs(user["user_id"]),
+                "prefs": public_prefs(prefs),
+                "telegram": {
+                    "enabled": state.telegram is not None,
+                    "linked": state.telegram is not None and TG_PREF_KEY in prefs,
+                },
             }
         )
+
+    @app.post("/api/me/telegram/link", dependencies=[Depends(same_origin)])
+    async def telegram_link(user: Signed):
+        if state.telegram is None:
+            raise HTTPException(404, TG_OFF_TH)
+        out = state.telegram.link_url(user["user_id"])
+        if out is None:  # the bot's name is not known yet (getMe has not answered)
+            raise HTTPException(503, TG_NOT_READY_TH)
+        audit(user, "telegram_link_code")
+        return _json(out)
+
+    @app.delete("/api/me/telegram", dependencies=[Depends(same_origin)])
+    async def telegram_unlink(user: Signed):
+        if state.telegram is None:
+            raise HTTPException(404, TG_OFF_TH)
+        try:
+            unlinked = state.telegram.unlink_user(user["user_id"])
+        except AccountStoreError:
+            raise HTTPException(503, SIGNUP_FAILED_TH) from None
+        if unlinked:
+            audit(user, "telegram_unlink")
+        return _json({"linked": False})
 
     @app.put("/api/me/prefs", dependencies=[Depends(same_origin)])
     async def put_prefs(body: PrefsIn, user: Signed):
@@ -485,6 +526,11 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         budgets = state.cfg.eval.budgets_per_symbol_day
         if body.eval_budget is not None and body.eval_budget not in budgets:
             raise HTTPException(422, f"eval_budget ต้องเป็นหนึ่งใน {budgets}")
+        if body.watch is not None:
+            unknown = [s for s in body.watch if s not in (state.symbols or [])]
+            if unknown:
+                raise HTTPException(422, "watch มี symbol ที่ระบบไม่รู้จัก")
+            body.watch = list(dict.fromkeys(body.watch))
         prefs = state.store.get_prefs(user["user_id"])
         for k, v in body.model_dump(exclude_unset=True).items():
             if v is None:
@@ -495,7 +541,7 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
             state.store.set_prefs(user["user_id"], prefs)
         except AccountStoreError:
             raise HTTPException(503, SIGNUP_FAILED_TH) from None
-        return _json(prefs)
+        return _json(public_prefs(prefs))
 
     @app.get("/api/audit")
     async def audit_log(

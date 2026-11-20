@@ -3,7 +3,7 @@
 ## ที่มาของตัวเลข
 
 - ตารางในภาคผนวกคัดลอกตรงตัวจาก `data/report.md` ที่สร้างด้วย `uv run idsai report` (อ่านทุก run ใน `data/research.duckdb`) ตัวเลขผลการทดลองในบทอภิปรายมาจากตารางนั้นและ `data/report.json` ส่วนตัวเลขอื่นมาจาก: ผลวัด pump จริงช่วง train (`scripts/measure_pumps.py`, log `measure.log`), บันทึก inject เดโมของ Task 19 ใน `progress.md` (F 3.54 / 2.92, τ 3.87), log ของ eval (`eval_seed0.log`, `eval_seeds1to4.log`, `eval_seeds1to4b.log`) และ `live_check.log`
-- git_sha `b1e37136421e4e569a71723c6acc59c3867611ef` · config_hash `53e3b662ab96` · signatures_sha `0fe49a5924d7` (ไม่ได้ปรับ signature ตาม Ruling 46 L3) · split `7fb702a841c5`
+- git_sha `b1e37136421e4e569a71723c6acc59c3867611ef` · config_hash `53e3b662ab96` · signatures_sha `0fe49a5924d7` (ไม่ได้ปรับ signature ตาม Ruling 46 L3) · split `7fb702a841c5` · รอบเติมข้อมูล (2026-11-19/20) รัน real_t001 และ semisyn ใหม่ที่ commit 9aecfee ด้วย `configs/eval_prev_live.yaml` (config_hash เดิม) ตัวเลขทุกค่าที่มีอยู่เดิมตรงกับรอบก่อนทุกตัว (เทียบ metrics 80 runs ต่างกัน 0 ค่า) รอบนี้เพิ่มเฉพาะ CI ของ FA, จำนวนวัน และตารางสับสน ตารางในภาคผนวกจึงขึ้นคำเตือนว่ามีหลาย git_sha
 - `uv run idsai eval` 6 การทดลอง (real_t001, semisyn, ablation, baselines, ref_supervised, retrain_drift) × seed 0–4 รวม 500 runs ไม่มี error งบการแจ้งเตือน 0.1 / 0.5 / 2 / 10 ต่อ symbol-day งบหลักคือ 2
 - เครื่อง: โน้ตบุ๊ก Windows เครื่องเดียว รันทีละการทดลอง เวลารวมจากบรรทัด `wall` ใน log: seed 0 = 16,156 s (ราว 4.49 ชม.), seed 1–4 = 34,366 s (ราว 9.55 ชม.), รวม 50,522 s (ราว 14.0 ชม.) การรัน semisyn seed 1–4 ครั้งแรก (เริ่ม 2026-11-04 10:36:38Z) หยุดก่อนจบโดยไม่มีผลใน log แล้วเริ่มใหม่ 12:56:33Z เวลาของครั้งที่หยุดไม่นับรวม
 - ป้ายจริง 601 รายการ ใช้ได้ 477 ตรวจเวลาในป้ายผ่านทุกแหล่งจึงไม่ได้ตั้ง `label_offset_s` (ดู `docs/DATA_LIMITATIONS.md` หัวข้อ 2)
@@ -21,12 +21,12 @@
 | | SEMI-SYN pump_burst | recall_any 0.295 [0.264, 0.328], n = 395; recall_correct 0.186 [0.163, 0.208] | ไม่ถึง |
 | | SEMI-SYN pump_stealth | recall_any 0.351 [0.328, 0.375] (std ข้าม seed 0.191), n = 394; recall_correct 0.101 [0.085, 0.118] | ไม่ถึง |
 | | SEMI-SYN wash_pingpong | recall_any 1.000 [1.000, 1.000] (rule of three: ขอบล่างราว 99 %), n = 401; recall_correct 0.001 [0.000, 0.003] | recall_any ถึง, ระบุเทคนิคไม่ถึง |
-| FA ต่อ symbol-day นอกชุดสอบเทียบ ≤ งบ | REAL test (real_t001 full, 579 symbol-day ในชุด; FA นับเฉพาะวันปกติ จำนวนวันไม่อยู่ในรายงาน) | 0.121 / 0.400 / 1.650 / 6.477 ที่งบ 0.1 / 0.5 / 2 / 10 | ถึงที่งบ 0.5, 2, 10; เกินที่งบ 0.1 |
+| FA ต่อ symbol-day นอกชุดสอบเทียบ ≤ งบ | REAL test (real_t001 full, 579 symbol-day ในชุด; FA นับเฉพาะวันปกติ 401 symbol-day) | 0.121 [0.079, 0.170] / 0.400 [0.263, 0.574] / 1.650 [1.240, 2.166] / 6.477 [5.670, 7.387] ที่งบ 0.1 / 0.5 / 2 / 10 | ค่าเฉลี่ยถึงที่งบ 0.5, 2, 10 เกินที่งบ 0.1; ที่งบ 2 ขอบบน CI เกินงบเล็กน้อย |
 | | REAL accept (retrain_drift v1, 456 symbol-day ในชุด; FA นับเฉพาะวันปกติ จำนวนวันไม่อยู่ในรายงาน) | 0.204 / 0.924 / 3.578 / 10.557 | เกินทุกงบ |
-| FA บน hard negative (spec: ต้องไม่แจ้งเตือน) | REAL (real_t001 full) | 11.170 ต่อ symbol-day ที่งบ 2 (0.730 / 3.010 / 23.160 ที่งบ 0.1 / 0.5 / 10) | ไม่ถึง |
-| compute latency p99 < 2 s | – | ไม่มีในรายงานนี้ (eval ไม่ได้วัด latency) | ยังไม่ได้วัด |
+| FA บน hard negative (spec: ต้องไม่แจ้งเตือน) | REAL (real_t001 full, 20 symbol-day) | 11.170 [6.460, 17.021] ต่อ symbol-day ที่งบ 2 (0.730 / 3.010 / 23.160 ที่งบ 0.1 / 0.5 / 10) | ไม่ถึง |
+| compute latency p99 < 2 s | replay STEEMBTC 2021-01-18 ทั้งวัน ชุดเดโม เครื่องนี้ (`scripts/bench_latency.py`, n = 8,637 แถว) | p99 5.9 ms, median 4.0 ms, max 13.7 ms (เฉพาะเวลาประมวลผล ไม่รวมเครือข่าย การรอปิดแท่ง stride และการเขียน store) | ถึง (วัด 1 symbol ยังไม่ได้วัดหลาย symbol พร้อมกัน) |
 
-- รายงานไม่มี CI ของ FA และไม่มีจำนวนวัน hard negative
+- CI ของ FA ได้จากการ bootstrap ทีละ symbol-day (เฉลี่ยข้าม seed ในแต่ละวันก่อน) hard negative มีแค่ 20 symbol-day CI จึงกว้าง
 - REAL ได้ recall_any ≥ 0.8 เฉพาะที่งบ 10 (0.808 [0.751, 0.858]) แลกกับ FA 6.477 และ hard 23.160 ต่อ symbol-day
 - ตัวเลขทุกตัวคือความผิดปกติทางสถิติ ไม่ใช่ข้อกล่าวหาต่อบุคคลหรือตลาดใด
 
@@ -53,7 +53,7 @@
 | all (rules+stats+ai) | 0.739 [0.680, 0.801] | 1.650 / 11.170 | 0.552 [0.539, 0.567] |
 
 - การเพิ่ม AE บน rules+stats ไม่ทำให้ recall สูงขึ้น: REAL 0.745 → 0.739, recall_correct 0.435 → 0.399, แต่ FA บน hard negative เพิ่มจาก 5.550 เป็น 11.170 บน SEMI-SYN ที่งบ 2 ชุด all ได้ 0.552 เทียบ rules+stats 0.710 (ที่งบ 10 ใกล้กัน 0.923 กับ 0.927)
-- รายงานนี้ไม่มี paired bootstrap ของ ablation จึงไม่สรุปว่าความต่างใดมีนัย (ห้ามใช้ CI ไม่ทับกันแทน)
+- paired bootstrap ที่งบ 2 (ภาคผนวก): REAL all − rules+stats = −0.006 [−0.039, 0.028] ไม่มีนัย คือ AE ไม่เพิ่ม recall บนข้อมูลจริง; SEMI-SYN = −0.157 [−0.177, −0.138] rules+stats ตรวจพบมากกว่าอย่างมีนัย (หน่วยสุ่ม symbol-day 401 กลุ่ม) ส่วน all ดีกว่า rules, stats และ ai เดี่ยวอย่างมีนัยบน REAL
 - rules ถึงเพดานที่งบ 2 (τ saturated) งบจึงไม่ได้ถูกทดสอบจริง; stats ระบุเทคนิคไม่ได้ (recall_correct 0 จาก 200 events REAL, rule of three ขอบบนราว 2 %) recall_correct จึงมาจากชั้น rule
 
 ### 4. retrain_drift Decision (REAL, split accept, 94 events, 5 seed, budget 2)
@@ -68,7 +68,7 @@ ref.supervised_rf: recall_any 0.851 [0.802, 0.896], FA 2.121, hard 1.610, PR-AUC
 
 ### 6. เรื่องที่ยกมาจากงานก่อน (Ruling 46 L5)
 
-- **ความเฉพาะเจาะจงของ T001 บนข้อมูลจริง และตารางสับสนรายตระกูล:** `data/report.json` ไม่มี per_event จึงทำตารางไม่ได้ ไม่มีในรายงานนี้ (บันทึกเป็นข้อจำกัด) สิ่งที่เห็นได้: REAL recall_correct 0.399 ต่ำกว่า recall_any 0.739 มาก และ SEMI-SYN wash_pingpong recall_any 1.000 แต่ recall_correct 0.001 แปลว่าระบบเห็นความผิดปกติในวันที่มี wash แต่แทบไม่เคยให้เทคนิคตรงป้าย ส่วนว่าให้เป็นเทคนิคอะไรแทน ต้องรอ per_event
+- **ความเฉพาะเจาะจงของ T001 บนข้อมูลจริง และตารางสับสนรายตระกูล (budget 2, ภาคผนวก):** REAL telegram_pump ระบุเป็น MM-T001 0.399, MM-T000 (ระบุไม่ได้) 0.339, MM-T005 0.001, ตรวจไม่พบ 0.261 ส่วน SEMI-SYN wash_pingpong ถูกระบุเป็น MM-T000 0.988 และ MM-T005 เพียง 0.001 แปลว่าระบบเห็นความผิดปกติในวันที่มี wash แต่ชั้น rule แทบไม่ให้เทคนิคที่ถูก (งาน M3 ใน `docs/ROADMAP.md`) pump_burst ตรวจไม่พบ 0.704 และ pump_stealth 0.648 เหตุการณ์ที่ถูกระบุหลายเทคนิคนับทุกคอลัมน์
 - **Ruling 30 (เริ่ม batch เร็วขึ้น 60 นาที) ไม่ได้ทำ:** batch เริ่มนับหน้าต่างใหม่ทุกวัน ส่วน replay/live เป็นสายต่อเนื่อง τ ที่สอบเทียบจากแถว batch จึงอาจคลาดเล็กน้อยในชั่วโมงแรกหลังเที่ยงคืนเมื่อรันแบบ stream ทางแก้ต้องใช้ข้อมูล D−2, ล้าง cache และสอบเทียบใหม่ จึงไม่ทำในรอบนี้ ตัวเลขในรายงานเป็นของ batch ทั้งหมด
 - **inject เดโมที่จับไม่ได้:** ใน Task 19 ฉีด pump_burst ช่วง test สองครั้ง (impact 3.5 % vol ×6 และ 4.1 % vol ×25) ได้ F สูงสุด 3.54 และ 2.92 ต่ำกว่า τ 3.87 ที่งบ 2 ของชุดเดโม ผลนี้สอดคล้องกับ SEMI-SYN pump_burst ที่งบ 2 ซึ่งจับได้ 0.295 [0.264, 0.328] (n = 395) คือพลาดเป็นส่วนใหญ่ ช่วง test ตั้งใจให้ยากและอยู่นอกการกระจายของ pump จริง: impact 3–5 % ต่ำกว่าหรือใกล้เคียงขอบ 10 % ของ pump จริงช่วง train (0.0499) และ vol_mult 5–30 ต่ำกว่าขอบ 10 % (45.39) (มัธยฐานของ pump จริง: impact 0.1543, vol_mult 738.9) ส่วน pump จริงบนข้อมูล REAL จับได้ 0.739 ช่วง train ของ Red-Team ไม่ได้ถูกประเมินในรายงานนี้
 
@@ -79,9 +79,19 @@ ref.supervised_rf: recall_any 0.851 [0.802, 0.896], FA 2.121, hard 1.610, PR-AUC
 - ผล REAL ใช้ได้กับคู่ BTC ช่วง 2018–2022 เท่านั้น ป้ายบางส่วน (Hu-only) มีเวลาห่างจุดปริมาณซื้อขายสูงสุดมาก
 - SEMI-SYN วัดเฉพาะรูปแบบที่จำลองในช่วง test ไม่ได้วัดการปั่นจริง
 - หน้าต่างทับซ้อนมี autocorrelation ทำให้การรับประกันของ conformal p-value อ่อนลง อัตรา FA จริงจึงอาจเกินงบ (เห็นที่งบ 0.1 และบน split accept)
-- ไม่มี CI ของ FA, ไม่มีจำนวนวัน hard negative, ไม่มี latency p99, ไม่มี per_event
+- latency วัดบน 1 symbol-day ของเครื่องนี้เท่านั้น; CI ของ FA บน ablation, baselines, ref_supervised และ retrain_drift ยังไม่มีเพราะยังไม่ได้รันการทดลองเหล่านั้นใหม่ (ก่อนรัน ablation ใหม่ต้องแก้การรวม fa_by_day ของ semisyn หลายตระกูล ดู `docs/ROADMAP.md` M0)
 - live check รอบนี้เป็นการตรวจ sensor อย่างเดียว ไม่มีการตรวจจับบนข้อมูลสด
 - ไม่ได้ปรับ signature บนข้อมูล train (L3) recall ของชั้น rule อาจต่ำกว่าชุดที่ปรับแล้ว
+
+### 8. หลังการแจ้งเตือน: เตือนก่อนจุดสูงสุดหรือไม่ และราคาเป็นอย่างไร (REAL, real_t001 full, budget 2, 5 seed)
+
+ที่มา `scripts/post_alert_outcomes.py` → `data/post_alert_outcomes.json` (อ่านอย่างเดียว) เวลาเตือน = เวลาเริ่ม episode แรกที่จับคู่กับป้าย (t0 + TTD) ไม่รวมเวลารอปิดแท่ง 1 s และ stride 10 s
+
+- จับได้ 151 จาก 200 ป้าย (739 คู่ ป้าย × seed) วัดจุดสูงสุดได้ 136 ป้าย (ตัดออก late_peak 9, no_rise 6)
+- เตือนก่อนจุดสูงสุด 0.847 [0.788, 0.901] (เฉลี่ยรายป้ายข้าม seed ที่จับได้, bootstrap รายป้าย) ค่ามัธยฐานเตือนก่อน 40 s (q10 −1.6 s, q90 355 s); เฉพาะคู่ที่ episode เริ่มไม่เกิน 120 s ก่อนป้าย: 0.822 [0.757, 0.889], มัธยฐาน 31 s
+- ราคา 1 ชม. หลังเตือนต่ำกว่าราคาตอนเตือน 0.888 [0.838, 0.934] ของป้าย, มัธยฐานผลต่าง −11.3 % แต่ภายในชั่วโมงนั้นราคายังขึ้นได้อีก (มัธยฐานของจุดสูงสุด +15.5 %) ต้องรายงานคู่กันเสมอ
+- ผล 24 ชม. มีเพียง 26 จาก 739 คู่ (ไม่ได้เก็บ trades วันถัดไป) จึงไม่ใช้
+- เป็นสถิติย้อนหลังของ pump ที่ระบบจับได้ ไม่ใช่การพยากรณ์ราคาและไม่ใช่คำแนะนำการลงทุน
 
 ---
 
@@ -93,41 +103,43 @@ runs: 500
 
 signatures_sha: 0fe49a5924d7
 
-git_sha: b1e37136421e4e569a71723c6acc59c3867611ef · config_hash: 53e3b662ab96
+git_sha: 9aecfee1f199ee2695d2d99182c13eb29b688e45-dirty, b1e37136421e4e569a71723c6acc59c3867611ef, ec98769e69b20cf155892fb33118c85307b09e04-dirty · config_hash: 53e3b662ab96
 
 labels (split 7fb702a841c5): eligible 477 of 601; dropped: out_of_period 0, cal_period 91, missing_day 33, no_baseline 0; symbol-days skipped at window loading: none
 
 ทุกตัวเลขมาจากตาราง runs ทั้งหมด; ค่าเฉลี่ยข้าม seed และช่วงความเชื่อมั่น 95 % จากการ bootstrap (หน่วยตามคอลัมน์ bootstrap unit)
 
+**คำเตือน:** ตาราง runs รวมผลจากหลาย git_sha (9aecfee1f199ee2695d2d99182c13eb29b688e45-dirty, b1e37136421e4e569a71723c6acc59c3867611ef, ec98769e69b20cf155892fb33118c85307b09e04-dirty) ผลอาจมาจากโค้ดคนละรุ่น (รุ่น -dirty นับเป็นคนละรุ่น)
+
 ## real_t001
 
-| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |
+| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | TTD median / p90 (s) | PR-AUC | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| full | 0.1 | REAL | 5 | 200 | 0.540 ± 0.025 [0.473, 0.605] | 0.229 ± 0.011 [0.180, 0.285] | event | 0.500 (prevalence 0.0017) | 0.121 | 0.730 | 9 / 61 | 0.243 |  |
-| full | 0.5 | REAL | 5 | 200 | 0.638 ± 0.016 [0.574, 0.699] | 0.301 ± 0.017 [0.241, 0.366] | event | 0.300 (prevalence 0.0017) | 0.400 | 3.010 | 8 / 72 | 0.243 |  |
-| full | 2 | REAL | 5 | 200 | 0.739 ± 0.011 [0.680, 0.801] | 0.399 ± 0.008 [0.334, 0.472] | event | 0.113 (prevalence 0.0017) | 1.650 | 11.170 | 6 / 60 | 0.243 |  |
-| full | 10 | REAL | 5 | 200 | 0.808 ± 0.004 [0.751, 0.858] | 0.481 ± 0.009 [0.412, 0.555] | event | 0.037 (prevalence 0.0017) | 6.477 | 23.160 | -0 / 46 | 0.243 |  |
+| full | 0.1 | REAL | 5 | 200 | 0.540 ± 0.025 [0.473, 0.605] | 0.229 ± 0.011 [0.180, 0.285] | event | 0.500 (prevalence 0.0017) | 0.121 [0.079, 0.170] (401 วัน) | 0.730 [0.340, 1.190] (20 วัน) | 9 / 61 | 0.243 |  |
+| full | 0.5 | REAL | 5 | 200 | 0.638 ± 0.016 [0.574, 0.699] | 0.301 ± 0.017 [0.241, 0.366] | event | 0.300 (prevalence 0.0017) | 0.400 [0.263, 0.574] (401 วัน) | 3.010 [1.150, 5.601] (20 วัน) | 8 / 72 | 0.243 |  |
+| full | 2 | REAL | 5 | 200 | 0.739 ± 0.011 [0.680, 0.801] | 0.399 ± 0.008 [0.334, 0.472] | event | 0.113 (prevalence 0.0017) | 1.650 [1.240, 2.166] (401 วัน) | 11.170 [6.460, 17.021] (20 วัน) | 6 / 60 | 0.243 |  |
+| full | 10 | REAL | 5 | 200 | 0.808 ± 0.004 [0.751, 0.858] | 0.481 ± 0.009 [0.412, 0.555] | event | 0.037 (prevalence 0.0017) | 6.477 [5.670, 7.387] (401 วัน) | 23.160 [16.150, 31.231] (20 วัน) | -0 / 46 | 0.243 |  |
 
 ## semisyn
 
-| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |
+| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | TTD median / p90 (s) | PR-AUC | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| pump_burst | 0.1 | SEMI-SYN | 5 | 395 | 0.049 ± 0.018 [0.035, 0.066] | 0.018 ± 0.009 [0.011, 0.026] | symbol-day | 0.283 (prevalence 0.0061) | 0.122 | – | 208 / 320 | 0.134 |  |
-| pump_burst | 0.5 | SEMI-SYN | 5 | 395 | 0.106 ± 0.026 [0.085, 0.131] | 0.047 ± 0.013 [0.034, 0.061] | symbol-day | 0.229 (prevalence 0.0061) | 0.353 | – | 152 / 278 | 0.134 |  |
-| pump_burst | 2 | SEMI-SYN | 5 | 395 | 0.295 ± 0.047 [0.264, 0.328] | 0.186 ± 0.039 [0.163, 0.208] | symbol-day | 0.171 (prevalence 0.0061) | 1.425 | – | 93 / 224 | 0.134 |  |
-| pump_burst | 10 | SEMI-SYN | 5 | 395 | 0.769 ± 0.026 [0.744, 0.792] | 0.609 ± 0.020 [0.584, 0.633] | symbol-day | 0.117 (prevalence 0.0061) | 6.079 | – | 82 / 161 | 0.134 |  |
-| pump_stealth | 0.1 | SEMI-SYN | 5 | 394 | 0.049 ± 0.020 [0.039, 0.059] | 0.006 ± 0.001 [0.003, 0.010] | symbol-day | 0.283 (prevalence 0.0775) | 0.122 | – | 6103 / 6935 | 0.851 |  |
-| pump_stealth | 0.5 | SEMI-SYN | 5 | 394 | 0.099 ± 0.006 [0.085, 0.114] | 0.019 ± 0.001 [0.012, 0.026] | symbol-day | 0.249 (prevalence 0.0775) | 0.317 | – | 6055 / 6882 | 0.851 |  |
-| pump_stealth | 2 | SEMI-SYN | 5 | 394 | 0.351 ± 0.191 [0.328, 0.375] | 0.101 ± 0.020 [0.085, 0.118] | symbol-day | 0.274 (prevalence 0.0775) | 1.100 | – | 5579 / 6863 | 0.851 |  |
-| pump_stealth | 10 | SEMI-SYN | 5 | 394 | 0.999 ± 0.001 [0.998, 1.000] | 0.485 ± 0.023 [0.453, 0.517] | symbol-day | 0.185 (prevalence 0.0775) | 5.333 | – | 533 / 1008 | 0.851 |  |
-| wash_pingpong | 0.1 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.896 (prevalence 0.0171) | 0.116 | – | 17 / 62 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
-| wash_pingpong | 0.5 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.766 (prevalence 0.0171) | 0.306 | – | 14 / 44 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
-| wash_pingpong | 2 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.449 (prevalence 0.0171) | 1.241 | – | 11 / 33 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
-| wash_pingpong | 10 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.165 (prevalence 0.0171) | 5.171 | – | 8 / 16 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
+| pump_burst | 0.1 | SEMI-SYN | 5 | 395 | 0.049 ± 0.018 [0.035, 0.066] | 0.018 ± 0.009 [0.011, 0.026] | symbol-day | 0.283 (prevalence 0.0061) | 0.122 [0.085, 0.167] (395 วัน) | – | 208 / 320 | 0.134 |  |
+| pump_burst | 0.5 | SEMI-SYN | 5 | 395 | 0.106 ± 0.026 [0.085, 0.131] | 0.047 ± 0.013 [0.034, 0.061] | symbol-day | 0.229 (prevalence 0.0061) | 0.353 [0.257, 0.500] (395 วัน) | – | 152 / 278 | 0.134 |  |
+| pump_burst | 2 | SEMI-SYN | 5 | 395 | 0.295 ± 0.047 [0.264, 0.328] | 0.186 ± 0.039 [0.163, 0.208] | symbol-day | 0.171 (prevalence 0.0061) | 1.425 [1.134, 1.983] (395 วัน) | – | 93 / 224 | 0.134 |  |
+| pump_burst | 10 | SEMI-SYN | 5 | 395 | 0.769 ± 0.026 [0.744, 0.792] | 0.609 ± 0.020 [0.584, 0.633] | symbol-day | 0.117 (prevalence 0.0061) | 6.079 [5.515, 7.088] (395 วัน) | – | 82 / 161 | 0.134 |  |
+| pump_stealth | 0.1 | SEMI-SYN | 5 | 394 | 0.049 ± 0.020 [0.039, 0.059] | 0.006 ± 0.001 [0.003, 0.010] | symbol-day | 0.283 (prevalence 0.0775) | 0.122 [0.087, 0.165] (394 วัน) | – | 6103 / 6935 | 0.851 |  |
+| pump_stealth | 0.5 | SEMI-SYN | 5 | 394 | 0.099 ± 0.006 [0.085, 0.114] | 0.019 ± 0.001 [0.012, 0.026] | symbol-day | 0.249 (prevalence 0.0775) | 0.317 [0.234, 0.425] (394 วัน) | – | 6055 / 6882 | 0.851 |  |
+| pump_stealth | 2 | SEMI-SYN | 5 | 394 | 0.351 ± 0.191 [0.328, 0.375] | 0.101 ± 0.020 [0.085, 0.118] | symbol-day | 0.274 (prevalence 0.0775) | 1.100 [0.889, 1.424] (394 วัน) | – | 5579 / 6863 | 0.851 |  |
+| pump_stealth | 10 | SEMI-SYN | 5 | 394 | 0.999 ± 0.001 [0.998, 1.000] | 0.485 ± 0.023 [0.453, 0.517] | symbol-day | 0.185 (prevalence 0.0775) | 5.333 [4.833, 6.017] (394 วัน) | – | 533 / 1008 | 0.851 |  |
+| wash_pingpong | 0.1 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.896 (prevalence 0.0171) | 0.116 [0.078, 0.162] (401 วัน) | – | 17 / 62 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
+| wash_pingpong | 0.5 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.766 (prevalence 0.0171) | 0.306 [0.215, 0.420] (401 วัน) | – | 14 / 44 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
+| wash_pingpong | 2 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.449 (prevalence 0.0171) | 1.241 [0.941, 1.609] (401 วัน) | – | 11 / 33 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
+| wash_pingpong | 10 | SEMI-SYN | 5 | 401 | 1.000 ± 0.000 [1.000, 1.000] | 0.001 ± 0.002 [0.000, 0.003] | symbol-day | 0.165 (prevalence 0.0171) | 5.171 [4.540, 5.897] (401 วัน) | – | 8 / 16 | 0.835 | recall_any 401 จาก 401 symbol-day: ช่วงจริงอาจต่ำถึงราว 99% (rule of three) |
 
 ## ablation
 
-| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |
+| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | TTD median / p90 (s) | PR-AUC | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | real_t001:ai | 0.1 | REAL | 5 | 200 | 0.505 ± 0.047 [0.445, 0.566] | – | event | 0.503 (prevalence 0.0017) | 0.110 | 0.660 | 40 / 127 | 0.154 | technique-agnostic: recall_correct n/a |
 | real_t001:ai | 0.5 | REAL | 5 | 200 | 0.598 ± 0.033 [0.536, 0.661] | – | event | 0.275 (prevalence 0.0017) | 0.429 | 3.160 | 34 / 94 | 0.154 | technique-agnostic: recall_correct n/a |
@@ -170,9 +182,26 @@ labels (split 7fb702a841c5): eligible 477 of 601; dropped: out_of_period 0, cal_
 | semisyn:stats | 2 | SEMI-SYN | 5 | 1188 | 0.542 ± 0.006 [0.526, 0.557] | 0.000 ± 0.000 [0.000, 0.000] | symbol-day | 0.477 (prevalence 0.0334) | 0.619 | – | 513 / 936 | 0.805 | recall_correct 0 จาก 401 symbol-day: ช่วงจริงอาจสูงถึงราว 1% (rule of three) |
 | semisyn:stats | 10 | SEMI-SYN | 5 | 1188 | 0.835 ± 0.004 [0.822, 0.848] | 0.000 ± 0.000 [0.000, 0.000] | symbol-day | 0.142 (prevalence 0.0334) | 5.161 | – | 91 / 642 | 0.805 | recall_correct 0 จาก 401 symbol-day: ช่วงจริงอาจสูงถึงราว 1% (rule of three) |
 
+### ablation: all เทียบชุดย่อย (paired bootstrap, budget 2)
+
+| เทียบ | provenance | seeds | events | bootstrap unit (กลุ่ม) | ผลต่าง recall_any (all − X) [95 % CI] | อ่านว่า |
+|---|---|---|---|---|---|---|
+| all vs real_t001:rules+stats | REAL | 5 | 200 | event (200) | -0.006 [-0.039, 0.028] | ไม่มีนัยสำคัญ |
+| all vs real_t001:rules | REAL | 5 | 200 | event (200) | 0.334 [0.261, 0.414] | all ดีกว่า rules อย่างมีนัย |
+| all vs real_t001:stats | REAL | 5 | 200 | event (200) | 0.089 [0.054, 0.127] | all ดีกว่า stats อย่างมีนัย |
+| all vs real_t001:ai | REAL | 5 | 200 | event (200) | 0.089 [0.054, 0.130] | all ดีกว่า ai อย่างมีนัย |
+| all vs semisyn:rules+stats | SEMI-SYN | 5 | 1188 | symbol-day (401) | -0.157 [-0.177, -0.138] | rules+stats ดีกว่า all อย่างมีนัย |
+| all vs semisyn:rules | SEMI-SYN | 5 | 1188 | symbol-day (401) | 0.157 [0.137, 0.177] | all ดีกว่า rules อย่างมีนัย |
+| all vs semisyn:stats | SEMI-SYN | 5 | 1188 | symbol-day (401) | 0.010 [-0.005, 0.028] | ไม่มีนัยสำคัญ |
+| all vs semisyn:ai | SEMI-SYN | 5 | 1188 | symbol-day (401) | 0.033 [0.024, 0.042] | all ดีกว่า ai อย่างมีนัย |
+
+- ผลต่าง > 0 แปลว่าชุดเต็ม (all) ตรวจพบมากกว่า; ผลต่าง < 0 แปลว่าชุดย่อยตรวจพบมากกว่า
+- เกณฑ์ (ทั้งสองทิศ): CI ล่างของผลต่าง > 0 และผลต่าง ≥ 0.02 (ห้ามใช้ CI ไม่ทับกันแทน)
+- REAL: สุ่มซ้ำทีละเหตุการณ์ด้วยดัชนีเดียวกันทั้งสองฝั่ง; SEMI-SYN: จับคู่ (seed, เหตุการณ์) ของแต่ละ seed แล้วสุ่มซ้ำทีละ symbol-day ด้วยดัชนีเดียวกันทั้งสองฝั่ง (ตัวประมาณแบบอัตราส่วนเดียวกับตาราง)
+
 ## baselines
 
-| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |
+| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | TTD median / p90 (s) | PR-AUC | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | ai.autoencoder_trade | 0.1 | REAL | 5 | 200 | 0.505 ± 0.047 [0.445, 0.566] | – | event | 0.503 (prevalence 0.0017) | 0.110 | 0.660 | 40 / 127 | 0.154 | technique-agnostic: recall_correct n/a |
 | ai.autoencoder_trade | 0.5 | REAL | 5 | 200 | 0.598 ± 0.033 [0.536, 0.661] | – | event | 0.275 (prevalence 0.0017) | 0.429 | 3.160 | 34 / 94 | 0.154 | technique-agnostic: recall_correct n/a |
@@ -201,7 +230,7 @@ labels (split 7fb702a841c5): eligible 477 of 601; dropped: out_of_period 0, cal_
 
 ## ref_supervised
 
-| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |
+| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | TTD median / p90 (s) | PR-AUC | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | ref.supervised_rf | 0.1 | REAL | 5 | 200 | 0.631 ± 0.011 [0.563, 0.693] | – | event | 0.653 (prevalence 0.0017) | 0.079 | 0.080 | 13 / 81 | 0.354 | supervised reference (uses labels); technique-agnostic: recall_correct n/a |
 | ref.supervised_rf | 0.5 | REAL | 5 | 200 | 0.801 ± 0.002 [0.745, 0.853] | – | event | 0.306 (prevalence 0.0017) | 0.514 | 0.370 | 8 / 35 | 0.354 | supervised reference (uses labels); technique-agnostic: recall_correct n/a |
@@ -210,7 +239,7 @@ labels (split 7fb702a841c5): eligible 477 of 601; dropped: out_of_period 0, cal_
 
 ## retrain_drift
 
-| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day | FA/symbol-day hard | TTD median / p90 (s) | PR-AUC | notes |
+| variant | budget | provenance | seeds | events | recall_any ± std [95% CI] | recall_correct ± std [95% CI] | bootstrap unit | precision (prevalence) | FA/symbol-day [95% CI] | FA/symbol-day hard [95% CI] | TTD median / p90 (s) | PR-AUC | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | v1 | 0.1 | REAL | 5 | 94 | 0.594 ± 0.012 [0.489, 0.685] | 0.143 ± 0.014 [0.077, 0.211] | event | 0.384 (prevalence 0.0010) | 0.204 | – | 12 / 61 | 0.210 |  |
 | v1 | 0.5 | REAL | 5 | 94 | 0.696 ± 0.010 [0.598, 0.781] | 0.221 ± 0.020 [0.138, 0.306] | event | 0.138 (prevalence 0.0010) | 0.924 | – | 10 / 61 | 0.210 |  |
@@ -253,6 +282,26 @@ labels (split 7fb702a841c5): eligible 477 of 601; dropped: out_of_period 0, cal_
 
 challenger แทน champion เมื่อ CI ล่างของผลต่าง > 0 และผลต่าง ≥ 0.02 (bootstrap แบบจับคู่ข้ามเหตุการณ์ ใช้ดัชนีสุ่มซ้ำเดียวกันทั้งสองฝั่ง)
 
+## confusion: family ของป้ายกำกับ × เทคนิคที่ระบุ (budget 2)
+
+### real_t001 full
+
+| family | seeds | events | MM-T000 | MM-T001 | MM-T005 | none |
+|---|---|---|---|---|---|---|
+| telegram_pump | 5 | 200 | 0.339 | 0.399 | 0.001 | 0.261 |
+
+- ค่าในตาราง = สัดส่วนเหตุการณ์ของ family นั้น (เฉลี่ยข้าม seed) ที่ episode ที่จับคู่ได้ระบุเทคนิคหลัก (parent) ตามคอลัมน์; MM-T000 = ระบุเทคนิคไม่ได้; none = ตรวจไม่พบ; เหตุการณ์ที่ถูกระบุหลายเทคนิคนับในทุกคอลัมน์ของเทคนิคเหล่านั้น ผลรวมของแถวจึงอาจเกิน 1
+
+### semisyn
+
+| family | seeds | events | MM-T000 | MM-T001 | MM-T005 | none |
+|---|---|---|---|---|---|---|
+| pump_burst | 5 | 395 | 0.110 | 0.186 | 0.000 | 0.704 |
+| pump_stealth | 5 | 394 | 0.270 | 0.101 | 0.000 | 0.648 |
+| wash_pingpong | 5 | 401 | 0.988 | 0.011 | 0.001 | 0.000 |
+
+- ค่าในตาราง = สัดส่วนเหตุการณ์ของ family นั้น (เฉลี่ยข้าม seed) ที่ episode ที่จับคู่ได้ระบุเทคนิคหลัก (parent) ตามคอลัมน์; MM-T000 = ระบุเทคนิคไม่ได้; none = ตรวจไม่พบ; เหตุการณ์ที่ถูกระบุหลายเทคนิคนับในทุกคอลัมน์ของเทคนิคเหล่านั้น ผลรวมของแถวจึงอาจเกิน 1
+
 ## หมายเหตุ
 
 - หน้าต่างเวลาที่ทับซ้อนกันมี autocorrelation สูง จึงทำให้การรับประกันของ conformal p-value อ่อนลง: อัตราการแจ้งเตือนจริงอาจสูงกว่างบที่ตั้งไว้
@@ -271,4 +320,5 @@ challenger แทน champion เมื่อ CI ล่างของผลต�
 - การเปรียบเทียบสองฝั่งต้องมีอย่างน้อย 10 เหตุการณ์ ถ้าน้อยกว่านั้นจะไม่สรุปว่าดีกว่า
 - TTD ติดลบหมายความว่าการแจ้งเตือนเริ่มก่อนเวลาเริ่มของป้ายกำกับ (label)
 - งบการแจ้งเตือนเป็นเพดาน ไม่ใช่เป้าหมาย: อัตรา FA ที่วัดได้จึงอาจต่ำกว่างบที่ตั้งไว้
+- FA/symbol-day [95% CI]: เมื่อผลมีจำนวนการแจ้งเตือนเท็จรายวัน (fa_by_day) จะเฉลี่ยข้าม seed ในแต่ละ symbol-day แล้ว bootstrap สุ่มซ้ำทีละ symbol-day (นับวันที่ไม่มีการแจ้งเตือนด้วย); ผลรุ่นเก่าที่ไม่มีข้อมูลนี้แสดงเฉพาะค่าเฉลี่ย; (n วัน) คือจำนวน symbol-day ที่ใช้นับ
 - recall_correct นับเหตุการณ์ที่มีการแจ้งเตือนทับช่วงเหตุการณ์และระบุเทคนิคตรงกับป้ายกำกับ: เทคนิคของการแจ้งเตือนมาจากแถวที่จัดประเภทได้และมีค่า F สูงสุดของ episode ส่วนหลักฐานมาจากแถวจุดสูงสุดของ episode ซึ่งอาจเป็นคนละแถวกัน

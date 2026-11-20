@@ -190,6 +190,8 @@ def test_render_blueprint():
     assert svc["envVars"] == [
         {"key": "IDSAI_USERS", "sync": False},
         {"key": "DATABASE_URL", "sync": False},
+        {"key": "TELEGRAM_BOT_TOKEN", "sync": False},
+        {"key": "IDSAI_PUBLIC_URL", "sync": False},
         {"key": "IDSAI_MODE", "value": "live"},
     ]
 

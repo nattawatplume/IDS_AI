@@ -59,7 +59,14 @@ from idsai.detection.simulator import (
     sample_scenario,
 )
 from idsai.detection.simulator.inject import price_tick
-from idsai.eval.metrics import MatchResult, match_events, summarize, window_positive, window_pr_auc
+from idsai.eval.metrics import (
+    MatchResult,
+    match_events,
+    summarize,
+    unmatched_onsets,
+    window_positive,
+    window_pr_auc,
+)
 from idsai.eval.splits import (
     SymDay,
     day_of_us,
@@ -478,6 +485,35 @@ def _episodes(chief: Chief, fused: pl.DataFrame, tau: float) -> list:
     return chief.episodes(fused, tau, provenance="replay") if fused.height else []
 
 
+def _day_key(symbol: str, day: Any) -> str:
+    return f"{symbol}|{day.isoformat()}"
+
+
+def _fa_by_day(onsets: list[tuple[str, int]], days: list[SymDay]) -> dict[str, int]:
+    """Unmatched episodes per `"SYM|YYYY-MM-DD"` of `days`, zero-count days included.
+
+    An episode counts on the symbol-day of its onset; an onset outside `days` (a window that
+    runs into the next day's first minutes) counts on the latest earlier listed day of that
+    symbol, else the earliest one, so the counts always sum to the number of onsets (a symbol
+    with no listed day at all, which the callers never produce, gets its own key).
+    """
+    out = {_day_key(sd.symbol, sd.day): 0 for sd in days}
+    by_sym: dict[str, list] = {}
+    for sd in days:
+        by_sym.setdefault(sd.symbol, []).append(sd.day)
+    for sym in by_sym:
+        by_sym[sym].sort()
+    for sym, first_us in onsets:
+        d = day_of_us(first_us)
+        key = _day_key(sym, d)
+        listed = by_sym.get(sym)
+        if key not in out and listed:
+            earlier = [x for x in listed if x <= d]
+            key = _day_key(sym, earlier[-1] if earlier else listed[0])
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
+
+
 def _evaluate(
     chief: Chief,
     tau: float,
@@ -486,10 +522,13 @@ def _evaluate(
     hard: tuple[pl.DataFrame, _Part] | None,
     before_s: int,
     after_s: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, int]]]:
+    """`(metrics, per_event, fa_by_day)`; `fa_by_day` = `{"normal": {...}, "hard": {...}}`."""
     det_any: dict[str, bool] = {}
     det_ok: dict[str, bool] = {}
     ttd: dict[str, float] = {}
+    techs: dict[str, list[str]] = {}
+    fa_normal: dict[str, int] = {}
     n_alerts = n_matched = n_events = 0
     fa_unmatched, fa_days = 0, 0
     Fs, ys = [], []
@@ -500,17 +539,26 @@ def _evaluate(
         det_any.update(mr.detected_any)
         det_ok.update(mr.detected_correct)
         ttd.update(mr.ttd_s)
+        techs.update(mr.techniques)
         n_alerts += mr.n_alerts
         n_matched += mr.n_alerts_matched
         n_events += mr.n_events
         if part.fa_days is None:
             fa_unmatched += mr.n_alerts - mr.n_alerts_matched
             fa_days += len(part.days)
+            day_counts = _fa_by_day(
+                unmatched_onsets(alerts, part.labels, before_s, after_s), part.days
+            )
         else:
             normal = _episodes(chief, _normal_rows(fused, part.fa_days), tau)
             mn = match_events(normal, part.labels, before_s, after_s)
             fa_unmatched += mn.n_alerts - mn.n_alerts_matched
             fa_days += len(part.fa_days)
+            day_counts = _fa_by_day(
+                unmatched_onsets(normal, part.labels, before_s, after_s), part.fa_days
+            )
+        for k, v in day_counts.items():
+            fa_normal[k] = fa_normal.get(k, 0) + v
         y = window_positive(
             fused["symbol"].to_numpy(), fused["t_end_us"].to_numpy(), part.labels, before_s, after_s
         )
@@ -530,6 +578,8 @@ def _evaluate(
     metrics["pr_auc"] = window_pr_auc(F, y)
     metrics["n_alerts"] = n_alerts
     metrics["n_alerts_matched"] = n_matched
+    metrics["n_fa_days"] = fa_days
+    fa_by_day: dict[str, dict[str, int]] = {"normal": dict(sorted(fa_normal.items())), "hard": {}}
     if hard is not None:
         h_fused, h_part = hard
         h_alerts = _episodes(chief, h_fused, tau)
@@ -538,16 +588,21 @@ def _evaluate(
         metrics["fa_per_symbol_day_hard"] = (
             (mh.n_alerts - mh.n_alerts_matched) / n_h if n_h else math.nan
         )
+        metrics["n_hard_days"] = n_h
+        fa_by_day["hard"] = _fa_by_day(
+            unmatched_onsets(h_alerts, h_part.labels, before_s, after_s), h_part.days
+        )
     per_event = {
         lid: {
             **info.get(lid, {}),
             "detected_any": det_any[lid],
             "detected_correct": det_ok[lid],
             "ttd_s": _json_float(ttd.get(lid, math.nan)),
+            "techniques": techs.get(lid, []),
         }
         for lid in sorted(det_any)
     }
-    return _clean(metrics), per_event
+    return _clean(metrics), per_event, fa_by_day
 
 
 def _skips(**parts: _Part | list[_Part] | Counter | None) -> dict[str, dict[str, int]]:
@@ -622,11 +677,15 @@ def _variant(
             rec["error"] = str(e)
             out.append(rec)
             continue
-        metrics, per_event = _evaluate(
+        metrics, per_event, fa_by_day = _evaluate(
             chief, tau, fused_parts, parts, hard_pair, cfg.eval.before_s, cfg.eval.after_s
         )
         rec.update(
-            metrics=metrics, per_event=per_event, tau=tau, tau_saturated=bool(chief.tau_saturated)
+            metrics=metrics,
+            per_event=per_event,
+            fa_by_day=fa_by_day,
+            tau=tau,
+            tau_saturated=bool(chief.tau_saturated),
         )
         out.append(rec)
     return out
