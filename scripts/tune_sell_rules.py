@@ -6,11 +6,12 @@ Read-only and offline, like `scripts/measure_pumps.py`: labels are built from th
 REAL labels whose UTC day is inside the train split (<= train end, 2019-06-30) are used, and the
 normal days are train-period days of the same symbols at least `GAP_DAYS` from any label.
 
+The events are the first `--max-events` train labels in time order that measure as pumps.
 For every sampled train label measured as a pump (`idsai.eval.pump_measure`) the day's window
 features are computed with `features.sell_side` on, and for every grid point of the shared
 falling conditions (`ret_60 <=`, `z_sell_rush_60 >=`, `z_quote_vol_60 >=`) it reports:
-- `hit_sell`: share of measured labels where the condition fires inside the sell window
-  `[t_peak, t_peak + clip(dump_tau, 60 s, 1 h)]` (`sell_labels.sell_window`), split by
+- `hit_sell`: share of measured labels where the condition fires in the eval's sell-phase credit
+  interval `(t_peak + 60 s, t_peak + clip(dump_tau, 60 s, 1 h)]` (`sell_labels`), split by
   `jump_1800 >= 0.03` (dump phase) or not (bear raid);
 - `fa_per_day`: fired episodes (rows grouped by 300 s gaps) per normal day, the cost.
 The grid is small on purpose (the machine is shared). It prints a table and writes JSON to
@@ -34,7 +35,7 @@ from idsai.contracts.frames import TRADES, conform, empty
 from idsai.detection.features.bars import trades_to_bars
 from idsai.detection.features.windows import compute_windows
 from idsai.eval.pump_measure import measure_trades, read_span
-from idsai.eval.sell_labels import sell_window
+from idsai.eval.sell_labels import SELL_SKIP_S, sell_window
 
 S_US = 1_000_000
 DAY_US = 86_400 * S_US
@@ -182,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         dump = raid = 0
         for _lid, _sym, (lo, hi), w in events:
             t = w["t_end_us"].to_numpy()
-            f = fires(w, ret, zs, zq) & (t > lo) & (t <= hi + 60 * S_US)
+            # the eval's credit interval for the sell phase: (t_peak + 60 s, hi]
+            f = fires(w, ret, zs, zq) & (t > lo + SELL_SKIP_S * S_US) & (t <= hi)
             if f.any():
                 jump = w["jump_1800"].to_numpy()[f]
                 dump += bool((jump >= JUMP_THR).any())

@@ -151,6 +151,8 @@ def test_no_publication_before_preroll_done(run, alerts):
     assert all(a.ts_event_us >= D_US and a.window[0] >= D_US for a in alerts)
     bars = drain(run["qb"])
     assert bars and min(b["t_us"] for b in bars) >= D_US - S
+    # M4: with sell_side off the published bar keeps its pre-M4 fields
+    assert all("sell_rush_orders" not in b for b in bars)
     scores = drain(run["qs"])
     assert scores and min(s["t_end_us"] for s in scores) >= D_US
     assert all(f["t_end_us"] >= D_US for f in run["cap"][0].iter_rows(named=True))

@@ -94,8 +94,31 @@ S_US = 1_000_000
 DAY_US = 86_400 * S_US
 _EPOCH = date(1970, 1, 1)
 
-# the measurement itself lives in idsai.eval.pump_measure; these names stay importable from here
-REEXPORTED = (MIN_DURATION_S, measure_window, rush_cluster_size, weighted_median)
+# the measurement itself lives in idsai.eval.pump_measure; its names stay importable from here
+__all__ = [
+    "DUMP_BUCKET_S",
+    "MIN_DURATION_S",
+    "MIN_IMPACT",
+    "PARAMS",
+    "PEAK_MAX_AFTER_S",
+    "POST_S",
+    "RAMP_FRAC",
+    "REF_S",
+    "SEARCH_AFTER_S",
+    "SEARCH_BEFORE_S",
+    "load_labels",
+    "main",
+    "measure_label",
+    "measure_window",
+    "overlap_flags",
+    "quantiles",
+    "read_trades",
+    "run",
+    "rush_cluster_size",
+    "suggest_train",
+    "summary_lines",
+    "weighted_median",
+]
 QUANTILES = (0.1, 0.5, 0.9)
 PARAMS = ("duration_s", "impact", "vol_mult", "rush_size", "dump_tau_s")
 EXTRA_QUANTILES = ("duration_s_incl_censored", "vol_quote_base_s")

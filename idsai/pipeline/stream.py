@@ -246,7 +246,9 @@ class StreamPipeline:
         t_close = bar["t_us"] + S_US
         if self._publish_from_us is None or t_close < self._publish_from_us:
             return
-        self.bus.publish("bars", {k: _finite_or_none(v) for k, v in bar.items()})
+        # the M4 bar column is published only with sell_side, so the bars API is unchanged off
+        drop = () if self.cfg.features.sell_side else ("sell_rush_orders",)
+        self.bus.publish("bars", {k: _finite_or_none(v) for k, v in bar.items() if k not in drop})
         if row is None:
             return
         frame = round_f32(pl.DataFrame([row], schema=self._schema), self.cfg.features)
