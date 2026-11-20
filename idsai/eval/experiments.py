@@ -32,6 +32,15 @@ keep the regime feature (`m1_regime_feature`) for the Mondrian variant.
 (the SEMI-SYN families of one variant) it also holds `normal_mult`, how many parts loaded each
 day (missing keys and older records: 1), so the report's FA CI is the ratio `sum n / sum m`.
 
+`m4_sell` (M4: the sell side) runs with `features.sell_side` on for every load (the existing
+columns are bit-identical to the flag-off ones, so the AE fit and every existing score are the
+`real_t001` ones), fits and scores once per seed, then fuses two detector sets: `base` (the
+configured detectors, without the sell-side rules) and `sell` (with them). Records are
+`test:<v>` (REAL, with the per-phase recall of `idsai.eval.sell_labels`: the sell windows are
+measured once per call and shared by both variants) and `bear_raid:<v>` (SEMI-SYN: the `bear_raid`
+injection over the test-normal days, FA counted on every injected day). Every record keeps the
+invoking config's `config_hash` (one report block) and adds `sell_side` and `signatures_sell_sha`.
+
 `retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
 its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
 detector set can name a technique at all (a rule or `stat.cusum`), so recall_correct of
@@ -62,8 +71,8 @@ from idsai.contracts.detector import Detector, Evidence, feature_matrix
 from idsai.contracts.frames import LABELS, conform, empty
 from idsai.data.store import DAY_US, Store
 from idsai.detection.features.registry import model_features
-from idsai.detection.registry import build_detectors
-from idsai.detection.rules import SIGNATURES_PATH
+from idsai.detection.registry import build_detectors, sell_rule_detectors
+from idsai.detection.rules import SELL_SIGNATURES_PATH, SIGNATURES_PATH
 from idsai.detection.simulator import (
     Scenario,
     assert_injection_allowed,
@@ -79,6 +88,7 @@ from idsai.eval.metrics import (
     window_positive,
     window_pr_auc,
 )
+from idsai.eval.sell_labels import SellPhase, derive_sell_labels
 from idsai.eval.splits import (
     SymDay,
     day_of_us,
@@ -121,6 +131,10 @@ SATURATION_WARNING = r"alert budget .* is at or above the peak episode rate"
 REAL, SEMI = "REAL", "SEMI-SYN"
 M1 = "m1_fusion"
 M1_SPLITS = ("accept", "test", "semisyn")
+M4 = "m4_sell"
+M4_VARIANTS = ("base", "sell")
+BEAR_RAID = "bear_raid"
+BEAR_RAID_STREAM = len(FAMILIES)  # rng stream index of bear_raid scenarios (after FAMILIES)
 
 
 def m1_regime_feature(cfg: Settings) -> str:
@@ -428,9 +442,12 @@ class _Ctx:
 
     # ---- semi-synthetic scenarios
 
-    def scenario(self, sd: SymDay, fam_idx: int, ranges: dict) -> Scenario | None:
-        """One test-region scenario for `sd` (None: a pump too small for the price tick)."""
-        family = FAMILIES[fam_idx]
+    def scenario(
+        self, sd: SymDay, fam_idx: int, ranges: dict, family: str | None = None
+    ) -> Scenario | None:
+        """One test-region scenario for `sd` (None: a pump or bear raid too small for the price
+        tick). `family` defaults to `FAMILIES[fam_idx]`; `fam_idx` always picks the rng stream."""
+        family = FAMILIES[fam_idx] if family is None else family
         rng = np.random.default_rng([self.seed, fam_idx, stable_int(sd.symbol, sd.day)])
         d0 = day_start_us(sd.day)
         sc = sample_scenario(family, "test", d0 + SCENARIO_LEAD_S * S_US, rng, ranges)
@@ -438,7 +455,7 @@ class _Ctx:
         if hi < SCENARIO_LEAD_S:
             raise ValueError(f"{family} duration {sc.duration_s} s does not fit in one day")
         sc = replace(sc, t_start_us=d0 + int(rng.integers(SCENARIO_LEAD_S, hi + 1)) * S_US)
-        if family.startswith("pump"):
+        if family.startswith("pump") or family == BEAR_RAID:
             trades = self.store.read_trades(sd.symbol, d0 - DAY_US, d0 + DAY_US)
             ts = trades["ts_us"].to_numpy()
             before = ts < sc.t_start_us
@@ -467,6 +484,21 @@ class _Ctx:
             part.skipped_tick = n_tick
             parts.append(part)
         return parts
+
+    def bear_raid_part(self, detectors: list[Detector], **kw: Any) -> _Part:
+        """The `bear_raid` injection over `test_normal` (M4; FA counted on every day)."""
+        assert_injection_allowed(self.cfg.mode)  # Red-Team injection: replay only
+        ranges = load_scenario_ranges()
+        items, n_tick = [], 0
+        for sd in self.split.test_normal:
+            sc = self.scenario(sd, BEAR_RAID_STREAM, ranges, family=BEAR_RAID)
+            if sc is None:
+                n_tick += 1
+            else:
+                items.append((sd, sc))
+        part = self.load(items, detectors, **kw)
+        part.skipped_tick = n_tick
+        return part
 
     def real_parts(
         self, events: list[SymDay], normal: list[SymDay], detectors: list[Detector], **kw: Any
@@ -566,9 +598,11 @@ def _evaluate(
     hard: tuple[pl.DataFrame, _Part] | None,
     before_s: int,
     after_s: int,
+    phase: SellPhase | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, int]]]:
     """`(metrics, per_event, fa_by_day)`; `fa_by_day` = `{"normal": {...}, "hard": {...}}`,
-    plus `"normal_mult"` (parts per day) when a day is loaded by more than one part."""
+    plus `"normal_mult"` (parts per day) when a day is loaded by more than one part. With
+    `phase` (M4) every event also gets the sell-phase keys and the metrics the per-phase recall."""
     det_any: dict[str, bool] = {}
     det_ok: dict[str, bool] = {}
     ttd: dict[str, float] = {}
@@ -579,8 +613,11 @@ def _evaluate(
     fa_unmatched, fa_days = 0, 0
     Fs, ys = [], []
     info: dict[str, dict[str, Any]] = {}
+    phase_pe: dict[str, dict[str, Any]] = {}
     for fused, part in zip(fused_parts, parts, strict=True):
         alerts = _episodes(chief, fused, tau)
+        if phase is not None:
+            phase_pe.update(phase.per_event(alerts, part.labels))
         mr = match_events(alerts, part.labels, before_s, after_s)
         det_any.update(mr.detected_any)
         det_ok.update(mr.detected_correct)
@@ -648,9 +685,12 @@ def _evaluate(
             "detected_correct": det_ok[lid],
             "ttd_s": _json_float(ttd.get(lid, math.nan)),
             "techniques": techs.get(lid, []),
+            **phase_pe.get(lid, {}),
         }
         for lid in sorted(det_any)
     }
+    if phase is not None:
+        metrics.update(phase.summarize(per_event))
     return _clean(metrics), per_event, fa_by_day
 
 
@@ -694,8 +734,10 @@ def _variant(
     hard: _Part | None,
     extra: dict[str, Any],
     ai: AiFusion | None = None,
+    phase: SellPhase | None = None,
 ) -> list[dict[str, Any]]:
-    """Calibrate one Chief on `cal` (with the AI fusion mode `ai`), then one record per budget."""
+    """Calibrate one Chief on `cal` (with the AI fusion mode `ai`), then one record per budget
+    (`phase`: the M4 per-phase recall, see `_evaluate`)."""
     cfg = ctx.cfg
     names = [d.name for d in detectors]
     skips = _skips(cal=cal, eval=parts, hard=hard, **extra.pop("_skips", {}))
@@ -730,7 +772,7 @@ def _variant(
             out.append(rec)
             continue
         metrics, per_event, fa_by_day = _evaluate(
-            chief, tau, fused_parts, parts, hard_pair, cfg.eval.before_s, cfg.eval.after_s
+            chief, tau, fused_parts, parts, hard_pair, cfg.eval.before_s, cfg.eval.after_s, phase
         )
         rec.update(
             metrics=metrics,
@@ -1034,6 +1076,46 @@ def _exp_m1_fusion(ctx: _Ctx) -> list[dict]:
     return out
 
 
+def m4_sell_cfg(cfg: Settings) -> Settings:
+    """`cfg` with `features.sell_side` on (the M4 eval computes every feature this way)."""
+    return cfg.model_copy(update={"features": cfg.features.model_copy(update={"sell_side": True})})
+
+
+def _exp_m4_sell(ctx: _Ctx) -> list[dict]:
+    sp = ctx.split
+    # every load computes the sell features too; the existing columns are bit-identical to the
+    # flag-off ones, so the fitted models and existing scores are those of real_t001
+    ctx.cfg = m4_sell_cfg(ctx.cfg)
+    ctx.meta["signatures_sell_sha"] = file_sha(SELL_SIGNATURES_PATH)
+    groups = ctx.build(ctx.cfg.detectors)
+    dets = _flatten(groups, groups)
+    sell_names = {d.name for d in sell_rule_detectors()}
+    sets = {"base": [d for d in dets if d.name not in sell_names], "sell": dets}
+    mv, info, err = _fit_groups(ctx, groups, sp.train_normal)
+    if err is not None:
+        return [
+            r
+            for v in M4_VARIANTS
+            for split, prov in (("test", REAL), (BEAR_RAID, SEMI))
+            for r in _error_records(
+                ctx, M4, f"{split}:{v}", prov, err, sets[v], sell_side=v == "sell"
+            )
+        ]
+    cal, real, hard = _real_sets(ctx, dets)
+    raid = ctx.bear_raid_part(dets)
+    phase = SellPhase(derive_sell_labels(ctx.store, real.labels))  # once, shared by both
+    out = []
+    for v in M4_VARIANTS:
+        vd, vmv = sets[v], _versions_for(mv, sets[v])
+        base = {**info, "sell_side": v == "sell"}
+        out += _variant(
+            ctx, M4, f"test:{v}", REAL, vd, vmv, cal, [real], hard, dict(base), phase=phase
+        )
+        extra = {**base, "n_skipped_tick": raid.skipped_tick}
+        out += _variant(ctx, M4, f"{BEAR_RAID}:{v}", SEMI, vd, vmv, cal, [raid], None, extra)
+    return out
+
+
 _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "real_t001": _exp_real_t001,
     "semisyn": _exp_semisyn,
@@ -1042,9 +1124,10 @@ _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "ref_supervised": _exp_ref_supervised,
     "retrain_drift": _exp_retrain_drift,
     M1: _exp_m1_fusion,
+    M4: _exp_m4_sell,
 }
 EXPERIMENTS = tuple(_RUNNERS)
-INJECTING = ("semisyn", "ablation", M1)  # experiments that run Red-Team injection
+INJECTING = ("semisyn", "ablation", M1, M4)  # experiments that run Red-Team injection
 
 
 def run_experiment(

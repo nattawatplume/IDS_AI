@@ -355,3 +355,69 @@ def test_m1_fusion_fits_and_scores_once_and_refuses_per_variant(world, monkeypat
     text = md.read_text(encoding="utf-8")
     assert "### m1_fusion" in text and "accuracy" not in text.lower()
     assert data["m1_fusion"] is None  # the smoke budgets (0.1, 10) have no budget-2 records
+
+
+def test_m4_sell_two_variants_from_one_fit_with_per_phase_recall(world, monkeypatch):
+    """m4_sell: one fit and one scoring pass; `base` equals real_t001; the REAL label gets a
+    measured sell window; bear_raid is SEMI-SYN."""
+    from idsai.ai.autoencoder import AutoencoderDetector
+
+    cfg, app, research, tmp = world
+    real = {
+        r["budget"]: r for r in run_experiment("real_t001", cfg, app, seed=0, research=research)
+    }
+    fits = []
+    real_fit = AutoencoderDetector.fit
+
+    def fit(self, normal):
+        fits.append(normal.height)
+        return real_fit(self, normal)
+
+    monkeypatch.setattr(AutoencoderDetector, "fit", fit)
+    recs = run_experiment("m4_sell", cfg, app, seed=0, research=research)
+    assert len(fits) == 1
+    assert {r["variant"] for r in recs} == {
+        f"{s}:{v}" for s in ("test", "bear_raid") for v in ("base", "sell")
+    }
+    by = {(r["variant"], r["budget"]): r for r in recs}
+    for r in recs:
+        assert RECORD_KEYS <= set(r)
+        assert r["experiment"] == "m4_sell" and r["config_hash"] == config_hash(cfg)
+        assert r["provenance"] == ("SEMI-SYN" if r["variant"].startswith("bear_raid") else "REAL")
+        assert r["sell_side"] == r["variant"].endswith(":sell")
+        assert len(r["signatures_sell_sha"]) == 12
+        names = set(r["detectors"])
+        assert ("rule.100104" in names) == r["sell_side"] and ("rule.100601" in names) == (
+            r["sell_side"]
+        )
+        if r["budget"] == 10.0:
+            assert r["error"] is None, (r["variant"], r["error"])
+            assert "accuracy" not in json.dumps(r["metrics"])
+    # same fitted models in both variants, and base reproduces real_t001 exactly
+    assert len({json.dumps(r["model_versions"], sort_keys=True) for r in recs}) == 1
+    base, sell = by[("test:base", 10.0)], by[("test:sell", 10.0)]
+    for k in ("recall_any", "recall_correct", "fa_per_symbol_day", "fa_per_symbol_day_hard"):
+        assert base["metrics"][k] == real[10.0]["metrics"][k], k
+    assert base["fa_by_day"] == real[10.0]["fa_by_day"]
+    assert base["tau"] == real[10.0]["tau"]
+    # per-phase recall on the REAL test label (pumped at noon of day 13, 120 s ramp)
+    for r in (base, sell):
+        pe = r["per_event"]["L3"]
+        assert pe["sell_status"] == "measured"
+        assert isinstance(pe["detected_sell_phase"], bool)
+        m = r["metrics"]
+        assert m["recall_pump_phase"] == m["recall_any"]
+        assert m["n_sell_events"] == 1 and m["sell_status_counts"] == {"measured": 1}
+        assert math.isfinite(m["recall_sell_phase"])
+    assert base["metrics"]["recall_sell_phase_correct"] == 0.0  # no sell rule, no sell phase
+    raid = by[("bear_raid:sell", 10.0)]
+    assert raid["n_events"] == 1 and raid["n_skipped_tick"] == 0
+    (pe,) = raid["per_event"].values()
+    assert pe["family"] == "bear_raid"
+    assert math.isfinite(raid["metrics"]["recall_any"])
+
+    md, js = tmp / "m4.md", tmp / "m4.json"
+    data = build_report(research, md, js, cfg=cfg)
+    text = md.read_text(encoding="utf-8")
+    assert "## m4_sell" in text and "accuracy" not in text.lower()
+    assert "m4_sell" in data["experiments"]
