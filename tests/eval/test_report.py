@@ -1119,3 +1119,21 @@ def test_m4_report_paired_sell_phase_differences(research, tmp_path):
     assert "ผลต่าง recall ช่วงเทขาย (sell − base)" in section
     assert "recall ช่วงเทขายสูงขึ้นอย่างมีนัย" in section
     assert "ผลต่าง ระบุช่วงเทขายถูก (sell − base)" in section
+
+
+def test_m4_report_drops_short_sell_windows_from_denominators(research, tmp_path):
+    pump = [1] * 20
+    base = _m4_recs("base", pump, [False] * 20, [False] * 20)
+    sell = _m4_recs("sell", pump, [True] * 20, [True] * 20)
+    for r in [*base, *sell]:  # events e0, e1: the dump was over within 60 s
+        for lid in ("e0", "e1"):
+            pe = r["per_event"][lid]
+            pe.update(sell_window_short=True, detected_sell_phase=None,
+                      detected_sell_phase_correct=None)  # fmt: skip
+    write(research, [*base, *sell])
+    data, text = _report(research, tmp_path)
+    rows = {r["variant"]: r for r in data["m4_sell"]["rows"]}
+    assert rows["sell"]["n_sell_short"] == 2 and rows["sell"]["n_sell_events"] == 18
+    assert rows["sell"]["recall_sell_phase"] == 1.0
+    assert data["m4_sell"]["paired"]["recall_sell_phase"]["n_clusters"] == 18
+    assert "เหตุการณ์ที่เทขายจบภายใน 60 วินาที 2 รายการ" in _section(text, "m4_sell")

@@ -13,8 +13,9 @@ Per label (`per_event`):
   runs past the peak does not count, only rows that fire during the fall.
 - `detected_sell_phase_correct`: such an episode names the sell phase (`Alert.phase == "sell"`,
   i.e. its latest rule-classified row is MM-T001.003 or MM-T006.*).
-A label whose window is at most 60 s long (`dump_tau_s <= 60`) has an empty credit interval and
-can only count as missed; `sell_window_short` marks it.
+A label whose window is at most 60 s long (`dump_tau_s <= 60`) has an empty credit interval: it
+is flagged `sell_window_short`, its sell keys are None and it is left out of the sell-phase
+denominators like an unmeasured label (counted in `n_sell_short`).
 Both sell keys are None for a label without a sell window. These are recalls of statistical
 anomalies (ความผิดปกติทางสถิติ), never a probability and never an accuracy.
 """
@@ -103,6 +104,10 @@ class SellPhase:
             else:
                 lo, hi = win
                 pe["sell_window_short"] = hi <= lo + skip
+                if pe["sell_window_short"]:  # empty credit interval: out of the denominators
+                    pe.update(dict.fromkeys(SELL_KEYS))
+                    out[lid] = pe
+                    continue
                 t = np.asarray(exceed.get(sym, ()), dtype=np.int64)
                 rows = t[(t > lo + skip) & (t <= hi)]
                 hits = [
@@ -130,6 +135,7 @@ class SellPhase:
         out["n_sell_events"] = sum(
             1 for pe in per_event.values() if pe.get("detected_sell_phase") is not None
         )
+        out["n_sell_short"] = sum(1 for pe in per_event.values() if pe.get("sell_window_short"))
         status = Counter(pe.get("sell_status", "not_measured") for pe in per_event.values())
         out["sell_status_counts"] = dict(sorted(status.items()))
         return out

@@ -87,7 +87,11 @@ def test_sell_phase_per_event_and_summary():
     assert m["recall_sell_phase"] == 1.0 and m["recall_sell_phase_correct"] == 0.5
     short = SellPhase({"A": {"status": "measured", "sell_window": [0, 60 * S]}})
     got = short.per_event(alerts[:1], labels.head(1), {"X": np.array([30, 60]) * S})["A"]
-    assert got["sell_window_short"] is True and got["detected_sell_phase"] is False
+    assert got["sell_window_short"] is True and got["detected_sell_phase"] is None
+    assert got["detected_sell_phase_correct"] is None  # out of the denominators
+    ms = short.summarize({**full, "S": {**got, "detected_any": True}})
+    assert ms["n_sell_short"] == 1 and ms["n_sell_events"] == 2
+    assert ms["recall_sell_phase"] == m["recall_sell_phase"]  # S is not counted as missed
     assert m["n_sell_events"] == 2
     assert m["sell_status_counts"] == {"measured": 2, "no_rise": 1}
     assert math.isnan(ph.summarize({})["recall_sell_phase"])

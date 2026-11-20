@@ -943,6 +943,15 @@ def _m4(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
             for r in tr[:1]:  # the same labels in every seed
                 status = dict((r["metrics"] or {}).get("sell_status_counts") or {})
             row["sell_status_counts"] = status
+            # dump over within 60 s: empty credit interval, out of the sell-phase denominators
+            row["n_sell_short"] = len(
+                {
+                    lid
+                    for r in tr
+                    for lid, pe in r["per_event"].items()
+                    if pe.get("sell_window_short")
+                }
+            )
         if v in raid:
             c = _cell(list(raid[v].values()), n_boot)
             m, ci = c["mean"] or {}, c["ci"] or {}
@@ -1034,6 +1043,12 @@ def _m4_md(m4: dict[str, Any] | None, min_effect: float) -> list[str]:
             f"({p['n_clusters']} {p['ci_unit']}, paired bootstrap) → {verdict} "
             f"(min_effect = {min_effect:g})"
         )
+    for r in m4["rows"]:
+        if r.get("n_sell_short"):
+            lines.append(
+                f"- {r['label']}: เหตุการณ์ที่เทขายจบภายใน 60 วินาที {r['n_sell_short']} รายการ "
+                "ไม่นับในตัวหารของ recall ช่วงเทขาย (และผลต่าง sell − base)"
+            )
     lines += [f"- {n}" for n in [*M4_NOTES_TH, *m4["notes"]]]
     return lines
 

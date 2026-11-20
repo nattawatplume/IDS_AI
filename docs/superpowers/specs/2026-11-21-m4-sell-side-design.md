@@ -131,7 +131,8 @@ Source: `docs/ROADMAP.md` M4. Branch `feat/m4` (worktree), cut from `feat/m1`.
    counts for the sell phase only if it has an exceedance row with `t_end` in
    `(t_peak + 60 s, hi]`, so the tail of a pump episode does not earn credit; a label whose window
    is at most 60 s (`dump_tau_s <= 60`) has an empty interval, is flagged `sell_window_short` and
-   can only count as missed. `recall_pump_phase` is `recall_any` (no extra per-event key). The
+   is left out of both sell-phase denominators and the paired differences, like an unmeasured
+   label; its count is `n_sell_short` in the metrics and a Thai note in the report. `recall_pump_phase` is `recall_any` (no extra per-event key). The
    report adds paired `sell - base` differences for pump-phase, sell-phase and
    sell-phase-correct recall (same paired bootstrap; events without a sell window left out).
    The measurement code moved from `scripts/measure_pumps.py` to `idsai/eval/pump_measure.py`
@@ -156,7 +157,8 @@ Source: `docs/ROADMAP.md` M4. Branch `feat/m4` (worktree), cut from `feat/m1`.
   classified row (often a pump rule), while its phase follows the latest rule row (the dump). The
   phase therefore says "sell" once the dump rule has fired, but the technique shown may still be
   a pump sub-technique's parent; readers should take the phase badge as the current phase.
-- Labels with `dump_tau_s <= 60 s` cannot be credited for the sell phase (empty credit interval).
+- Labels with `dump_tau_s <= 60 s` are out of the sell-phase recall (empty credit interval); the
+  report says how many, so a large count means the sell-phase recall covers fewer events.
 - The head's `m4_sell` run writes a second feature cache (`data/features/fs1-<hash with
   sell_side>`), about the size of the existing one, and adds one SEMI-SYN family's worth of loads.
 - Not run here: the real `m4_sell` eval (only the synthetic smoke test).
