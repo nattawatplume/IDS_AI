@@ -162,3 +162,56 @@ Source: `docs/ROADMAP.md` M4. Branch `feat/m4` (worktree), cut from `feat/m1`.
 - The head's `m4_sell` run writes a second feature cache (`data/features/fs1-<hash with
   sell_side>`), about the size of the existing one, and adds one SEMI-SYN family's worth of loads.
 - Not run here: the real `m4_sell` eval (only the synthetic smoke test).
+
+### Bear raid follow-up (2026-11-21, train split only)
+Trigger: the real `m4_sell` run gave `bear_raid` (SEMI-SYN) recall_any 0.171 for both variants
+and recall_correct (MM-T006) 0.006, while pump-burst recall_correct is 0.186.
+
+**Method (no test / accept day touched).** 80 train-normal symbol-days (all <= 2019-06-30, at
+least `GAP_DAYS` = 3 days from any label of the symbol, previous day present, 61 symbols) in two
+disjoint sets of 40: a design set and a held-out set. On each day one `bear_raid` and one
+`pump_burst` scenario were drawn from the **test** ranges (same rng draws for both families,
+start in `[1 h, 24 h - duration - 600 s]`, the eval's `MIN_TICKS` skip), injected in memory, and
+the features computed with `sell_side` on (trades read straight from Parquet, nothing written
+under `data/`). A rule "hits" an event when its conditions hold on a row whose `t_end` lies in the
+match interval `[t_start - 120 s, t_peak + 300 s]`. The FA cost is the rule's fired episodes
+(300 s gaps) per clean symbol-day on the same days without injection. The scripts were ad hoc
+(scratch, not committed); they reuse `scripts/tune_sell_rules.py`'s Parquet reader.
+
+**Diagnosis.**
+- The injection works as intended: on all 80 raids the price goes down (minimum price in the raid
+  window / pre-raid price - 1 is 96-98 % of `-impact`, median), every synthetic fill is a taker
+  sell, in clusters of `rush_size`. Pumps move up by the same share. No injection bug.
+- Per condition, share of the 40 raids where it holds at least once (design / held-out):
+  `z_quote_vol_60 >= 3` 0.025 / 0.000, `ret_60 <= -0.02` 0.78 / 0.78, `z_sell_rush_60 >= 4`
+  0.83 / 0.93 (never NaN), `jump_1800 <= 0.0299999` 1.00 / 1.00 (the dump rule never fired on a
+  raid). All four together: 0 / 0. All but `z_quote_vol_60`: 0.65 / 0.70.
+- Root cause: `z_quote_vol_60`. Test-range raids add 5-30x the previous day's mean quote rate,
+  but on these illiquid pairs the upper-tail scale of `log1p(quote_vol_60)` (`(q99 - med) / 2.326`)
+  is wide, so the raid's max z is 1.1 / 2.2 / 2.6 (10th / 50th / 90th percentile, design set;
+  held-out 1.1 / 2.2 / 2.4). The mirrored threshold 3, set on real dumps, is out of reach.
+- Why pumps still score: the pump-burst rule (`z_quote_vol_60 >= 6`) also hits 0 / 0 of the same
+  pumps, but pump recall_correct only needs the parent MM-T001, which the stealth rule (100102)
+  supplies on 0.53 / 0.70 of the injected pumps (KK on 0.08). The bear raid has no second MM-T006
+  rule, so 100601 alone decides recall_correct.
+
+**Fix (smallest change, thresholds only).** Grid on the design set: `z_quote_vol_60` in
+{1, 1.5, 2, 2.5, 3} x `ret_60` in {-0.01, -0.015, -0.02} x `z_sell_rush_60` in {3, 4}. Rule: as
+in the first tuning, move as few mirrored thresholds as possible (keep `ret_60 <= -0.02`,
+`z_sell_rush_60 >= 4`) and take the lowest `z_quote_vol_60` whose clean-day FA stays <= 0.05
+episodes per symbol-day: 2 (1.5 gave 0.075). sid 100601 becomes `z_quote_vol_60 >= 2`, `rev: 2`.
+The dump rule 100104, the pump rules and `signatures.yaml` are unchanged; the sell file is read
+only with the flag on, so flag-off output stays bit-identical (`test_sell_side_off.py` passes
+unchanged).
+
+| set (40 days each) | rule hit, zq >= 3 (before) | rule hit, zq >= 2 (after) | FA ep/day before | FA ep/day after |
+|---|---|---|---|---|
+| design | 1/40 (0.025) | 15/40 (0.375) | 0.025 | 0.05 |
+| held-out | 0/40 (0.000) | 15/40 (0.375) | 0.05 | 0.15 |
+| all 80 | 1/80 (0.013) | 30/80 (0.375) | 0.04 | 0.10 |
+
+**Caveats.** The rule hit rate is an upper guide, not the eval's recall_correct: the Chief's
+calibration, budget threshold, suppression and highest-F technique choice sit in between. The
+ceiling with the other three conditions is ~0.68. The held-out FA (0.15 per symbol-day) is at the
+first tuning's rule-of-three bound, so the bear rule's FA on the full test split may rise; the head's
+`m4_sell` re-run will show it (`FA` / `FA hard` per variant). The real eval was not re-run here.

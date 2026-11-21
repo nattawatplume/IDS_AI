@@ -101,7 +101,8 @@ def _fired(windows: pl.DataFrame, sid: int) -> pl.DataFrame:
 def test_sell_signature_files_and_taxonomy():
     sell = load_signatures(SELL_SIGNATURES_PATH)
     assert {s.sid: s.technique for s in sell} == {DUMP: "MM-T001.003", RAID: "MM-T006.001"}
-    assert all(s.rev == 1 and s.layer == "rule" for s in sell)
+    assert {s.sid: s.rev for s in sell} == {DUMP: 1, RAID: 2}  # RAID rev 2: follow-up
+    assert all(s.layer == "rule" for s in sell)
     ids = technique_ids()
     assert {"MM-T001.003", "MM-T006", "MM-T006.001"} <= ids
     assert load_taxonomy()["MM-T006"]["name_th"] == "ทุบราคา (bear raid)"
@@ -240,3 +241,31 @@ def test_sell_signature_features_exist_only_with_the_flag():
     on, off = set(feature_columns(ON.features)), set(feature_columns(CFG.features))
     needs = {c.feature for s in load_signatures(SELL_SIGNATURES_PATH) for c in s.conditions}
     assert needs <= on and not needs <= off
+
+
+def _cond_rows(zq) -> pl.DataFrame:
+    """Hand-made window rows: a fast 2.5 % fall with a sell rush and no prior rise, at the given
+    `z_quote_vol_60` values (the bear-raid follow-up: test-range raids reach z 2-3, not 3)."""
+    n = len(zq)
+    return pl.DataFrame(
+        {
+            "z_quote_vol_60": np.asarray(zq, dtype=float),
+            "ret_60": np.full(n, -0.025),
+            "z_sell_rush_60": np.full(n, 5.0),
+            "jump_1800": np.full(n, 0.01),
+        }
+    )
+
+
+def test_bear_raid_rule_volume_threshold_is_two():
+    """sid 100601 rev 2: `z_quote_vol_60 >= 2` (train-only follow-up); the dump rule keeps 3."""
+    sigs = {s.sid: s for s in load_signatures(SELL_SIGNATURES_PATH)}
+    raid_zq = [c.thr for c in sigs[RAID].conditions if c.feature == "z_quote_vol_60"]
+    dump_zq = [c.thr for c in sigs[DUMP].conditions if c.feature == "z_quote_vol_60"]
+    assert raid_zq == [2] and dump_zq == [3]
+    assert sigs[RAID].rev == 2 and sigs[DUMP].rev == 1
+    rows = _cond_rows([1.9, 2.0, 2.6, 3.5])
+    assert _fired(rows, RAID)["z_quote_vol_60"].to_list() == [2.0, 2.6, 3.5]
+    # the dump rule needs a prior rise (jump_1800 >= 0.03), so it never fires on these rows
+    assert _fired(rows.with_columns(pl.lit(0.05).alias("jump_1800")), DUMP).height == 1
+    assert _fired(rows, DUMP).height == 0
