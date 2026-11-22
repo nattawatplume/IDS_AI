@@ -130,7 +130,7 @@ ref.supervised_rf: recall_any 0.851 [0.802, 0.896], FA 2.121, hard 1.610, PR-AUC
 - **SEMI-SYN (ใช้ดูอย่างเดียว):** iforest:shift1 0.730 เทียบ no_ai 0.710 (+0.020 มีนัย) แบบที่มี AE + shift ได้สูงกว่ามาก (0.87–0.90) แต่บน REAL accept แบบ shift1 ที่มี AE เพิ่ม FA hard เกินเกณฑ์ และแบบ shift2 เพิ่ม recall ได้ไม่มีนัย จึงไม่ถูกเลือก
 - **AE เดี่ยว เทียบ iforest เดี่ยว (test, REAL):** ผลต่าง recall_any (AE − iforest) −0.158 [−0.208, −0.111] กริด AE เล็ก ๆ (กว้าง/แคบ) ไม่ได้ปิดช่องว่างนี้ เป้า M2 เดิม "AE ไม่แพ้ iforest" จึง **ยังไม่ผ่าน** แต่เป้าที่ใช้จริงคือชั้น AI ที่เพิ่ม recall โดย FA hard ไม่เพิ่ม ซึ่ง **ผ่าน** ด้วย iforest
 - ข้อควรระวัง: เลือกจาก 15 แบบบน accept จึงมี winner's curse ผลบน test (+0.040) ที่เล็กกว่าบน accept (+0.051) สอดคล้องกับข้อนี้ และยังมีนัย
-- ยังไม่ได้เปลี่ยนชั้น AI ของระบบ live (`configs/default.yaml`) การเปลี่ยนเป็นขั้นตอนแยกที่ต้องตัดสินใจก่อน
+- **ระบบ live และ replay ใช้ iforest:shift1 แล้ว** (branch feat/live-ai, commit ae94417 และ 2ecd1a9; spec `docs/superpowers/specs/2026-11-22-live-ai-layer-design.md`): `configs/default.yaml` ตั้ง `detectors` เป็น `ai.iforest` แทน AE และ `chief.ai_mode: shift`, `ai_shift: 1.0` ทุก Chief ที่ใช้งานจริง (train, demo-pack, ชุดโมเดล live, `load_bundle`) รวมชั้น AI ตามค่าตั้งนี้ ส่วนการทดลองยังกำหนดวิธีรวมเองทุกแบบ ผลการทดลองข้างบนจึงไม่เปลี่ยน `configs/eval_prev_live.yaml` ยังเป็นชุดเดิม (AE, fuse) และ config_hash เดิม
 
 ---
 
