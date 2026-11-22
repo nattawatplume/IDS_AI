@@ -542,8 +542,17 @@ def shift_bundle(demo, tmp_path_factory):
         seen["fitted"] = real(*a, **k)
         return seen["fitted"]
 
+    from idsai.ai.chief import Chief
+
+    real_calibrate = Chief.calibrate
+
+    def calibrate(self, scores, *a, **k):  # keeps the exact calibration frame
+        seen["cal"] = scores
+        return real_calibrate(self, scores, *a, **k)
+
     mp = pytest.MonkeyPatch()
     mp.setattr(ex, "fit_and_calibrate", spy)
+    mp.setattr(Chief, "calibrate", calibrate)
     try:
         with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
             cli.train_and_save(
@@ -551,7 +560,7 @@ def shift_bundle(demo, tmp_path_factory):
             )
     finally:
         mp.undo()
-    return SimpleNamespace(cfg=cfg, dir=out, fitted=seen["fitted"])
+    return SimpleNamespace(cfg=cfg, dir=out, fitted=seen["fitted"], cal=seen["cal"])
 
 
 def _scored_day(cfg, dets) -> pl.DataFrame:
@@ -575,23 +584,35 @@ def test_production_chief_runs_the_configured_ai_fusion(shift_bundle):
     assert [d.name for d in fitted.detectors][-1] == "ai.iforest"
     assert "ai.autoencoder_trade" not in fitted.model_versions  # the AE is not trained
     assert fitted.chief.ai == AiFusion("shift", 1.0)
-    # the same calibration under an explicit AiFusion("shift", 1.0): identical batch output
-    ref = Chief(
-        fitted.detectors, cfg.chief, config_hash(cfg), fitted.model_versions, AiFusion("shift", 1.0)
-    )
-    ref.load_state_dict(fitted.chief.state_dict())
+
+    def independent(ai: AiFusion) -> Chief:
+        # built and fitted here from the same calibration scores, not from the stored state
+        ch = Chief(fitted.detectors, cfg.chief, config_hash(cfg), fitted.model_versions, ai)
+        ch.calibrate(shift_bundle.cal)
+        ch.fit_threshold(ch.fuse(shift_bundle.cal), 10.0)
+        return ch
+
+    ref, fuse = independent(AiFusion("shift", 1.0)), independent(AiFusion())
+    assert ref.tau == fitted.chief.tau and ref.n_cal == fitted.chief.n_cal
     scored = _scored_day(cfg, fitted.detectors)
-    a, b = fitted.chief.fuse(scored), ref.fuse(scored)
-    assert a.height > 0
-    for col in ("F", "agreement", "technique", "best_detector"):
+    a, b, f = fitted.chief.fuse(scored), ref.fuse(scored), fuse.fuse(scored)
+    assert a.height > 0 and a["F"].max() > 0
+    assert np.array_equal(a["F"].to_numpy(), b["F"].to_numpy())  # bit-identical
+    for col in ("agreement", "technique", "best_detector"):
         assert a[col].to_list() == b[col].to_list(), col
-    assert a["F"].max() > 0
+    # and the configured mode matters: where the AI layer drives "fuse", shift lowers F
+    ai_rows = (f["best_detector"] == "ai.iforest").to_numpy() & (f["F"].to_numpy() > 1.0)
+    assert ai_rows.any()
+    assert (a["F"].to_numpy()[ai_rows] < f["F"].to_numpy()[ai_rows]).all()
+    assert not np.array_equal(a["F"].to_numpy(), f["F"].to_numpy())
+    assert (a["agreement"].to_numpy() <= f["agreement"].to_numpy()).all()
     # and the stream: the loaded bundle replays like the fitted Chief and like the reference
     dets, chief, _ = load_bundle(shift_bundle.dir, cfg)
     assert chief.ai == AiFusion("shift", 1.0) and chief.ai_agreement_p == pytest.approx(1e-3)
     loaded = _series(cfg, dets, chief)
     assert loaded and loaded == _series(cfg, fitted.detectors, fitted.chief)
     assert loaded == _series(cfg, fitted.detectors, ref)
+    assert loaded != _series(cfg, fitted.detectors, fuse)
 
 
 def test_bundle_refuses_another_ai_fusion(shift_bundle, tmp_path):
