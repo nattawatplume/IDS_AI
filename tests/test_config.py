@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from idsai.config import (
+    REPO_ROOT,
     FeatureCfg,
     config_hash,
     file_sha,
@@ -36,7 +37,7 @@ def test_remaining_defaults_match_spec():
     assert s.live.ws_url == "wss://data-stream.binance.vision/stream"
     assert s.live.budget_per_hour == 2.0 and s.live.universe_size == 4
     assert s.live.train_days == 7 and s.live.bar_grace_s == 2
-    assert s.detectors == ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"]
+    assert s.detectors == ["rules", "stat.robust_z", "stat.cusum", "ai.iforest"]  # M2 live AI
     assert s.mode in ("replay", "live")
     assert s.paths.app_db == Path("data/app.duckdb")
     assert s.paths.research_db == Path("data/research.duckdb")
@@ -157,3 +158,69 @@ def test_config_hash_matches_the_existing_demo_pack():
         pytest.skip("data/demo/manifest.json is absent: no demo pack to compare against")
     recorded = json.loads(manifest.read_text(encoding="utf-8"))["config_hash"]
     assert config_hash(load_settings()) == recorded
+
+
+# ---------------------------------------------------------------- live AI fusion (ChiefCfg.ai_*)
+
+# configs/default.yaml before the live AI layer (AE, fusion "fuse")
+OLD_DEFAULT = {
+    "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
+    "chief": {"ai_mode": "fuse", "ai_shift": 0},
+}
+
+
+def test_chief_ai_defaults_are_absent_from_the_dump():
+    s = load_settings(overrides=OLD_DEFAULT)
+    dumped = s.model_dump(mode="json")["chief"]
+    assert not {"ai_mode", "ai_shift", "ai_regime_feature"} & set(dumped)
+    # the pre-live-AI default.yaml and eval_prev_live.yaml keep their pinned hashes
+    assert config_hash(s) == "6da45ffe7efd"
+    assert config_hash(load_settings(REPO_ROOT / "configs/eval_prev_live.yaml")) == "53e3b662ab96"
+
+
+def test_chief_ai_non_default_is_dumped_and_changes_the_hash():
+    base = load_settings(overrides=OLD_DEFAULT)
+    shift = load_settings(overrides={**OLD_DEFAULT, "chief": {"ai_mode": "shift", "ai_shift": 1}})
+    dumped = shift.model_dump(mode="json")["chief"]
+    assert dumped["ai_mode"] == "shift" and dumped["ai_shift"] == 1.0
+    assert dumped["ai_regime_feature"] is None
+    assert config_hash(shift) != config_hash(base)
+    excl = load_settings(overrides={"chief": {"ai_mode": "exclude", "ai_shift": 0}})
+    assert config_hash(excl) not in (config_hash(base), config_hash(shift))
+
+
+def test_default_config_runs_iforest_with_shift1():
+    s = load_settings()
+    assert s.detectors == ["rules", "stat.robust_z", "stat.cusum", "ai.iforest"]
+    assert (s.chief.ai_mode, s.chief.ai_shift, s.chief.ai_regime_feature) == ("shift", 1.0, None)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"ai_mode": "nope"},
+        {"ai_mode": "fuse", "ai_shift": 1.0},
+        {"ai_mode": "shift", "ai_shift": -1.0},
+        {"ai_mode": "shift", "ai_shift": float("inf")},
+        {"ai_mode": "mondrian"},
+        {"ai_mode": "shift", "ai_shift": 1.0, "ai_regime_feature": "z_quote_vol_300"},
+    ],
+)
+def test_chief_ai_rejects_what_aifusion_rejects(bad):
+    from idsai.ai.chief import AiFusion
+
+    with pytest.raises(ValidationError):
+        load_settings(overrides={"chief": bad})
+    with pytest.raises(ValueError):
+        AiFusion(bad["ai_mode"], bad.get("ai_shift", 0.0), bad.get("ai_regime_feature"))
+
+
+def test_aifusion_from_cfg():
+    from idsai.ai.chief import AiFusion
+
+    assert AiFusion.from_cfg(load_settings().chief) == AiFusion("shift", 1.0)
+    assert AiFusion.from_cfg(load_settings(overrides=OLD_DEFAULT).chief) == AiFusion()
+    cfg = load_settings(
+        overrides={"chief": {"ai_mode": "mondrian", "ai_shift": 0, "ai_regime_feature": "x"}}
+    )
+    assert AiFusion.from_cfg(cfg.chief) == AiFusion("mondrian", regime_feature="x")

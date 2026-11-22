@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
@@ -22,6 +23,22 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.yaml"
 DEFAULT_SPLITS = REPO_ROOT / "configs" / "splits.yaml"
 
 DateRange = tuple[date, date]
+
+AiMode = Literal["fuse", "exclude", "mondrian", "shift"]
+AI_MODES = ("fuse", "exclude", "mondrian", "shift")
+
+
+def check_ai_fusion(mode: str, shift: float, regime_feature: str | None) -> None:
+    """The one set of rules for how the `ai` layer enters the fusion (`idsai.ai.chief.AiFusion`
+    and `ChiefCfg.ai_*` both call it); raises ValueError."""
+    if mode not in AI_MODES:
+        raise ValueError(f"unknown ai mode {mode!r}; valid: {AI_MODES}")
+    if not (math.isfinite(shift) and shift >= 0):
+        raise ValueError(f"ai shift must be finite and >= 0, got {shift}")
+    if mode != "shift" and shift != 0:
+        raise ValueError(f"ai shift {shift} needs mode 'shift', got {mode!r}")
+    if (mode == "mondrian") != (regime_feature is not None):
+        raise ValueError("ai mode 'mondrian' needs a regime_feature (and only it takes one)")
 
 
 class _Cfg(BaseModel):
@@ -81,11 +98,34 @@ class FeatureCfg(_Cfg):
         return self
 
 
+_AI_DEFAULTS = {"ai_mode": "fuse", "ai_shift": 0.0, "ai_regime_feature": None}
+
+
 class ChiefCfg(_Cfg):
     budget_per_symbol_day: float = 2.0
     suppress_for_s: int = 300
     agreement_p: float = 0.01
     attribution_min: float = 3.0
+    # how the production Chief fuses the `ai` layer (`idsai.ai.chief.AiFusion`); live AI layer
+    # since M2: `ai_mode: shift`, `ai_shift: 1.0` with `ai.iforest` (docs/REPORT.md section 11)
+    ai_mode: AiMode = "fuse"
+    ai_shift: float = 0.0
+    ai_regime_feature: str | None = None
+
+    @model_validator(mode="after")
+    def _check_ai(self) -> "ChiefCfg":
+        check_ai_fusion(self.ai_mode, self.ai_shift, self.ai_regime_feature)
+        return self
+
+    @model_serializer(mode="wrap")
+    def _drop_default_ai(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # all three at their defaults = absent from every dump (like `FeatureCfg.sell_side`), so
+        # config_hash and every stored config stay byte-identical to the ones made before them
+        out = handler(self)
+        if all(getattr(self, k) == v for k, v in _AI_DEFAULTS.items()):
+            for k in _AI_DEFAULTS:
+                out.pop(k, None)
+        return out
 
 
 class EvalCfg(_Cfg):

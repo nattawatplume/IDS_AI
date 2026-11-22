@@ -59,7 +59,7 @@ from typing import Any, Literal
 import numpy as np
 import polars as pl
 
-from idsai.config import ChiefCfg
+from idsai.config import AiMode, ChiefCfg, check_ai_fusion
 from idsai.contracts.alert import Alert, DetectorRef, phase_of
 from idsai.contracts.detector import Detector, feature_matrix
 
@@ -72,10 +72,8 @@ DEDUP_BUCKET_US = 300_000_000
 STATE_VERSION = 2
 LOADABLE_STATE_VERSIONS = (1, 2)  # version 1: before AiFusion, always mode "fuse"
 REGIME_BINS = 3
-AI_MODES = ("fuse", "exclude", "mondrian", "shift")
 
 Provenance = Literal["live", "replay", "sim"]
-AiMode = Literal["fuse", "exclude", "mondrian", "shift"]
 
 
 class CalibrationError(ValueError):
@@ -126,14 +124,12 @@ class AiFusion:
     regime_feature: str | None = None
 
     def __post_init__(self) -> None:
-        if self.mode not in AI_MODES:
-            raise ValueError(f"unknown ai mode {self.mode!r}; valid: {AI_MODES}")
-        if not (math.isfinite(self.shift) and self.shift >= 0):
-            raise ValueError(f"ai shift must be finite and >= 0, got {self.shift}")
-        if self.mode != "shift" and self.shift != 0:
-            raise ValueError(f"ai shift {self.shift} needs mode 'shift', got {self.mode!r}")
-        if (self.mode == "mondrian") != (self.regime_feature is not None):
-            raise ValueError("ai mode 'mondrian' needs a regime_feature (and only it takes one)")
+        check_ai_fusion(self.mode, self.shift, self.regime_feature)
+
+    @classmethod
+    def from_cfg(cls, cfg: ChiefCfg) -> "AiFusion":
+        """The fusion a production Chief runs (`chief.ai_mode`, `ai_shift`, `ai_regime_feature`)."""
+        return cls(cfg.ai_mode, float(cfg.ai_shift), cfg.ai_regime_feature)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -293,6 +289,11 @@ class Chief:
         self._mondrian: dict[int, _Bins] = {}
 
     # ------------------------------------------------------------ calibration
+
+    @property
+    def ai_agreement_p(self) -> float:
+        """The p-value an `ai`-layer detector must beat to count for `agreement` (shifted)."""
+        return self._agree_ai_p
 
     @property
     def fused_detectors(self) -> list[Detector]:
