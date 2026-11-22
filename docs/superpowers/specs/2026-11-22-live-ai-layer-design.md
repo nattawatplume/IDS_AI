@@ -1,0 +1,58 @@
+# Live AI layer: ship the M2 pick (`iforest:shift1`)
+
+Source: `docs/REPORT.md` §11 (M2). Branch `feat/live-ai` (worktree `IdsAI-live`), cut from `feat/m2` (0454009).
+
+**Why.** M2's accept-only rule picked `iforest:shift1`: IsolationForest as the AI layer, its contribution to F is `max(0, −log10 p − 1)`. On test it lifts REAL recall_any from 0.745 to 0.785 (+0.040, significant) at the same hard-day FA (5.55). The user approved following the plan, so the live and replay systems should run this AI layer.
+
+**Gap today.** The fusion mode exists only inside the eval (`AiFusion` passed by `experiments.py`). `ChiefCfg` has no field for it, so every production Chief (live bundle, replay, demo pack) uses the default `"fuse"`, and `configs/default.yaml` lists `ai.autoencoder_trade` as the AI detector.
+
+## Changes
+1. **`ChiefCfg`** (`idsai/config.py`) gets the fusion settings, mirroring `AiFusion`:
+   - `ai_mode: Literal["fuse", "exclude", "mondrian", "shift"] = "fuse"`
+   - `ai_shift: float = 0.0`
+   - `ai_regime_feature: str | None = None`
+   - Use the same validation rules `AiFusion` enforces. Reuse its checks rather than copying them.
+   - **Hash safety:** when all three are at their defaults, they are absent from every dump, the same trick as `FeatureCfg.sell_side`. So `config_hash` of every existing config (including `configs/eval_prev_live.yaml` = `53e3b662ab96`) stays byte-identical. Add a test.
+2. **Every production Chief honours it.**
+   - Find every place outside the eval that builds a `Chief` or `ChiefStream`: bundle training and `load_bundle` in `idsai/ai/learning.py`, live-prep, replay pipeline, demo pack, and anything else grep finds. Each must pass `AiFusion` built from `cfg.chief`.
+   - `load_bundle` must refuse a bundle whose stored Chief fusion differs from the config. The stored state already carries `AiFusion`, and the bundle's `config_hash` already covers it once the field is dumped. Make sure the error message is in Thai, like the others.
+   - The eval keeps passing its own `AiFusion` per variant. Do not change eval results. Existing eval tests and golden/parity tests must pass unchanged.
+3. **`configs/default.yaml`:**
+   - `detectors: [rules, stat.robust_z, stat.cusum, ai.iforest]`
+   - `chief: ai_mode: shift`, `ai_shift: 1.0`
+   - Leave `configs/eval_prev_live.yaml` alone.
+   - Check whether other configs used by deploy (`Dockerfile`, `start.sh`, `render.yaml`, any `configs/live*.yaml`) need the same change. Keep them consistent with default.
+4. **Product / UI / Telegram / auditor:**
+   - grep for hard-coded `autoencoder_trade`, `"AE"`, `ai.autoencoder`, and similar. Any place that assumes the AI detector is the AE must work with `ai.iforest`. Examples: evidence labels, Thai text such as "AE", health checks in `idsai/ai/auditor.py`, live-check, demo pack.
+   - Show the AI detector with a neutral Thai label, e.g. "ชั้น AI (IsolationForest)". Never call F or p a probability. Never accuse anyone.
+   - If the AE is no longer listed, the live bundle build must not train it, so there is no torch training at Docker build. Check the build path (`idsai live-prep`, Dockerfile) and the memory note: Render has 512 MB. IsolationForest with 200 trees on 256-row subsamples is small, but confirm that scoring all rows does not add a large peak (no full-matrix copies beyond what the AE path did).
+5. **Docs:**
+   - `docs/REPORT.md` gets a short note under §11 that live/replay now run `iforest:shift1`, with the commit.
+   - `README` / deploy docs only if they name the AE as the live AI layer.
+
+## Tests (synthetic only; never touch real `data/app.duckdb` or `data/research.duckdb`)
+- `ChiefCfg` defaults leave `config_hash` unchanged. Pin the hash of a default-only config before and after.
+- A production Chief built from a config with `ai_mode: shift, ai_shift: 1` gives the same F, agreement and technique as `Chief(..., ai=AiFusion("shift", 1.0))` on a synthetic fixture, batch and stream.
+- Bundle round-trip: build → save → load with the same config works. Loading with a different `ai_mode` is refused.
+- The default config loads, and its detector set builds and runs end to end on the existing small synthetic fixtures (live/replay smoke tests already in the suite).
+- Full suite green and `ruff check .` clean. Report the counts.
+
+## Out of scope
+- Pushing or deploying (the head asks the user).
+- `features.sell_side` (decided separately after the M4 rerun).
+- Re-running evals.
+
+## Results / deviations
+
+Built on `feat/live-ai` (not pushed).
+
+- **`ChiefCfg.ai_mode / ai_shift / ai_regime_feature`.** The validation moved into one function, `idsai.config.check_ai_fusion`, called by both `AiFusion.__post_init__` and a `ChiefCfg` model validator (`config` cannot import `chief`, which already imports `config`). `AiMode` and `AI_MODES` moved to `config` with it. `AiFusion.from_cfg(cfg.chief)` builds the production fusion. The serializer drops the three keys only when all three are at their defaults. `eval_prev_live.yaml` still hashes to `53e3b662ab96`, and the pre-change `default.yaml` still hashes to `6da45ffe7efd`.
+- **Production Chief sites.** There are only two: `fit_and_calibrate` (`idsai/eval/experiments.py`), which `train_and_save` uses for `train --profile research|live` and `demo-pack`, and `load_bundle` (`idsai/ai/learning.py`), which `serve` (replay and live) and `scripts/bench_latency.py` use. `StreamPipeline` wraps the Chief it is given in a `ChiefStream`, so it needs no change. The experiments still pass their own `AiFusion` (`run_detectors(..., ai=...)`). Note that `fit_and_calibrate` is called only by the CLI. `load_bundle` checks the stored Chief fusion before `Chief.load_state_dict` and refuses a mismatch in Thai. A different `ai_mode` in the config is already caught by `config_hash`; the new check catches a state that was edited while the hash still matches.
+- **Bug found and fixed:** a bundle holding `ai.iforest` could never load. The pickle of a fitted sklearn model changes bytes after one load, so `_state_sha` on load never matched the sha saved at build time ("โมเดล ai.iforest v1 ... ไม่ตรงกับที่บันทึกไว้"). `_state_sha` now hashes the state after one dump/load. AE states give the same bytes either way.
+- **`configs/default.yaml`:** `ai.iforest`, `ai_mode: shift`, `ai_shift: 1.0`. There are no `configs/live*.yaml` files. `render.yaml` and `deploy/start.sh` name no detector, and the Docker build uses `default.yaml`, so they need no change. The `Settings.detectors` Python default (used by configs that omit `detectors`, for example many test configs) is still the AE with `"fuse"`. The spec asked only for the yaml, and changing the Python default would change those configs' hashes.
+- **Golden test:** `tests/detection/test_sell_side_off.py` read `default.yaml`. It now loads the pre-change values explicitly (`PRE_LIVE_AI`). Every digest is unchanged, including the old default config hash, which also proves the hash safety.
+- **UI / health.** `/api/health` now carries `agreement_p` and `agreement_p_ai`. The ai threshold comes from the running Chief (`Chief.ai_agreement_p`), or from the config when no pipeline is running. The alert detail ticks an ai detector only when its p is below its own (shifted) threshold. Before, the UI used a fixed 0.01 for every layer, which under `shift` would disagree with the Chief's `agreement`. The detail also names the detector "ชั้น AI (IsolationForest)" in a non-copy table `DETECTOR_LABEL`. It sits only in the technical details, next to the detector ids, so the plain-view English guard does not apply to it. The lanes, explainer and Telegram read `alert.agreement` or raw p-values, so they needed no change. The auditor has no AE-specific check. The AE wording on the eval page (`app.js`, `eval/report.py`) describes past experiments and is left as is.
+- **Docker / memory.** The build stage now trains `ai.iforest` (sklearn), not the AE: there is no torch training. A subprocess test builds and fits the default detectors with torch blocked. The build stage still installs the `train` group (`test_dockerfile_two_stages` requires it), so a config that lists the AE still builds. Dropping it would make the build faster, but the deploy test has to change. The runtime was already torch-free and already imported sklearn (the detector registry imports `idsai.ai.baselines`). The model is about 2.3 MB pickled (200 trees). Scoring 34,560 rows × 60 features peaks at about 10 MB of traced allocation, less than the input matrix itself. Training uses the 60 s grid-thinned frame. So no memory concern for 512 MB.
+- **Latency (not changed, flagged):** one-row `IsolationForest.score_samples` costs about 24 ms on the dev laptop, against well under 1 ms for the AE's NumPy forward pass. Live scores 4 rows per 10 s, which is fine. `serve --mode replay --speed 20` on a 0.1-CPU box spends a large share of its CPU on this. Pre-roll rows are not scored. If the latency check warns on Render, the fix is a NumPy tree traversal or a lower replay speed. The spec did not ask for that change, so it is not made here.
+- **Eval tests:** `tests/eval/test_experiments_smoke.py` built its config from `default.yaml` and expected the AE detector set. It now loads `configs/eval_prev_live.yaml`, the config the real evals use, with the same overrides. No eval code changed. Two other test edits follow from the new default: the default-detector assertion in `tests/test_config.py`, and `FakePipe.chief.ai_agreement_p` in `tests/product/test_api.py`.
+- **Full suite** (default selection, `-m 'not network'`): 1625 passed, 2 skipped, 5 deselected. That is 1622 passed in the full run, plus the 3 eval smoke tests re-run green after the fix. The 5 deselected are the 4 network tests plus `test_windows.py::test_one_symbol_day_under_5s`. That timing test fails (6.2 s against a 5 s limit) because the CPU is shared with the running M2 eval. It measures only `compute_windows`, which this change does not touch, and it also fails on the unchanged code under the same load. `ruff check .` is clean. (`ruff format --check` flags 3 hunks in `tests/test_cli.py`; none of them are in code this change adds.)
