@@ -86,11 +86,21 @@ def _no_data(name: str, what: str) -> Check:
     return Check(name=name, status="warn", value=None, detail_th=f"{NO_DATA_TH}: {what}")
 
 
+def _agreement_p_ai(state: AppState) -> float:
+    p = getattr(getattr(state.pipeline, "chief", None), "ai_agreement_p", None)
+    if p is not None:
+        return float(p)
+    c = state.cfg.chief
+    return c.agreement_p * 10.0 ** (-c.ai_shift)  # ai_shift is 0 unless ai_mode is "shift"
+
+
 def health(state: AppState) -> dict[str, Any]:
     """Auditor checks over what the app really has; a check without data is `warn`, never `ok`.
 
     For the dashboard's top bar it also carries `event_us` (the replayer's cursor; None without
-    one, where the bars carry the clock) and `budget_per_symbol_day`.
+    one, where the bars carry the clock) and `budget_per_symbol_day`; for the alert detail the
+    `agreement` thresholds: `agreement_p` (rule and stat layers) and `agreement_p_ai` (the `ai`
+    layer, lower under `chief.ai_mode: shift`), from the running Chief, else from the config.
     """
     pipe = state.pipeline
     inputs: dict[str, dict[str, Any]] = {}
@@ -116,6 +126,8 @@ def health(state: AppState) -> dict[str, Any]:
             "late_trades": None if pipe is None else pipe.late_trades(),
             "dropped": {} if state.bus is None else dict(state.bus.dropped),
             "event_us": None if state.replayer is None else state.replayer.cursor_us,
+            "agreement_p": state.cfg.chief.agreement_p,
+            "agreement_p_ai": _agreement_p_ai(state),
             "budget_per_symbol_day": (
                 state.cfg.chief.budget_per_symbol_day
                 if state.budget_per_symbol_day is None

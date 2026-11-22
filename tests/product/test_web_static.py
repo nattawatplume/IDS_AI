@@ -2100,6 +2100,8 @@ DETAIL_BODY = r"""
   globalThis.fetch = async (path) => ({ ok: true, status: 200, json: async () =>
     (path.startsWith("/api/taxonomy") ? tax : detail) });
   const box = document.getElementById("alert-detail");
+  // the running Chief's thresholds (/api/health): ai_mode shift 1 puts the ai layer at 0.001
+  m.getState().health = { agreement_p: 0.01, agreement_p_ai: 0.001 };
   for (const role of ["analyst", "viewer"]) {
     m.setMe({ username: "u", role, auth_enabled: true, prefs: {} });
     m.setRoute("alert");
@@ -2115,6 +2117,13 @@ DETAIL_BODY = r"""
       assert.ok(inside.includes(want), want);
     }
     assert.ok(walk(tech, (n) => n.textContent === "rule").length >= 1, "the layer is shown");
+    // the AI detector gets its neutral Thai label; p = 0.005 agrees for stat, not for the ai layer
+    assert.ok(inside.includes("ชั้น AI (IsolationForest)"), inside);
+    assert.ok(inside.includes("(ชั้น AI ต้องมี p < 0.001)"), inside);
+    const row = (name) =>
+      walk(tech, (n) => n.tagName === "TR" && n.children[0].textContent === name)[0];
+    assert.strictEqual(row("stat.robust_z").children[3].textContent, "✓");
+    assert.strictEqual(row("ai.iforest").children[3].textContent, "");
     // outside the details: plain Thai, no ids, p-values, layers, provenance or UTC
     tech.parentNode.removeChild(tech);
     const plain = box.textContent;
@@ -2142,7 +2151,11 @@ def test_alert_detail_markup(tmp_path, client):
         severity=2,
         status="open",
         fused_p=0.0004,
-        detectors=[DetectorRef(name="rule.x", layer="rule", p=0.01, score=1.0)],
+        detectors=[
+            DetectorRef(name="rule.x", layer="rule", p=0.01, score=1.0),
+            DetectorRef(name="stat.robust_z", layer="stat", p=0.005, score=4.0),
+            DetectorRef(name="ai.iforest", layer="ai", p=0.005, score=0.6),
+        ],
         agreement=2,
         evidence=[("z_quote_vol_60", 7.1, 7.1), ("ret_60", 0.042, 0.5)],
         window=(ts - 60_000_000, ts),

@@ -10,7 +10,7 @@
 const LWC = typeof window === "undefined" ? undefined : window.LightweightCharts;
 const S_US = 1e6;
 const DAY_US = 86400 * S_US;
-const AGREEMENT_P = 0.01;
+const AGREEMENT_P = 0.01; // fallback until /api/health carries the Chief's thresholds
 const MATCH_BEFORE_US = 120 * S_US; // eval match rule: [t_start - 120 s, t_end + 300 s]
 const MATCH_AFTER_US = 300 * S_US;
 const MISSED_GRACE_US = 30 * S_US; // pipeline lag allowed past the matching window
@@ -22,6 +22,27 @@ const LANES = [
   ["lane_ai", "L3 AI", "--line-l3"],
 ];
 const SEVERITY_TH = { 1: "ต่ำ", 2: "กลาง", 3: "สูง" };
+// the AI-layer detector by name, neutral: what model it is, never what it "proves". Shown only
+// in the technical details (beside detector ids), so not a plain-view *_TH copy table
+const DETECTOR_LABEL = {
+  "ai.iforest": "ชั้น AI (IsolationForest)",
+  "ai.autoencoder_trade": "ชั้น AI (autoencoder)",
+};
+
+// p a layer's detector must beat to count as agreeing; the ai layer's is lower under
+// chief.ai_mode "shift" (/api/health: agreement_p, agreement_p_ai)
+function agreementP(layer) {
+  const h = state.health;
+  const key = layer === "ai" ? "agreement_p_ai" : "agreement_p";
+  return h && isNum(h[key]) ? h[key] : AGREEMENT_P;
+}
+
+function agreementText(n) {
+  const base = agreementP("rule");
+  const ai = agreementP("ai");
+  const aiNote = ai !== base ? ` (ชั้น AI ต้องมี p < ${fmtP(ai)})` : "";
+  return `${n}/3 ชั้น มี p < ${base}${aiNote}`;
+}
 const STATUS_TH = { open: "เปิด", updated: "อัปเดต", closed: "ปิดแล้ว" };
 const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail: "มีปัญหา" };
 // the auditor's check names, as a teacher would read them
@@ -2191,7 +2212,7 @@ function techDetails(a, tax) {
         el("h3", {}, "สรุปตัวเลข"),
         kv([
           ["ค่า p รวม / ความหายากเทียบตลาดปกติ", `${fmtP(a.fused_p)} (F = −log10 p = ${fmtNum(F, 2)})`, "mono"],
-          ["ชั้นที่เห็นพ้อง", `${a.agreement}/3 ชั้น มี p < ${AGREEMENT_P}`],
+          ["ชั้นที่เห็นพ้อง", agreementText(a.agreement)],
           ["เวลาเกิด", fmtUs(a.ts_event_us), "mono"],
           ["ช่วงเวลา", `${fmtUs(w0)} – ${fmtUs(w1)}`, "mono"],
           ["สถานะ", STATUS_TH[a.status] || a.status],
@@ -2224,9 +2245,9 @@ function techDetails(a, tax) {
                   "tr",
                   {},
                   el("td", { class: "mono" }, d.name),
-                  el("td", {}, d.layer),
+                  el("td", {}, DETECTOR_LABEL[d.name] || d.layer),
                   el("td", { class: "num" }, fmtP(d.p)),
-                  el("td", {}, FUSION_LAYERS.includes(d.layer) && d.p < AGREEMENT_P ? "✓" : ""),
+                  el("td", {}, FUSION_LAYERS.includes(d.layer) && d.p < agreementP(d.layer) ? "✓" : ""),
                 ),
               ),
             ),
