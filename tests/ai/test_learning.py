@@ -410,3 +410,23 @@ def test_report_retrain_decides_at_the_minimum_event_count(research, tmp_path):
         research.insert_run(_rec("v1", seed, [0] * MIN_EVENTS))
         research.insert_run(_rec("v2", seed, [1] * MIN_EVENTS))
     assert _build(research, tmp_path)[2]["retrain_decision"]["accept"] is True
+
+
+def test_state_sha_of_an_iforest_survives_the_registry_round_trip(tmp_path):
+    # a fitted sklearn model pickles to other bytes after one load; the bundle check must not
+    # call a freshly loaded ai.iforest "changed on disk"
+    import polars as pl
+
+    from idsai.ai.baselines import AiIsolationForestDetector
+    from idsai.ai.learning import ModelRegistry, _state_sha
+
+    rng = np.random.default_rng(0)
+    frame = pl.DataFrame({"a": rng.normal(size=500), "b": rng.normal(size=500)})
+    det = AiIsolationForestDetector(["a", "b"], seed=0)
+    det.fit(frame)
+    meta = {"data_hash": "d", "config_hash": "c", "seed": 0, "created_at": "t", "train_range": []}
+    version = ModelRegistry(tmp_path).save(det, meta)
+    back = AiIsolationForestDetector(["a", "b"], seed=0)
+    back.load_state_dict(ModelRegistry(tmp_path).load("ai.iforest", version)[0])
+    assert _state_sha(back) == _state_sha(det)
+    assert np.array_equal(back.score(frame), det.score(frame))

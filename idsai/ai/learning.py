@@ -168,7 +168,11 @@ class BundleError(RuntimeError):
 
 
 def _state_sha(det: Detector) -> str:
-    blob = pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL)
+    """sha of the detector's state as it reads back from disk. The pickle of a fitted sklearn
+    model (`ai.iforest`) changes bytes after one load (shared references are not restored), so
+    the state goes through one dump/load first: saved and loaded states then hash the same."""
+    once = pickle.loads(pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL))
+    blob = pickle.dumps(once, protocol=pickle.HIGHEST_PROTOCOL)
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
