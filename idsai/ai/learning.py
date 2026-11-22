@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from idsai.ai.chief import Chief
+from idsai.ai.chief import AiFusion, Chief
 from idsai.config import Settings, config_hash
 from idsai.contracts.detector import Detector
 from idsai.eval.metrics import MIN_EVENTS, few_events_th, paired_bootstrap, significant
@@ -230,11 +230,23 @@ def save_bundle(
     return doc
 
 
+def _ai_th(d: dict[str, Any]) -> str:
+    """Short text of a stored `AiFusion.as_dict()` for the Thai bundle errors."""
+    text = f"mode={d.get('mode')}"
+    if d.get("mode") == "shift":
+        text += f" shift={d.get('shift')}"
+    if d.get("regime_feature") is not None:
+        text += f" regime={d.get('regime_feature')}"
+    return text
+
+
 def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief, dict[str, Any]]:
     """`(detectors, chief, bundle.json)` of the bundle in `root`, ready for `StreamPipeline`.
 
-    Raises `BundleError` (Thai) when the bundle is missing or incomplete, a stored model or the
-    Chief state changed on disk, or it was made with another config (`config_hash`).
+    The Chief runs the configured AI fusion (`AiFusion.from_cfg(cfg.chief)`). Raises `BundleError`
+    (Thai) when the bundle is missing or incomplete, a stored model or the Chief state changed on
+    disk, it was made with another config (`config_hash`), or its Chief was calibrated with another
+    AI fusion.
     """
     from idsai.detection.registry import build_detectors  # lazy: keeps detectors off import
 
@@ -271,11 +283,19 @@ def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief,
         state_bytes = (root / CHIEF_FILE).read_bytes()
         if hashlib.sha256(state_bytes).hexdigest()[:12] != doc["chief_sha"]:
             raise BundleError(f"{CHIEF_FILE} ใน {root} ไม่ตรงกับ {BUNDLE_JSON} ต้อง train ใหม่")
-        chief = Chief(dets, cfg.chief, want, dict(doc["model_versions"]))
-        chief.load_state_dict(pickle.loads(state_bytes))
+        ai = AiFusion.from_cfg(cfg.chief)
+        chief_state = pickle.loads(state_bytes)
+        stored = chief_state.get("ai") or AiFusion().as_dict()  # state version 1: "fuse"
+        if stored != ai.as_dict():
+            raise BundleError(
+                f"ชุดโมเดลที่ {root} สอบเทียบ Chief ด้วยการรวมชั้น AI แบบ {_ai_th(stored)} "
+                f"ไม่ตรงกับค่าตั้งตอนนี้ ({_ai_th(ai.as_dict())}) ต้อง train ใหม่ด้วยค่าตั้งปัจจุบัน"
+            )
+        chief = Chief(dets, cfg.chief, want, dict(doc["model_versions"]), ai=ai)
+        chief.load_state_dict(chief_state)
     except BundleError:
         raise
-    except (KeyError, ValueError, TypeError, OSError, pickle.UnpicklingError) as e:
+    except (KeyError, ValueError, TypeError, AttributeError, OSError, pickle.UnpicklingError) as e:
         raise BundleError(f"ชุดโมเดลที่ {root} ไม่ครบหรือเสีย: {e}") from e
     if chief.tau is None:
         raise BundleError(f"Chief ในชุดโมเดลที่ {root} ยังไม่มีเกณฑ์ (tau)")

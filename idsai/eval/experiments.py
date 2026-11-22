@@ -1335,7 +1335,8 @@ def fit_and_calibrate(
 ) -> Fitted:
     """The experiments' protocol for one deployable model set: build `names` (default
     `cfg.detectors`), fit them on the masked, grid-thinned rows of `train_days` (`_Ctx.fit`),
-    calibrate the Chief on `cal_days` and fit `tau` for the budget.
+    calibrate the Chief (with the configured AI fusion, `AiFusion.from_cfg`) on `cal_days` and fit
+    `tau` for the budget.
 
     `train_days` and `cal_days` must not share a symbol-day. Raises ValueError when nothing can be
     fitted or calibrated (no rows, a failed fit) and `CalibrationError` when the calibration set
@@ -1356,7 +1357,9 @@ def fit_and_calibrate(
     if cal.frame.height == 0:
         raise ValueError(f"no calibration rows from {len(cal_days)} day(s): {dict(cal.skipped)}")
     cols = ["symbol", "t_end_us", *[f"score__{d.name}" for d in dets]]
-    chief = Chief(dets, cfg.chief, ctx.config_hash, mv)
+    # a deployable Chief runs the configured AI fusion (`chief.ai_mode`); the experiments pass
+    # their own `AiFusion` per variant instead
+    chief = Chief(dets, cfg.chief, ctx.config_hash, mv, ai=AiFusion.from_cfg(cfg.chief))
     chief.calibrate(cal.frame.select(cols))
     chief.fit_threshold(chief.fuse(cal.frame.select(cols)), budget_per_symbol_day)
     info = {k: v for k, v in info.items() if not k.startswith("_")}

@@ -523,6 +523,104 @@ def test_bundle_refuses_another_config_or_a_missing_dir(demo, tmp_path):
         load_bundle(tmp_path / "nothing", demo.cfg)
 
 
+# the live AI layer (configs/default.yaml since M2): ai.iforest with chief.ai_mode shift, 1.0
+LIVE_AI = {
+    "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.iforest"],
+    "chief": {"ai_mode": "shift", "ai_shift": 1.0},
+}
+
+
+@pytest.fixture(scope="module")
+def shift_bundle(demo, tmp_path_factory):
+    """A bundle of the live AI layer, trained by `train_and_save` on the demo pack's days."""
+    cfg = load_settings(demo.cfg_path, overrides=LIVE_AI)
+    out = tmp_path_factory.mktemp("shift") / "bundle"
+    seen = {}
+    real = ex.fit_and_calibrate
+
+    def spy(*a, **k):
+        seen["fitted"] = real(*a, **k)
+        return seen["fitted"]
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(ex, "fit_and_calibrate", spy)
+    try:
+        with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
+            cli.train_and_save(
+                cfg, store, out, "demo", 0, demo.seen["train"], demo.seen["cal"], 10.0
+            )
+    finally:
+        mp.undo()
+    return SimpleNamespace(cfg=cfg, dir=out, fitted=seen["fitted"])
+
+
+def _scored_day(cfg, dets) -> pl.DataFrame:
+    from idsai.detection.features.bars import trades_to_bars
+    from idsai.detection.features.windows import compute_windows
+    from idsai.pipeline.batch import score_windows
+
+    d0 = day_us(PUMP)
+    with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
+        trades = store.read_trades(SYM, d0 - 86_400 * S, d0 + 86_400 * S)
+    bars = trades_to_bars(trades, SYM, d0 - 86_400 * S, d0 + 86_400 * S)
+    win = compute_windows(bars, cfg.features, 1e-4)
+    return score_windows(win.filter(pl.col("t_end_us") >= d0), dets)
+
+
+def test_production_chief_runs_the_configured_ai_fusion(shift_bundle):
+    from idsai.ai.chief import AiFusion, Chief
+    from idsai.config import config_hash
+
+    cfg, fitted = shift_bundle.cfg, shift_bundle.fitted
+    assert [d.name for d in fitted.detectors][-1] == "ai.iforest"
+    assert "ai.autoencoder_trade" not in fitted.model_versions  # the AE is not trained
+    assert fitted.chief.ai == AiFusion("shift", 1.0)
+    # the same calibration under an explicit AiFusion("shift", 1.0): identical batch output
+    ref = Chief(
+        fitted.detectors, cfg.chief, config_hash(cfg), fitted.model_versions, AiFusion("shift", 1.0)
+    )
+    ref.load_state_dict(fitted.chief.state_dict())
+    scored = _scored_day(cfg, fitted.detectors)
+    a, b = fitted.chief.fuse(scored), ref.fuse(scored)
+    assert a.height > 0
+    for col in ("F", "agreement", "technique", "best_detector"):
+        assert a[col].to_list() == b[col].to_list(), col
+    assert a["F"].max() > 0
+    # and the stream: the loaded bundle replays like the fitted Chief and like the reference
+    dets, chief, _ = load_bundle(shift_bundle.dir, cfg)
+    assert chief.ai == AiFusion("shift", 1.0) and chief.ai_agreement_p == pytest.approx(1e-3)
+    loaded = _series(cfg, dets, chief)
+    assert loaded and loaded == _series(cfg, fitted.detectors, fitted.chief)
+    assert loaded == _series(cfg, fitted.detectors, ref)
+
+
+def test_bundle_refuses_another_ai_fusion(shift_bundle, tmp_path):
+    import hashlib
+    import pickle
+    import shutil
+
+    from idsai.ai.chief import AiFusion
+
+    cfg = shift_bundle.cfg
+    fuse = cfg.model_copy(
+        update={"chief": cfg.chief.model_copy(update={"ai_mode": "fuse", "ai_shift": 0.0})}
+    )
+    with pytest.raises(BundleError, match="config_hash"):
+        load_bundle(shift_bundle.dir, fuse)
+    # a Chief state calibrated under another fusion, though the config hash matches
+    bad = tmp_path / "bad"
+    shutil.copytree(shift_bundle.dir, bad)
+    state = pickle.loads((bad / "chief.pkl").read_bytes())
+    state["ai"] = AiFusion().as_dict()
+    blob = pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)
+    (bad / "chief.pkl").write_bytes(blob)
+    doc = json.loads((bad / "bundle.json").read_text(encoding="utf-8"))
+    doc["chief_sha"] = hashlib.sha256(blob).hexdigest()[:12]
+    (bad / "bundle.json").write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(BundleError, match="การรวมชั้น AI แบบ mode=fuse"):
+        load_bundle(bad, shift_bundle.cfg)
+
+
 def test_serve_replay_wires_the_demo_pack(demo, monkeypatch, capsys):
     seen = {}
 
