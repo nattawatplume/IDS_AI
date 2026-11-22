@@ -20,6 +20,7 @@ from idsai.contracts.detector import Detector
 from idsai.detection.features.registry import model_features
 from idsai.detection.rules import (
     KK_SID,
+    NAMING_SIGNATURES_PATH,
     SELL_SIGNATURES_PATH,
     SignatureDetector,
     load_signatures,
@@ -67,6 +68,18 @@ def sell_rule_detectors() -> list[Detector]:
     return [
         SignatureDetector(s) for s in load_signatures(SELL_SIGNATURES_PATH) if s.layer == "rule"
     ]
+
+
+def naming_detectors(cfg: Settings) -> list[Detector]:
+    """M3 naming-only rules in priority order (`signatures_attr.yaml`), only with
+    `chief.attr_rules`; empty otherwise. They go to `Chief(naming=...)`, never into F."""
+    if not cfg.chief.attr_rules:
+        return []
+    sigs = load_signatures(NAMING_SIGNATURES_PATH)
+    bad = [s.sid for s in sigs if s.layer != "attr"]
+    if bad:
+        raise ValueError(f"naming signatures must have layer 'attr': {bad}")
+    return [SignatureDetector(s) for s in sigs]
 
 
 def _rules(cfg: Settings, seed: int) -> list[Detector]:

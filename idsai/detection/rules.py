@@ -22,6 +22,11 @@ SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures.yaml"
 # M4 sell-side rules: a separate file, read only with `features.sell_side`, so the sha of
 # `signatures.yaml` that every run records is unchanged
 SELL_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_sell.yaml"
+# M3 naming-only rules (layer "attr"), read only with `chief.attr_rules`; the Chief consults them
+# to name an episode no F-rule or cusum row named, never for F (`idsai.ai.chief`)
+NAMING_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_attr.yaml"
+# M3 candidate rev 2 of the wash rule 100501 (eval variant `wash2` of `m3_attr` only)
+WASH2_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_wash2.yaml"
 THR_FLOOR = 1e-9
 KK_SID = 100103  # Kamps-Kleinberg baseline signature
 
@@ -39,7 +44,7 @@ class Signature(BaseModel):
 
     sid: int
     technique: str  # e.g. "MM-T001.001"
-    layer: Literal["rule", "baseline"]
+    layer: Literal["rule", "baseline", "attr"]
     rev: int = 1
     name: str
     conditions: list[Condition] = Field(min_length=1)
@@ -68,7 +73,7 @@ def _margin(x: np.ndarray, c: Condition) -> np.ndarray:
 
 
 class SignatureDetector(Detector):
-    layer: Literal["rule", "baseline"]
+    layer: Literal["rule", "baseline", "attr"]
     track = "T"
 
     def __init__(self, sig: Signature):
