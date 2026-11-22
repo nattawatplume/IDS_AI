@@ -1,4 +1,6 @@
-# Stage 1: build the demo data. Needs torch (train group) to train the demo bundle.
+# Stage 1: build the demo data and train the bundles. configs/default.yaml's AI layer is
+# ai.iforest (scikit-learn, no torch); the train group stays installed so a config that lists
+# ai.autoencoder_trade still builds.
 FROM python:3.13-slim AS build
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
