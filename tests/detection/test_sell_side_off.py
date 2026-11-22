@@ -3,6 +3,10 @@
 The golden digests below were computed from the code before M4 (commit fdf7eb4) on the same
 synthetic stream; any change to the flag-off feature frame, rule scores, alerts, Chief state,
 config hashes or the signatures sha breaks this test.
+
+`configs/default.yaml` has since moved to the live AI layer (`ai.iforest`, `chief.ai_mode: shift`);
+`PRE_LIVE_AI` puts the old values back, so the digests (default config hash included) also prove
+that `ChiefCfg.ai_*` at their defaults leave the dump byte-identical.
 """
 
 import hashlib
@@ -33,6 +37,11 @@ OLD_BARS = [
     "symbol", "t_us", "n_trades", "buy_quote", "sell_quote", "quote_vol", "open", "high",
     "low", "close", "rush_orders", "max_trade_quote", "pingpong", "n_round",
 ]  # fmt: skip
+
+PRE_LIVE_AI = {
+    "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
+    "chief": {"ai_mode": "fuse", "ai_shift": 0.0},
+}
 
 GOLDEN = {
     "model_features": "6b99d52943321bce",
@@ -93,7 +102,7 @@ def _trades() -> pl.DataFrame:
 
 
 def _digests() -> dict[str, str]:
-    cfg = load_settings()
+    cfg = load_settings(overrides=PRE_LIVE_AI)
     fcfg = cfg.features
     out = {"model_features": _sha(json.dumps(model_features(fcfg)).encode())}
     trades = _trades()
