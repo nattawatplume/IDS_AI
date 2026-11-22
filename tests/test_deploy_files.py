@@ -148,8 +148,9 @@ def test_dockerfile_two_stages():
     # a failed live build step falls back to replay instead of failing the image
     assert "mkdir -p models" in build
     assert "|| echo" in build[build.index("idsai train --profile live") :]
-    assert "--no-group train" not in build
-    assert "--no-group train" in runtime
+    # the default bundles train ai.iforest (scikit-learn): neither stage installs torch
+    for stage in (build, runtime):
+        assert stage.count("--no-group train") == 2  # both `uv sync` lines
     assert "COPY --from=build --chown=user /home/user/app/data" in runtime
     assert "torch" not in runtime
     for stage in (build, runtime):

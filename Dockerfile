@@ -1,6 +1,6 @@
 # Stage 1: build the demo data and train the bundles. configs/default.yaml's AI layer is
-# ai.iforest (scikit-learn, no torch); the train group stays installed so a config that lists
-# ai.autoencoder_trade still builds.
+# ai.iforest (scikit-learn), so the image skips the `train` dependency group. To train an
+# autoencoder config, do it locally (`uv sync` installs that group by default).
 FROM python:3.13-slim AS build
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
@@ -11,10 +11,10 @@ USER user
 WORKDIR /home/user/app
 
 COPY --chown=user pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-group train --no-install-project
 
 COPY --chown=user . .
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --no-group train
 
 ENV PATH=/home/user/app/.venv/bin:$PATH
 
@@ -26,7 +26,7 @@ RUN idsai labels && idsai demo-pack && mkdir -p models \
          || echo "คำเตือน: สร้างโมเดล live ไม่สำเร็จ เว็บจะเปิดโหมด replay แทน" >&2; } \
     && python deploy/check_no_hu.py data
 
-# Stage 2: runtime without torch.
+# Stage 2: runtime (no `train` group either).
 FROM python:3.13-slim AS runtime
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.29 /uv /usr/local/bin/uv
