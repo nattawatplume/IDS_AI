@@ -292,8 +292,15 @@ class Chief:
 
     @property
     def ai_agreement_p(self) -> float:
-        """The p-value an `ai`-layer detector must beat to count for `agreement` (shifted)."""
-        return self._agree_ai_p
+        """The p-value an `ai`-layer detector must beat to count for `agreement` (shifted under
+        `"shift"`); 0.0 under `"exclude"`, where the ai layer never counts."""
+        return 0.0 if self.ai.mode == "exclude" else self._agree_ai_p
+
+    @property
+    def agreement_layers(self) -> int:
+        """How many fusion layers can count for `agreement` (layers with detectors, minus the
+        ai layer under `"exclude"`)."""
+        return sum(1 for cols in self._agree.values() if cols)
 
     @property
     def fused_detectors(self) -> list[Detector]:

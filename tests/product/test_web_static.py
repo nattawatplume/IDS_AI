@@ -2136,6 +2136,17 @@ DETAIL_BODY = r"""
     assert.deepStrictEqual(btns.map((b) => b.textContent), ["ผิดปกติจริง", "เตือนผิด", "ไม่แน่ใจ"]);
     for (const b of btns) assert.strictEqual(b.hasAttribute("disabled"), role === "viewer", role);
   }
+  // shift 1: 3 layers can agree, the ai layer below 0.001
+  const tech = () => walk(box, (n) => n.tagName === "DETAILS" && n.classList.contains("tech"))[0];
+  await m.showAlert(detail.alert_id);
+  assert.ok(tech().textContent.includes("2/3 ชั้น มี p < 0.01 (ชั้น AI ต้องมี p < 0.001)"));
+  // "exclude": the ai layer is never ticked and only 2 layers can agree
+  m.getState().health = { agreement_p: 0.01, agreement_p_ai: 0, agreement_layers: 2 };
+  await m.showAlert(detail.alert_id);
+  const t = tech();
+  assert.ok(t.textContent.includes("2/2 ชั้น มี p < 0.01 (ไม่นับชั้น AI)"), t.textContent);
+  const aiRow = walk(t, (n) => n.tagName === "TR" && n.children[0].textContent === "ai.iforest")[0];
+  assert.strictEqual(aiRow.children[3].textContent, "");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });
 """

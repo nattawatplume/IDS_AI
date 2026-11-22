@@ -73,7 +73,7 @@ class FakePipe:
     def __init__(self, bus: Bus, mode: str = "replay"):
         self.bus = bus
         self.mode = mode
-        self.chief = SimpleNamespace(tau=3.5, ai_agreement_p=0.001)
+        self.chief = SimpleNamespace(tau=3.5, ai_agreement_p=0.001, agreement_layers=3)
         self.latency_ms: deque[float] = deque([5.0, 8.0, 12.0])
         self.points: dict[str, list[dict]] = {}
         self.samples = 400
@@ -400,6 +400,7 @@ def test_health_carries_the_agreement_thresholds(client, env):
     h = client.get("/api/health").json()
     assert h["agreement_p"] == env.cfg.chief.agreement_p == 0.01
     assert h["agreement_p_ai"] == 0.001  # the running Chief's (shifted) threshold
+    assert h["agreement_layers"] == 3
     # without a pipeline, from the config: default.yaml runs ai_mode shift, ai_shift 1.0
     st = AppState(env.cfg, env.store, "replay", None, None, Auditor(env.cfg), symbols=[SYM])
     with TestClient(create_app(st)) as c:
@@ -410,6 +411,14 @@ def test_health_carries_the_agreement_thresholds(client, env):
     st = AppState(fuse, env.store, "replay", None, None, Auditor(fuse), symbols=[SYM])
     with TestClient(create_app(st)) as c:
         assert c.get("/api/health").json()["agreement_p_ai"] == 0.01
+    # "exclude": the ai layer never counts, so 2 layers can agree
+    excl = env.cfg.model_copy(
+        update={"chief": env.cfg.chief.model_copy(update={"ai_mode": "exclude", "ai_shift": 0.0})}
+    )
+    st = AppState(excl, env.store, "replay", None, None, Auditor(excl), symbols=[SYM])
+    with TestClient(create_app(st)) as c:
+        h = c.get("/api/health").json()
+        assert h["agreement_p_ai"] == 0.0 and h["agreement_layers"] == 2
 
 
 def test_health_without_pipeline_is_not_ok(env):

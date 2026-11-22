@@ -29,8 +29,8 @@ const DETECTOR_LABEL = {
   "ai.autoencoder_trade": "ชั้น AI (autoencoder)",
 };
 
-// p a layer's detector must beat to count as agreeing; the ai layer's is lower under
-// chief.ai_mode "shift" (/api/health: agreement_p, agreement_p_ai)
+// p a layer's detector must beat to count as agreeing, as the running Chief counts it
+// (/api/health): the ai layer's is lower under chief.ai_mode "shift" and 0 under "exclude"
 function agreementP(layer) {
   const h = state.health;
   const key = layer === "ai" ? "agreement_p_ai" : "agreement_p";
@@ -38,10 +38,14 @@ function agreementP(layer) {
 }
 
 function agreementText(n) {
+  const h = state.health;
+  const layers = h && isNum(h.agreement_layers) ? h.agreement_layers : FUSION_LAYERS.length;
   const base = agreementP("rule");
   const ai = agreementP("ai");
-  const aiNote = ai !== base ? ` (ชั้น AI ต้องมี p < ${fmtP(ai)})` : "";
-  return `${n}/3 ชั้น มี p < ${base}${aiNote}`;
+  let aiNote = "";
+  if (ai === 0) aiNote = " (ไม่นับชั้น AI)";
+  else if (ai !== base) aiNote = ` (ชั้น AI ต้องมี p < ${fmtP(ai)})`;
+  return `${n}/${layers} ชั้น มี p < ${base}${aiNote}`;
 }
 const STATUS_TH = { open: "เปิด", updated: "อัปเดต", closed: "ปิดแล้ว" };
 const CHECK_TH = { ok: "ปกติ", warn: "เฝ้าระวัง", fail: "มีปัญหา" };
