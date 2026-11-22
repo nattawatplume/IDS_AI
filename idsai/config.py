@@ -111,6 +111,10 @@ class ChiefCfg(_Cfg):
     ai_mode: AiMode = "fuse"
     ai_shift: float = 0.0
     ai_regime_feature: str | None = None
+    # M3: naming-only signatures (`configs/signatures_attr.yaml`) name an episode that no F-rule
+    # or cusum row named; they never enter F, p, agreement or tau. Off leaves every output
+    # bit-identical and is absent from every dump (like `FeatureCfg.sell_side`).
+    attr_rules: bool = False
 
     @model_validator(mode="after")
     def _check_ai(self) -> "ChiefCfg":
@@ -125,6 +129,8 @@ class ChiefCfg(_Cfg):
         if all(getattr(self, k) == v for k, v in _AI_DEFAULTS.items()):
             for k in _AI_DEFAULTS:
                 out.pop(k, None)
+        if not self.attr_rules:
+            out.pop("attr_rules", None)
         return out
 
 

@@ -224,3 +224,30 @@ def test_aifusion_from_cfg():
         overrides={"chief": {"ai_mode": "mondrian", "ai_shift": 0, "ai_regime_feature": "x"}}
     )
     assert AiFusion.from_cfg(cfg.chief) == AiFusion("mondrian", regime_feature="x")
+
+
+# ---------------------------------------------------------------- M3 naming rules flag
+
+
+def test_chief_attr_rules_off_is_absent_and_keeps_the_pinned_hashes():
+    default = load_settings()
+    assert default.chief.attr_rules is False
+    assert "attr_rules" not in default.model_dump(mode="json")["chief"]
+    explicit = load_settings(overrides={"chief": {"attr_rules": False}})
+    assert config_hash(explicit) == config_hash(default)
+    prev = load_settings(REPO_ROOT / "configs/eval_prev_live.yaml")
+    assert config_hash(prev) == "53e3b662ab96"
+    assert config_hash(load_settings(overrides=OLD_DEFAULT)) == "6da45ffe7efd"
+
+
+def test_chief_attr_rules_on_is_dumped_and_changes_the_hash():
+    on = load_settings(overrides={"chief": {"attr_rules": True}})
+    assert on.model_dump(mode="json")["chief"]["attr_rules"] is True
+    assert config_hash(on) != config_hash(load_settings())
+    # the AI flags keep their own drop rule beside it
+    assert "ai_mode" in on.model_dump(mode="json")["chief"]
+    both = load_settings(
+        overrides={**OLD_DEFAULT, "chief": {**OLD_DEFAULT["chief"], "attr_rules": True}}
+    )
+    dumped = both.model_dump(mode="json")["chief"]
+    assert dumped["attr_rules"] is True and "ai_mode" not in dumped
