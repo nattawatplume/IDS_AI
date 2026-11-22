@@ -148,8 +148,8 @@ class ModelRegistry:
                     p.unlink()
                 tmp.rmdir()
 
-    def load(self, name: str, version: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        """`(state, meta)` of `version` (latest when None); `KeyError` if unknown."""
+    def load_raw(self, name: str, version: str | None = None) -> tuple[bytes, dict[str, Any]]:
+        """`(state.pkl bytes, meta)` of `version` (latest when None); `KeyError` if unknown."""
         known = self.versions(name)
         if not known:
             raise KeyError(f"no saved versions of model {name!r} under {self.root}")
@@ -157,22 +157,28 @@ class ModelRegistry:
         if v not in known:
             raise KeyError(f"model {name!r} has no version {v!r}; known: {known}")
         vdir = self._dir(name) / v
-        with open(vdir / "state.pkl", "rb") as f:
-            state = pickle.load(f)
+        blob = (vdir / "state.pkl").read_bytes()
         meta = json.loads((vdir / "meta.json").read_text(encoding="utf-8"))
-        return state, meta
+        return blob, meta
+
+    def load(self, name: str, version: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """`(state, meta)` of `version` (latest when None); `KeyError` if unknown."""
+        blob, meta = self.load_raw(name, version)
+        return pickle.loads(blob), meta
 
 
 class BundleError(RuntimeError):
     """A model bundle is missing, incomplete, or was made for another config (Thai message)."""
 
 
-def _state_sha(det: Detector) -> str:
-    """sha of the detector's state as it reads back from disk. The pickle of a fitted sklearn
-    model (`ai.iforest`) changes bytes after one load (shared references are not restored), so
-    the state goes through one dump/load first: saved and loaded states then hash the same."""
-    once = pickle.loads(pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL))
-    blob = pickle.dumps(once, protocol=pickle.HIGHEST_PROTOCOL)
+def _bytes_sha(blob: bytes) -> str:
+    """12-hex sha256 of the exact `state.pkl` bytes written to (and read from) the registry.
+
+    Hashing the file, not a re-pickle of the loaded state, keeps the check independent of the
+    process: the pickle of a fitted sklearn model (`ai.iforest`) is not byte-stable across a
+    load or across interpreter runs. For the AE the file bytes are what `pickle.dumps` gave, so
+    the shas of bundles made before this change still match.
+    """
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
@@ -209,8 +215,9 @@ def save_bundle(
     for d in detectors:
         if d.name in chief.model_versions:
             mv = chief.model_versions[d.name]
-            registry[d.name] = reg.save(d, {**meta, "model_version": mv})
-            shas[d.name] = _state_sha(d)
+            version = reg.save(d, {**meta, "model_version": mv})
+            registry[d.name] = version
+            shas[d.name] = _bytes_sha(reg.load_raw(d.name, version)[0])
     state = pickle.dumps(chief.state_dict(), protocol=pickle.HIGHEST_PROTOCOL)
     _write_atomic(root / CHIEF_FILE, state)
     doc = {
@@ -276,10 +283,10 @@ def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief,
             version = doc["registry_versions"].get(d.name)
             if version is None:
                 continue
-            state, _ = reg.load(d.name, version)
-            d.load_state_dict(state)
-            if _state_sha(d) != doc["state_sha"][d.name]:
+            blob, _ = reg.load_raw(d.name, version)
+            if _bytes_sha(blob) != doc["state_sha"][d.name]:  # checked before unpickling
                 raise BundleError(f"โมเดล {d.name} {version} ใน {root} ไม่ตรงกับที่บันทึกไว้")
+            d.load_state_dict(pickle.loads(blob))
         state_bytes = (root / CHIEF_FILE).read_bytes()
         if hashlib.sha256(state_bytes).hexdigest()[:12] != doc["chief_sha"]:
             raise BundleError(f"{CHIEF_FILE} ใน {root} ไม่ตรงกับ {BUNDLE_JSON} ต้อง train ใหม่")

@@ -4,6 +4,7 @@ Synthetic data only. The scorer replays sklearn step for step, so the scores are
 bit-identical; the asserted bound is the 1e-12 the eval allows.
 """
 
+import hashlib
 import pickle
 import time
 
@@ -17,9 +18,13 @@ from idsai.ai.baselines import (
     ForestScorer,
     IsolationForestDetector,
 )
-from idsai.ai.learning import _state_sha
 
 TOL = 1e-12
+
+
+def _state_bytes_sha(det) -> str:
+    blob = pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL)
+    return hashlib.sha256(blob).hexdigest()
 
 
 def _queries(rng: np.random.Generator, train: np.ndarray) -> np.ndarray:
@@ -97,21 +102,22 @@ def test_one_row_at_a_time_equals_the_batch():
     assert np.array_equal(rows, batch)  # stream (one row) and batch: bit-identical
 
 
-def test_state_round_trip_rebuilds_the_scorer_and_keeps_the_sha():
+def test_state_round_trip_rebuilds_the_scorer_and_scoring_leaves_the_state_alone():
     rng = np.random.default_rng(7)
     det = AiIsolationForestDetector(["a", "b", "c"], seed=0)
     det.fit(_frame(rng, 1000))
     state = det.state_dict()
     assert set(state) == {"features", "seed", "mu", "sd", "model"}  # nothing derived is stored
-    sha = _state_sha(det)
+    before = _state_bytes_sha(det)
+    blob = pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)
     back = AiIsolationForestDetector(["a", "b", "c"], seed=0)
-    back.load_state_dict(pickle.loads(pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL)))
+    back.load_state_dict(pickle.loads(blob))
     assert back._scorer is not None and back._scorer is not det._scorer
+    loaded = _state_bytes_sha(back)
     q = _frame(rng, 200)
     assert np.array_equal(back.score(q), det.score(q))
-    assert _state_sha(back) == sha
-    back.score(q)
-    assert _state_sha(back) == sha  # scoring does not touch the stored state
+    # scoring touches no stored state (the bundle hashes the registry file bytes, see learning)
+    assert _state_bytes_sha(det) == before and _state_bytes_sha(back) == loaded
 
 
 @pytest.mark.slow
