@@ -16,7 +16,7 @@ import polars as pl
 import pytest
 
 from idsai.ai.chief import AiFusion
-from idsai.config import config_hash, load_settings
+from idsai.config import REPO_ROOT, config_hash, load_settings
 from idsai.contracts.frames import LABELS
 from idsai.data.store import Store
 from idsai.detection.simulator import Scenario, base_quote_rate, inject
@@ -73,7 +73,10 @@ LABEL_ROWS = [
 
 
 def make_cfg(tmp):
+    # the experiments' own config (AE detector set, fusion "fuse"), as the real eval runs use;
+    # configs/default.yaml now holds the live AI layer (ai.iforest, shift 1)
     return load_settings(
+        REPO_ROOT / "configs" / "eval_prev_live.yaml",
         overrides={
             "paths": {"data_dir": str(tmp / "data")},
             "splits": {
