@@ -114,3 +114,10 @@ Source: `docs/ROADMAP.md` M2 and the M1 results (`docs/REPORT.md` §9). Branch `
 - The FA eligibility uses point means, not CIs. With ~94 accept events, a small FA difference can flip eligibility.
 - `ae+iforest` fuses one more detector, which raises the `fit_threshold` resolution floor. A tight budget can then give a `CalibrationError` record for that variant only.
 - Each AE fit is single-threaded, so the 3 AE fits are the slowest part of each seed on a busy laptop.
+
+## Real run (2026-11-22, 5 seeds, `configs/eval_prev_live.yaml`)
+- The run took about 18 h on the laptop (seeds took 2.7–5 h each), with 0 failed records.
+- The accept-only rule picked **`iforest:shift1`**: accept recall_any +0.051 [0.015, 0.094] over `no_ai`, with accept-hard FA equal (7.45).
+- On test (reported once): recall_any 0.785 vs 0.745, +0.040 [0.018, 0.068]; hard FA 5.55 for both; FA 1.660 vs 1.516.
+- AE alone vs iforest alone on test: −0.158 [−0.208, −0.111]. The small AE grid did not close the gap.
+- Full write-up: `docs/REPORT.md` §11. The live default was not changed.

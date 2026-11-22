@@ -184,6 +184,13 @@
   - ลองใช้ iforest เป็นชั้น AI แทน หรือใช้ร่วมกับ AE
 - **เป้า:** AE ไม่แพ้ iforest อย่างมีนัย (paired bootstrap)
 
+**ผล M2 (22 พ.ย. 2026, `m2_ai`, 5 seed, budget 2)**
+- ลอง 16 แบบ: ae / ae_wide / ae_narrow / iforest / ae+iforest × fuse / shift1 / shift2 + no_ai
+- **กฎเลือกบน accept เลือก iforest:shift1** (recall +0.051 มีนัย, FA hard เท่ากับ no_ai)
+- **test:** recall_any 0.785 เทียบ no_ai 0.745 (+0.040 [0.018, 0.068] มีนัย), FA hard 5.55 เท่าเดิม, FA 1.660 เทียบ 1.516
+- AE เดี่ยวยังแพ้ iforest เดี่ยว −0.158 อย่างมีนัย กริด AE เล็ก ๆ ไม่ช่วย → เป้า "AE ไม่แพ้ iforest" ยังไม่ผ่าน แต่ใช้ iforest เป็นชั้น AI แทนได้
+- ยังไม่ได้เปลี่ยนชั้น AI ของ live (รอตัดสินใจ: no_ai หรือ iforest:shift1)
+
 **M3 ระบุเทคนิคให้แม่นขึ้น**
 - **ปัญหา:** recall_correct ต่ำกว่า recall_any มาก (0.399 เทียบกับ 0.739) และ wash_pingpong ระบุเทคนิคถูกแค่ 0.001
 - **สิ่งที่จะทำ:** ใช้ per_event จาก M0 ดูว่าระบบระบุผิดเป็นเทคนิคอะไร แล้วปรับกฎและ signature ใน `configs/signatures.yaml`
