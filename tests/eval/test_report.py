@@ -1278,3 +1278,53 @@ def test_m2_report_shows_errored_variants(research, tmp_path):
     section = _section(text, "m2_ai")
     assert "| ae+iforest:fuse |" in section and "ชุดข้อมูลสอบเทียบเล็กเกินไป." in section
     assert "Too small" not in section
+
+
+# ---------------------------------------------------------------- M3 selection
+def _m3_row(variant, fa=2.0, fa_hard=5.0, gain=None, sig=False, below=False, **kw):
+    return {"variant": variant, "fa": fa, "fa_hard": fa_hard, "gain_correct": gain,
+            "gain_correct_significant": sig, "below_ref": below, **kw}  # fmt: skip
+
+
+M3_BASE = _m3_row("base")
+
+
+def test_m3_select_largest_significant_recall_correct_gain_wins():
+    from idsai.eval.report import m3_select
+
+    rows = [
+        M3_BASE,
+        _m3_row("attr", gain=0.30, sig=True),
+        _m3_row("wash2", gain=0.10, sig=True),
+        _m3_row("attr+wash2", gain=0.40, sig=False),  # largest, but not significant
+    ]
+    sel = m3_select(rows)
+    assert sel["chosen"] == "attr"
+    assert sel["eligible"] == ["base", "attr", "wash2", "attr+wash2"]
+
+
+def test_m3_select_fa_cap_recall_any_gate_and_ties_to_the_simpler():
+    from idsai.eval.report import m3_select
+
+    rows = [
+        M3_BASE,
+        _m3_row("attr", gain=0.2, sig=True),
+        _m3_row("wash2", fa=2.05, gain=0.5, sig=True),  # FA 2.05 > 1.02 x 2.0
+        _m3_row("attr+wash2", fa_hard=5.1, gain=0.2, sig=True),  # exactly at 1.02 x: eligible
+    ]
+    sel = m3_select(rows)
+    assert sel["chosen"] == "attr"  # tie with attr+wash2 goes to the simpler
+    assert set(sel["excluded"]) == {"wash2"} and "FA" in sel["excluded"]["wash2"]
+    rows[1] = _m3_row("attr", gain=0.2, sig=True, below=True)
+    sel = m3_select(rows)
+    assert "attr" in sel["excluded"] and "recall_any" in sel["excluded"]["attr"]
+    assert sel["chosen"] == "attr+wash2"
+
+
+def test_m3_select_nothing_significant_or_no_base():
+    from idsai.eval.report import m3_select
+
+    assert m3_select([M3_BASE, _m3_row("attr", gain=0.3)])["chosen"] == "base"
+    assert m3_select([_m3_row("attr", gain=0.3, sig=True)])["chosen"] is None
+    sel = m3_select([M3_BASE, _m3_row("attr", error="boom")])
+    assert sel["chosen"] == "base" and "attr" in sel["excluded"]
