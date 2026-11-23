@@ -413,3 +413,40 @@ def test_unknown_event_kind_raises(small, store):
 
     with pytest.raises(ValueError):
         asyncio.run(pipe_for(small, store).run(source()))
+
+
+def test_naming_rules_are_scored_and_change_only_names(world, batch_inj):
+    """M3: a Chief with naming rules gets their scores from the stream path; its final alerts
+    equal its batch episodes, and against the flag-off run only the names may differ."""
+    from idsai.detection.registry import naming_detectors
+
+    on = load_settings(overrides={"chief": {"attr_rules": True}})
+    plain = world["chief"]
+    named = Chief(
+        world["dets"], plain.cfg, plain.config_hash, plain.model_versions,
+        ai=plain.ai, naming=naming_detectors(on),
+    )  # fmt: skip
+    named.load_state_dict(plain.state_dict())
+    bus = Bus(maxsize=100_000)
+    qa = bus.subscribe("alerts")
+    prev = world["trades"].filter(pl.col("ts_us") < D_US)
+    r = Replayer(world["trades"], speed=0, start_us=D_US, preroll_from_us=D_US - 86_400 * S)
+    r.inject(burst(), base_quote_rate(prev), "replay")
+    asyncio.run(
+        StreamPipeline(world["cfg"], world["store"], world["dets"], named, bus, "replay").run(r)
+    )
+    closed = [a for a in drain(qa) if a.status == "closed"]
+    inj = load_day_windows(world["store"], SYM, D, world["cfg"], scenario=burst())
+    scored = score_windows(inj.windows, named.score_detectors)
+    fused = named.fuse(scored)
+    assert fused["F"].to_list() == batch_inj["fused"]["F"].to_list()
+    want = named.episodes(fused, provenance="replay")
+    key = lambda a: (a.symbol, a.ts_event_us)  # noqa: E731
+    assert [a.model_dump_json() for a in sorted(closed, key=key)] == [
+        a.model_dump_json() for a in sorted(want, key=key)
+    ]
+    base = plain.episodes(batch_inj["fused"], provenance="replay")
+    drop = ("technique_id", "signature_id", "rev", "technique_source")
+    assert [{k: v for k, v in a.model_dump().items() if k not in drop} for a in want] == [
+        {k: v for k, v in a.model_dump().items() if k not in drop} for a in base
+    ]

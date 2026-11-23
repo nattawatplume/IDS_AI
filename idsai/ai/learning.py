@@ -255,7 +255,8 @@ def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief,
     disk, it was made with another config (`config_hash`), or its Chief was calibrated with another
     AI fusion.
     """
-    from idsai.detection.registry import build_detectors  # lazy: keeps detectors off import
+    # lazy: keeps detectors off import
+    from idsai.detection.registry import build_detectors, naming_detectors
 
     root = Path(root)
     path = root / BUNDLE_JSON
@@ -298,7 +299,9 @@ def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief,
                 f"ชุดโมเดลที่ {root} สอบเทียบ Chief ด้วยการรวมชั้น AI แบบ {_ai_th(stored)} "
                 f"ไม่ตรงกับค่าตั้งตอนนี้ ({_ai_th(ai.as_dict())}) ต้อง train ใหม่ด้วยค่าตั้งปัจจุบัน"
             )
-        chief = Chief(dets, cfg.chief, want, dict(doc["model_versions"]), ai=ai)
+        # M3 naming rules (`chief.attr_rules`) hold no state: rebuilt from config, never stored
+        naming = naming_detectors(cfg)
+        chief = Chief(dets, cfg.chief, want, dict(doc["model_versions"]), ai=ai, naming=naming)
         chief.load_state_dict(chief_state)
     except BundleError:
         raise

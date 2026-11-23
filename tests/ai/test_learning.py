@@ -538,3 +538,40 @@ def test_ae_bundle_sha_is_unchanged_by_hashing_the_file():
     buf = io.BytesIO()
     pickle.dump(det.state_dict(), buf, protocol=pickle.HIGHEST_PROTOCOL)  # as the registry does
     assert _bytes_sha(buf.getvalue()) == old.hexdigest()[:12]
+
+
+def test_bundle_loads_the_naming_rules_only_with_attr_rules(tmp_path):
+    # M3: naming rules hold no state, so a bundle stores nothing of them; load_bundle rebuilds
+    # them from the config (the flag changes config_hash, so an off bundle never loads on)
+    from datetime import date
+
+    import polars as pl
+
+    from idsai.ai.chief import AiFusion, Chief
+    from idsai.ai.learning import load_bundle, save_bundle
+    from idsai.config import config_hash
+    from idsai.detection.features.bars import trades_to_bars
+    from idsai.detection.features.windows import compute_windows
+    from idsai.detection.registry import build_detectors
+    from idsai.pipeline.batch import score_windows
+    from tests.synth import S, day_us, make_trades
+
+    on = load_settings(overrides={"chief": {"attr_rules": True}})
+    d0 = date(2025, 3, 1)
+    t0 = day_us(d0)
+    bars = trades_to_bars(
+        make_trades(d0, 2, symbol="TESTBTC", seed=4, rate=0.3), "TESTBTC", t0, t0 + 2 * 86_400 * S
+    )
+    win = compute_windows(bars, on.features, 1e-4).filter(pl.col("t_end_us") >= t0 + 86_400 * S)
+    names = ["rules", "stat.robust_z", "stat.cusum"]
+    dets = build_detectors(names, on, 0)
+    scored = score_windows(win, dets)
+    chief = Chief(dets, on.chief, config_hash(on), {}, ai=AiFusion.from_cfg(on.chief))
+    chief.calibrate(scored)
+    chief.fit_threshold(chief.fuse(scored), 10.0)
+    meta = {"data_hash": "d", "config_hash": config_hash(on), "seed": 0, "created_at": "t",
+            "train_range": ["2025-03-02", "2025-03-02"]}  # fmt: skip
+    save_bundle(tmp_path / "b", names, dets, chief, meta)
+    _, loaded, _ = load_bundle(tmp_path / "b", on)
+    assert [d.name for d in loaded.naming] == ["attr.100191", "attr.100591"]
+    assert loaded.state_dict()["cal"].keys() == chief.state_dict()["cal"].keys()
