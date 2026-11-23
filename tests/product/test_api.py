@@ -244,6 +244,20 @@ def test_alert_detail_and_feedback(client, env):
     assert r.status_code == 404
 
 
+def test_alert_phase_reaches_the_list_and_the_detail(client, env):
+    """M4 (sell side on in default.yaml): `phase` and MM-T006 flow from the store to the API."""
+    env.store.upsert_alert(
+        make_alert("r1", technique_id="MM-T006", signature_id=100601, phase="sell")
+    )
+    env.store.upsert_alert(make_alert("n1", D_US + 7200 * S))
+    items = {a["alert_id"]: a for a in client.get("/api/alerts").json()}
+    assert items["r1"]["phase"] == "sell" and "phase" not in items["n1"]
+    body = client.get("/api/alerts/r1").json()
+    assert body["phase"] == "sell" and body["technique_id"] == "MM-T006"
+    assert "MM-T006 ทุบราคา" in body["explanation_th"]
+    assert body["explanation_th"].endswith("ช่วง: กำลังเทขาย")
+
+
 def test_feedback_list_for_the_alert_filters(client, env):
     env.store.upsert_alert(make_alert("a1"))
     env.store.upsert_alert(make_alert("a2", D_US + 7200 * S))
