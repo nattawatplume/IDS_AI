@@ -406,3 +406,27 @@ def test_m2_models_grid_and_variants():
     assert v["ae+iforest:shift2"] == ("ae+iforest", ex.M2_FUSIONS["shift2"])
     assert "m2_ai" in ex.EXPERIMENTS and "m2_ai" in ex.INJECTING
     assert set(ex.M2_AI_NAMES.values()) <= ex.SEEDED  # never tagged deterministic
+
+
+def test_m3_live_stack_wash2_and_naming_detectors():
+    from idsai.config import REPO_ROOT
+    from idsai.eval import experiments as ex
+
+    cfg = load_settings(REPO_ROOT / "configs" / "eval_prev_live.yaml")  # AE in cfg.detectors
+    live, wash2, naming = ex.m3_detectors(cfg, seed=2)
+    names = [d.name for d in live]
+    assert names[-3:] == ["stat.robust_z", "stat.cusum", "ai.iforest"]
+    assert "ai.autoencoder_trade" not in names and "rule.100501" in names
+    assert (wash2.name, wash2.signature_id, wash2.rev, wash2.layer) == (
+        "rule.100501.rev2",
+        100501,
+        2,
+        "rule",
+    )
+    assert [d.name for d in naming] == ["attr.100191", "attr.100591"]  # flag off: still built
+    swapped = [d.name for d in ex.m3_variant_detectors(live, wash2, 2)]
+    assert swapped == [("rule.100501.rev2" if n == "rule.100501" else n) for n in names]
+    assert ex.m3_variant_detectors(live, wash2, 1) == live
+    assert list(ex.M3_VARIANTS) == ["base", "attr", "wash2", "attr+wash2"]
+    assert ex.M3_FUSION.as_dict() == {"mode": "shift", "shift": 1.0, "regime_feature": None}
+    assert "m3_attr" in ex.EXPERIMENTS and "m3_attr" in ex.INJECTING
