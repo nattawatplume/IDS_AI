@@ -56,3 +56,26 @@ Raise recall_correct (REAL and SEMI-SYN) with **no change in FA and no change in
 ## Out of scope
 - Changing detection thresholds that enter F (100101, cusum cap, `attribution_min`). Those are follow-ups.
 - Live deployment: turning `attr_rules` on in `configs/default.yaml` is a separate step after the results.
+
+## Results / deviations (implementation, 2026-11-23)
+
+**Train re-check** (train range 2018-01..2019-06 only; feature cache and raw trades; no cal, accept or test; research.duckdb never opened). Sample as the head's diagnosis: 160 train-normal days at least 2 days from any label (1,382,400 rows, seed 1), the 183 train REAL pumps, wash_pingpong injected into 24 train-normal days.
+- Burst naming rule 100191 (`ret_60 >= 0.02`, `z_rush_60 >= 4`): fires on 231 train-normal rows (0.017 %; the diagnosis said 0.019 % on its sample) and in the match window of 161 of 183 REAL pumps.
+- Wash naming rule 100591 and 100501 rev 2 (same two conditions: `z_pingpong_300 >= 5`, `|ret_300| <= 0.002`): 0 train-normal rows, 0 rows on the REAL pump days, 24 of 24 injections (train and test scenario ranges alike). 100501 rev 1 fires in 0 of 24.
+- The rates are written in the YAML comments.
+
+**Choices.**
+- Naming rules live in `configs/signatures_attr.yaml` with a new signature layer `attr` (sids 100191, 100591; priority = file order, burst first). `naming_detectors(cfg)` returns them only with `chief.attr_rules`.
+- The Chief takes them as a separate `naming=` list, not as detectors: no calibration, no `p__` column, not in `F`/`best`/`agreement`/`tau` or the state (`state_dict` is byte-identical with or without them). `Chief.score_detectors` lists what a caller must score; the rules are read from their `score__attr.<sid>` columns, because eval frames keep only scores.
+- Span = every row of the symbol from the episode's first to its last exceedance (as the diagnosis measured, V7), not only exceedance rows. The stream keeps the naming hits up to the last exceedance plus "pending" hits after it; pending hits count only if a later exceedance extends the episode, so the closed alert equals the batch one. A name that arrives emits `updated`.
+- `Alert.technique_source = "naming_rule"` (absent from dumps when None, like `phase`); `signature_id`/`rev` are the naming rule's; `peak_technique_id`, `fused_p`, detectors, agreement and evidence stay the detection's. Explainer: "ชื่อเทคนิคมาจากกฎระบุเทคนิค ซึ่งไม่ใช่หลักฐานการตรวจจับ …" in place of the other-row clause; UI badge "ชื่อเทคนิคจากกฎระบุเทคนิค (ไม่ใช่หลักฐานการตรวจจับ)".
+- Live wiring (flag still off in `configs/default.yaml`): `StreamPipeline` scores `chief.naming` too; `load_bundle` rebuilds the naming rules from config (they hold no state; the flag changes `config_hash`, so a bundle must be retrained when it is switched on).
+- **Deviation:** 100501 rev 2 is a separate file `configs/signatures_wash2.yaml` read only by `m3_attr` (scored as `rule.100501.rev2`), so `signatures.yaml`, its recorded sha and the live wash rule stay rev 1 until the results. Promoting it is the live step.
+- **Selection reading:** "largest significant paired gain" = among eligible variants whose paired recall_correct gain over base is significant, the largest wins (ties base < attr < wash2 < attr+wash2); none → base. Eligibility: FA and FA-hard each ≤ 1.02 × base, recall_any not significantly below base (paired).
+- Report (`### m3_attr`, budget 2, per split): recall_any / recall_correct with CI, FA / FA-hard with CI, share of FA episodes named (and named by a naming rule), the "every detected episode = MM-T001" strawman, paired recall_correct and recall_any vs base, and a confusion table per variant for test and semisyn.
+
+**Proof that F/τ/alerts are unchanged with the flag on** (tests): golden hash of flag-off outputs pinned from the pre-M3 Chief; with naming on, `fuse` output equal, alert ids/windows/fused_p/detectors/agreement/evidence/severity equal and only MM-T000 episodes renamed (`tests/ai/test_chief_naming.py`); full stream pipeline replay with naming equal to batch and to the flag-off run except names (`tests/pipeline/test_stream.py`); `m3_attr` smoke: `attr` has base's tau, n_cal, fa_by_day, FA, FA-hard, recall_any, n_alerts and per-event detected_any exactly.
+
+**Expected run cost** of `idsai --config configs/eval_prev_live.yaml eval --experiment m3_attr` (5 seeds): per seed one `ai.iforest` fit and one scoring pass over cal, accept, test, test-hard and the three SEMI-SYN families (the live stack plus three cheap rule columns; no autoencoder training), then 12 Chief fits (4 variants × 3 splits) with 4 budgets each. Clearly cheaper than `m2_ai` (three AE trainings and 16 variants per seed); about m1_fusion's loading time without its AE fit.
+
+**Follow-ups (unchanged here):** 100101 `z_quote_vol_60 >= 6` (unreachable on these pairs), the cusum cap vs `attribution_min`, turning `chief.attr_rules` on in `configs/default.yaml`, promoting 100501 rev 2.
