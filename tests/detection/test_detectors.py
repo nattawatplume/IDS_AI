@@ -317,8 +317,11 @@ def test_random_is_strictly_below_one_for_max_hash(monkeypatch):
 
 def test_build_rules_excludes_kk():
     dets = build_detectors(["rules"], CFG)
-    assert {d.signature_id for d in dets} == {100101, 100102, 100501}
+    # default.yaml runs the sell side: dump 100104 and bear raid 100601 join the rule layer
+    assert {d.signature_id for d in dets} == {100101, 100102, 100501, 100104, 100601}
     assert all(d.layer == "rule" for d in dets)
+    off = load_settings(overrides={"features": {"sell_side": False}})
+    assert {d.signature_id for d in build_detectors(["rules"], off)} == {100101, 100102, 100501}
 
 
 def test_build_baseline_kk_layer():

@@ -24,7 +24,8 @@ SYM = "TESTBTC"
 D = date(2025, 3, 1)
 T0 = day_us(D)
 UNIT = 1e-4
-CFG = load_settings()
+# default.yaml turns the sell side on; CFG is the flag-off reference
+CFG = load_settings(overrides={"features": {"sell_side": False}})
 ON = load_settings(overrides={"features": {"sell_side": True}})
 EVENT_US = T0 + 26 * 3600 * S
 DUMP, RAID = 100104, 100601

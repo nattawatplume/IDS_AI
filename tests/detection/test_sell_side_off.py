@@ -41,6 +41,7 @@ OLD_BARS = [
 PRE_LIVE_AI = {
     "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
     "chief": {"ai_mode": "fuse", "ai_shift": 0.0},
+    "features": {"sell_side": False},  # default.yaml turns it on since the live sell-side change
 }
 
 GOLDEN = {

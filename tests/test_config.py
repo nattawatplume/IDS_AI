@@ -166,6 +166,7 @@ def test_config_hash_matches_the_existing_demo_pack():
 OLD_DEFAULT = {
     "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
     "chief": {"ai_mode": "fuse", "ai_shift": 0},
+    "features": {"sell_side": False},
 }
 
 
@@ -193,6 +194,17 @@ def test_default_config_runs_iforest_with_shift1():
     s = load_settings()
     assert s.detectors == ["rules", "stat.robust_z", "stat.cusum", "ai.iforest"]
     assert (s.chief.ai_mode, s.chief.ai_shift, s.chief.ai_regime_feature) == ("shift", 1.0, None)
+
+
+def test_default_config_runs_the_sell_side():
+    s = load_settings()
+    assert s.features.sell_side is True
+    assert s.model_dump(mode="json")["features"]["sell_side"] is True
+    # the live sell-side default: AI shift 1 plus sell side; re-pin only on a deliberate change
+    assert config_hash(s) == "145385c5dab2"
+    # the flag is dumped only when on: off gives back the hash of the iforest-shift1 default
+    off = load_settings(overrides={"features": {"sell_side": False}})
+    assert config_hash(off) == "7c3324364f13"
 
 
 @pytest.mark.parametrize(
