@@ -2100,6 +2100,8 @@ DETAIL_BODY = r"""
   globalThis.fetch = async (path) => ({ ok: true, status: 200, json: async () =>
     (path.startsWith("/api/taxonomy") ? tax : detail) });
   const box = document.getElementById("alert-detail");
+  // the running Chief's thresholds (/api/health): ai_mode shift 1 puts the ai layer at 0.001
+  m.getState().health = { agreement_p: 0.01, agreement_p_ai: 0.001 };
   for (const role of ["analyst", "viewer"]) {
     m.setMe({ username: "u", role, auth_enabled: true, prefs: {} });
     m.setRoute("alert");
@@ -2115,6 +2117,13 @@ DETAIL_BODY = r"""
       assert.ok(inside.includes(want), want);
     }
     assert.ok(walk(tech, (n) => n.textContent === "rule").length >= 1, "the layer is shown");
+    // the AI detector gets its neutral Thai label; p = 0.005 agrees for stat, not for the ai layer
+    assert.ok(inside.includes("ชั้น AI (IsolationForest)"), inside);
+    assert.ok(inside.includes("(ชั้น AI ต้องมี p < 0.001)"), inside);
+    const row = (name) =>
+      walk(tech, (n) => n.tagName === "TR" && n.children[0].textContent === name)[0];
+    assert.strictEqual(row("stat.robust_z").children[3].textContent, "✓");
+    assert.strictEqual(row("ai.iforest").children[3].textContent, "");
     // outside the details: plain Thai, no ids, p-values, layers, provenance or UTC
     tech.parentNode.removeChild(tech);
     const plain = box.textContent;
@@ -2127,6 +2136,17 @@ DETAIL_BODY = r"""
     assert.deepStrictEqual(btns.map((b) => b.textContent), ["ผิดปกติจริง", "เตือนผิด", "ไม่แน่ใจ"]);
     for (const b of btns) assert.strictEqual(b.hasAttribute("disabled"), role === "viewer", role);
   }
+  // shift 1: 3 layers can agree, the ai layer below 0.001
+  const tech = () => walk(box, (n) => n.tagName === "DETAILS" && n.classList.contains("tech"))[0];
+  await m.showAlert(detail.alert_id);
+  assert.ok(tech().textContent.includes("2/3 ชั้น มี p < 0.01 (ชั้น AI ต้องมี p < 0.001)"));
+  // "exclude": the ai layer is never ticked and only 2 layers can agree
+  m.getState().health = { agreement_p: 0.01, agreement_p_ai: 0, agreement_layers: 2 };
+  await m.showAlert(detail.alert_id);
+  const t = tech();
+  assert.ok(t.textContent.includes("2/2 ชั้น มี p < 0.01 (ไม่นับชั้น AI)"), t.textContent);
+  const aiRow = walk(t, (n) => n.tagName === "TR" && n.children[0].textContent === "ai.iforest")[0];
+  assert.strictEqual(aiRow.children[3].textContent, "");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });
 """
@@ -2142,7 +2162,11 @@ def test_alert_detail_markup(tmp_path, client):
         severity=2,
         status="open",
         fused_p=0.0004,
-        detectors=[DetectorRef(name="rule.x", layer="rule", p=0.01, score=1.0)],
+        detectors=[
+            DetectorRef(name="rule.x", layer="rule", p=0.01, score=1.0),
+            DetectorRef(name="stat.robust_z", layer="stat", p=0.005, score=4.0),
+            DetectorRef(name="ai.iforest", layer="ai", p=0.005, score=0.6),
+        ],
         agreement=2,
         evidence=[("z_quote_vol_60", 7.1, 7.1), ("ret_60", 0.042, 0.5)],
         window=(ts - 60_000_000, ts),
@@ -4412,3 +4436,9 @@ def test_hud_behaviour_in_node(tmp_path):
     assert out["r2"] == 0 and out["r3"] == 0  # off, and disabled: no ripple
     assert out["r4"] == "50px"  # a keyboard press ripples from the centre
     assert out["p0"] is True and out["p1"] == 0 and out["pointerleaveOnDoc"] is False
+
+
+def test_naming_rule_badge_reads_technique_source():
+    js = text("app.js")
+    assert "a.technique_source" in js and "กฎระบุเทคนิค" in js
+    assert js.count("sourceBadge(a)") == 3  # the definition's use plus card and detail head

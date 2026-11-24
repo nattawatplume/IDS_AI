@@ -358,6 +358,8 @@ html[data-mood="alert"] .iris-core { transform: scale(1.32); }
 .badge.REAL { background: var(--ok-bg); color: var(--green); }
 .badge.SEMI-SYN { background: var(--warn-bg); color: var(--amber); }
 .badge.SYN { color: var(--dim); }
+.badge.alert-phase.phase-pump { color: var(--amber); }
+.badge.alert-phase.phase-sell { color: var(--red); }
 .sev { display: inline-block; min-width: 24px; text-align: center; border-radius: var(--r-pill); font-family: var(--mono); font-weight: 600; font-size: 13px; padding: 0 8px; background: var(--chip); }
 .sev-1 { color: var(--dim); }
 .sev-2 { background: var(--warn-bg); color: var(--amber); }

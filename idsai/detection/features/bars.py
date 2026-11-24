@@ -34,6 +34,7 @@ BARS: pl.Schema = pl.Schema(
         "max_trade_quote": pl.Float64,
         "pingpong": pl.Int64,
         "n_round": pl.Int64,
+        "sell_rush_orders": pl.Int64,
     }
 )
 
@@ -53,7 +54,8 @@ def trades_to_bars(trades: pl.DataFrame, symbol: str, start_us: int, end_us: int
     """One bar per second `t_us` in `[start_us, end_us)` from `trades` of `symbol` (BARS schema).
 
     Empty seconds: counts 0, OHLC = previous close; before the first trade OHLC = NaN.
-    `rush_orders` = distinct `ts_us // 1000` in the second with >= 2 buy-taker trades;
+    `rush_orders` = distinct `ts_us // 1000` in the second with >= 2 buy-taker trades
+    (`sell_rush_orders`: the same for sell-taker trades, M4; read only with `sell_side`);
     `pingpong` = consecutive trade pairs (counted in the second of the later trade) with equal
     qty and price, opposite taker side and `dts <= 50 ms`; `n_round` = trades with a round qty.
     """
@@ -107,14 +109,9 @@ def trades_to_bars(trades: pl.DataFrame, symbol: str, start_us: int, end_us: int
     lo = np.where(has, lo, filled)
     c = filled
 
-    # rush orders: distinct buy-taker milliseconds with >= 2 fills
-    ms = ts[is_buy] // 1000
-    if len(ms):
-        u_ms, cnt = np.unique(ms, return_counts=True)
-        rush_ms = u_ms[cnt >= 2]
-        rush = np.bincount((rush_ms * 1000 - start_us) // S_US, minlength=n_sec)
-    else:
-        rush = np.zeros(n_sec, dtype=np.int64)
+    # rush orders: distinct buy-taker (sell-taker) milliseconds with >= 2 fills
+    rush = _rush_per_second(ts[is_buy], start_us, n_sec)
+    sell_rush = _rush_per_second(ts[~is_buy], start_us, n_sec)
 
     if len(ts) >= 2:
         pp = (
@@ -144,9 +141,20 @@ def trades_to_bars(trades: pl.DataFrame, symbol: str, start_us: int, end_us: int
             "max_trade_quote": max_q,
             "pingpong": pingpong.astype(np.int64),
             "n_round": n_round.astype(np.int64),
+            "sell_rush_orders": sell_rush.astype(np.int64),
         },
         schema=BARS,
     )
+
+
+def _rush_per_second(ts: np.ndarray, start_us: int, n_sec: int) -> np.ndarray:
+    """Per second: distinct milliseconds `ts // 1000` holding >= 2 of the trades `ts`."""
+    ms = ts // 1000
+    if not len(ms):
+        return np.zeros(n_sec, dtype=np.int64)
+    u_ms, cnt = np.unique(ms, return_counts=True)
+    rush_ms = u_ms[cnt >= 2]
+    return np.bincount((rush_ms * 1000 - start_us) // S_US, minlength=n_sec)
 
 
 class BarBuilder:
@@ -221,6 +229,7 @@ class BarBuilder:
             "max_trade_quote": 0.0,
             "pingpong": 0,
             "n_round": 0,
+            "sell_rush_orders": 0,
         }
         if not trades:
             return bar
@@ -229,6 +238,7 @@ class BarBuilder:
         self._close = prices[-1]
         bar.update(open=prices[0], high=max(prices), low=min(prices), close=prices[-1])
         buy_ms: Counter[int] = Counter()
+        sell_ms: Counter[int] = Counter()
         for t in trades:
             self._ids.discard(t.trade_id)
             if t.taker_side == "buy":
@@ -236,6 +246,7 @@ class BarBuilder:
                 buy_ms[t.ts_us // 1000] += 1
             else:
                 bar["sell_quote"] += t.quote_qty
+                sell_ms[t.ts_us // 1000] += 1
             bar["quote_vol"] += t.quote_qty
             bar["max_trade_quote"] = max(bar["max_trade_quote"], t.quote_qty)
             p = self._prev
@@ -249,5 +260,6 @@ class BarBuilder:
                 bar["pingpong"] += 1
             self._prev = t
         bar["rush_orders"] = sum(c >= 2 for c in buy_ms.values())
+        bar["sell_rush_orders"] = sum(c >= 2 for c in sell_ms.values())
         bar["n_round"] = int(np.count_nonzero(is_round_qty(np.array([t.qty for t in trades]))))
         return bar

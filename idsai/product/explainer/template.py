@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 
-from idsai.detection.features.registry import WINDOW_BASES, spec_for
+from idsai.detection.features.registry import ALL_WINDOW_BASES, spec_for
 from idsai.detection.taxonomy import load_taxonomy
 
 BANNED_TH = ["โกง", "มิจฉาชีพ", "ผู้ปั่น", "คนร้าย", "ฉ้อโกง"]
@@ -24,7 +24,11 @@ BANNED_TH = ["โกง", "มิจฉาชีพ", "ผู้ปั่น", "
 UNCLASSIFIED_TH = "ความผิดปกติที่ยังไม่จัดประเภท"
 NO_EVIDENCE_TH = "ไม่มีหลักฐานรายคุณลักษณะแนบมา"
 OTHER_ROW_TH = "การจัดประเภทมาจากแถวอื่นในเหตุการณ์เดียวกัน ตัวเลขข้างต้นมาจากจุดที่ผิดปกติที่สุด"
+# M3: `Alert.technique_source == "naming_rule"`: the name came from a naming-only rule, never from
+# the detection, so it is said in place of OTHER_ROW_TH
+NAMING_TH = "ชื่อเทคนิคมาจากกฎระบุเทคนิค ซึ่งไม่ใช่หลักฐานการตรวจจับ ตัวเลขข้างต้นมาจากจุดที่ผิดปกติที่สุด"
 MAX_FACTS = 3
+PHASE_TH = {"pump": "ช่วง: กำลังพุ่ง", "sell": "ช่วง: กำลังเทขาย"}  # M4, `Alert.phase`
 
 _UNIT_FORMATS: dict[str, str] = {
     "ratio": "{:.2f}",
@@ -142,7 +146,7 @@ def _fact(name: str, value: float) -> tuple[str, str, list[float]]:
     label = spec.desc_th
     allowed = numbers_in(spec.desc_th)
     m = _WINDOW_RE.search(name)
-    if m and spec.name in WINDOW_BASES:
+    if m and spec.name in ALL_WINDOW_BASES:
         label += f" (ช่วง {m[1]} วินาที)"
         allowed.append(float(m[1]))
     if name.startswith("z_"):
@@ -181,8 +185,13 @@ def _render(alert) -> tuple[str, list[tuple[str, str]], list[float]]:
         f"{alert.agreement} จาก 3 ชั้นตรวจจับเห็นพ้อง; "
         f"ความหายากเทียบตลาดปกติ p ≈ {p_shown}"
     )
-    if alert.peak_technique_id not in (None, alert.technique_id):
+    if getattr(alert, "technique_source", None) == "naming_rule":
+        text += f"; {NAMING_TH}"
+    elif alert.peak_technique_id not in (None, alert.technique_id):
         text += f"; {OTHER_ROW_TH}"
+    phase = getattr(alert, "phase", None)
+    if phase in PHASE_TH:
+        text += f"; {PHASE_TH[phase]}"
     allowed += [
         float(hh), float(mm), float(ss),
         float(alert.agreement), 3.0,

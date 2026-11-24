@@ -246,11 +246,14 @@ class StreamPipeline:
         t_close = bar["t_us"] + S_US
         if self._publish_from_us is None or t_close < self._publish_from_us:
             return
-        self.bus.publish("bars", {k: _finite_or_none(v) for k, v in bar.items()})
+        # the M4 bar column is published only with sell_side, so the bars API is unchanged off
+        drop = () if self.cfg.features.sell_side else ("sell_rush_orders",)
+        self.bus.publish("bars", {k: _finite_or_none(v) for k, v in bar.items() if k not in drop})
         if row is None:
             return
         frame = round_f32(pl.DataFrame([row], schema=self._schema), self.cfg.features)
-        scored = score_windows(frame, self.detectors)
+        # the Chief's M3 naming rules are scored too (none unless `chief.attr_rules`)
+        scored = score_windows(frame, [*self.detectors, *self.chief.naming])
         alerts = self._stream.step(scored.to_dicts()[0])
         self.latency_ms.append((time.monotonic() - received) * 1000.0)
 

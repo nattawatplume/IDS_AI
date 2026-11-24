@@ -1,0 +1,37 @@
+# M4 sell-side signature rules, loaded only with `features.sell_side: true` (configs/signatures.yaml
+# and its recorded sha256 are untouched when the flag is off).
+# Thresholds mirror the pump-burst rule (100101) and are set from train-period data only
+# (<= 2019-06-30, scripts/tune_sell_rules.py); never tuned on cal / accept / test.
+# Train result (first 30 train labels in time order that measure as pumps, 20 train normal days;
+# hits counted in the eval's credit interval (t_peak + 60 s, t_peak + dump_tau]): the mirrored
+# z_quote_vol_60 >= 6 never fired (0/30); >= 3 fired in 5/30 with 0 episodes on the normal days
+# (rule of three: FA <= ~0.15 per day), so only that threshold moved (6 -> 3); ret_60 <= -0.02
+# and z_sell_rush_60 >= 4 stay mirrored.
+# Bear-raid follow-up (rev 2 of sid 100601, train-only): test-range raids injected into 80
+# train-normal symbol-days (<= 2019-06-30) reach max z_quote_vol_60 of only ~2.2 (median), so
+# `>= 3` caught 1/80; `>= 2` catches 30/80 at 0.10 clean-day episodes per symbol-day (0.04 at 3).
+# Only that threshold moved (3 -> 2); the dump rule (100104) is unchanged. See the M4 spec,
+# "Bear raid follow-up".
+# Bump `rev` whenever a threshold or condition changes. Its sha256 is recorded in m4_sell runs.
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100104  # 100103 is the Kamps-Kleinberg baseline
+    technique: MM-T001.003
+    layer: rule
+    rev: 1
+    name: ช่วงเทขายหลังปั่น (dump phase)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 3}
+      - {feature: ret_60, op: "<=", thr: -0.02}
+      - {feature: z_sell_rush_60, op: ">=", thr: 4}
+      - {feature: jump_1800, op: ">=", thr: 0.03}
+  - sid: 100601
+    technique: MM-T006.001
+    layer: rule
+    rev: 2
+    name: ทุบราคา (bear raid) เทขายแบบพุ่งเร็ว (burst)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 2}  # rev 2: was 3 (bear-raid follow-up)
+      - {feature: ret_60, op: "<=", thr: -0.02}
+      - {feature: z_sell_rush_60, op: ">=", thr: 4}
+      - {feature: jump_1800, op: "<=", thr: 0.0299999}  # strictly below the dump rule's 0.03

@@ -148,8 +148,9 @@ def test_dockerfile_two_stages():
     # a failed live build step falls back to replay instead of failing the image
     assert "mkdir -p models" in build
     assert "|| echo" in build[build.index("idsai train --profile live") :]
-    assert "--no-group train" not in build
-    assert "--no-group train" in runtime
+    # the default bundles train ai.iforest (scikit-learn): neither stage installs torch
+    for stage in (build, runtime):
+        assert stage.count("--no-group train") == 2  # both `uv sync` lines
     assert "COPY --from=build --chown=user /home/user/app/data" in runtime
     assert "torch" not in runtime
     for stage in (build, runtime):
@@ -273,3 +274,38 @@ def test_dockerfile_hardening():
     copy = runtime.index("COPY --from=build")
     assert runtime.index("RUN mkdir -p data") < copy
     assert runtime.index("RUN test -w data && test -w data/app.duckdb") > copy
+
+
+def test_default_detectors_build_and_fit_without_torch():
+    # configs/default.yaml (the image's build and serve config) lists no AE since the live AI
+    # layer moved to ai.iforest: building the bundle trains nothing with torch
+    import sys
+
+    code = """
+import sys
+class _Block:
+    def find_spec(self, name, path=None, target=None):
+        if name == "torch" or name.startswith("torch."):
+            raise ModuleNotFoundError("No module named torch (blocked)", name="torch")
+sys.meta_path.insert(0, _Block())
+import numpy as np, polars as pl
+from idsai.config import load_settings
+from idsai.detection.features.registry import model_features
+from idsai.detection.registry import build_detectors
+cfg = load_settings()
+dets = build_detectors(cfg.detectors, cfg, 0)
+cols = model_features(cfg.features)
+rng = np.random.default_rng(0)
+frame = pl.DataFrame({c: rng.standard_normal(300) for c in cols})
+fitted = [d for d in dets if d.layer == "ai"]
+assert [d.name for d in fitted] == ["ai.iforest"], [d.name for d in fitted]
+fitted[0].fit(frame)
+assert np.isfinite(fitted[0].score(frame)).all()
+assert "torch" not in sys.modules
+print("ok")
+"""
+    r = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, timeout=120
+    )
+    assert r.returncode == 0, r.stderr
+    assert "ok" in r.stdout

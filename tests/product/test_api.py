@@ -73,7 +73,7 @@ class FakePipe:
     def __init__(self, bus: Bus, mode: str = "replay"):
         self.bus = bus
         self.mode = mode
-        self.chief = SimpleNamespace(tau=3.5)
+        self.chief = SimpleNamespace(tau=3.5, ai_agreement_p=0.001, agreement_layers=3)
         self.latency_ms: deque[float] = deque([5.0, 8.0, 12.0])
         self.points: dict[str, list[dict]] = {}
         self.samples = 400
@@ -244,6 +244,20 @@ def test_alert_detail_and_feedback(client, env):
     assert r.status_code == 404
 
 
+def test_alert_phase_reaches_the_list_and_the_detail(client, env):
+    """M4 (sell side on in default.yaml): `phase` and MM-T006 flow from the store to the API."""
+    env.store.upsert_alert(
+        make_alert("r1", technique_id="MM-T006", signature_id=100601, phase="sell")
+    )
+    env.store.upsert_alert(make_alert("n1", D_US + 7200 * S))
+    items = {a["alert_id"]: a for a in client.get("/api/alerts").json()}
+    assert items["r1"]["phase"] == "sell" and "phase" not in items["n1"]
+    body = client.get("/api/alerts/r1").json()
+    assert body["phase"] == "sell" and body["technique_id"] == "MM-T006"
+    assert "MM-T006 ทุบราคา" in body["explanation_th"]
+    assert body["explanation_th"].endswith("ช่วง: กำลังเทขาย")
+
+
 def test_feedback_list_for_the_alert_filters(client, env):
     env.store.upsert_alert(make_alert("a1"))
     env.store.upsert_alert(make_alert("a2", D_US + 7200 * S))
@@ -394,6 +408,31 @@ def test_health_reports_what_the_app_has(client, env):
     names = {c["name"]: c["status"] for c in h["checks"]}
     assert names["warmup"] == "warn" and names["latency"] == "warn"  # no data is not ok
     assert h["overall"] == "warn"
+
+
+def test_health_carries_the_agreement_thresholds(client, env):
+    h = client.get("/api/health").json()
+    assert h["agreement_p"] == env.cfg.chief.agreement_p == 0.01
+    assert h["agreement_p_ai"] == 0.001  # the running Chief's (shifted) threshold
+    assert h["agreement_layers"] == 3
+    # without a pipeline, from the config: default.yaml runs ai_mode shift, ai_shift 1.0
+    st = AppState(env.cfg, env.store, "replay", None, None, Auditor(env.cfg), symbols=[SYM])
+    with TestClient(create_app(st)) as c:
+        assert c.get("/api/health").json()["agreement_p_ai"] == pytest.approx(0.001)
+    fuse = env.cfg.model_copy(
+        update={"chief": env.cfg.chief.model_copy(update={"ai_mode": "fuse", "ai_shift": 0.0})}
+    )
+    st = AppState(fuse, env.store, "replay", None, None, Auditor(fuse), symbols=[SYM])
+    with TestClient(create_app(st)) as c:
+        assert c.get("/api/health").json()["agreement_p_ai"] == 0.01
+    # "exclude": the ai layer never counts, so 2 layers can agree
+    excl = env.cfg.model_copy(
+        update={"chief": env.cfg.chief.model_copy(update={"ai_mode": "exclude", "ai_shift": 0.0})}
+    )
+    st = AppState(excl, env.store, "replay", None, None, Auditor(excl), symbols=[SYM])
+    with TestClient(create_app(st)) as c:
+        h = c.get("/api/health").json()
+        assert h["agreement_p_ai"] == 0.0 and h["agreement_layers"] == 2
 
 
 def test_health_without_pipeline_is_not_ok(env):

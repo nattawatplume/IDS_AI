@@ -26,6 +26,7 @@ from idsai.eval.report import (
     build_report,
     cluster_counts,
     m1_select,
+    m2_select,
     paired_ratio_bootstrap,
 )
 
@@ -1010,3 +1011,320 @@ def test_m1_report_excludes_undecided_variants_with_a_thai_reason(research, tmp_
     section = _section(text, "m1_fusion")
     assert "ตัดออก V1 no_ai: ตัดสิน recall เทียบ V0 ไม่ได้" in section
     assert "**ผลการเลือก (accept):** V0 all" in section
+
+
+# ---------------------------------------------------------------- M4 sell side
+
+
+def _m4_recs(variant, pump, sell, sell_ok, seeds=(0, 1), fa=1.0):
+    """test:<variant> records; `sell[i]` None = event i has no sell window."""
+    out = []
+    for s in seeds:
+        r = rec("m4_sell", f"test:{variant}", 2, s, pump, sell_side=variant == "sell")
+        r["metrics"]["fa_per_symbol_day"] = fa
+        for i, pe in enumerate(r["per_event"].values()):
+            pe["sell_status"] = "measured" if sell[i] is not None else "no_rise"
+            pe["detected_sell_phase"] = sell[i]
+            pe["detected_sell_phase_correct"] = None if sell[i] is None else sell_ok[i]
+        n_none = sum(x is None for x in sell)
+        r["metrics"]["sell_status_counts"] = {"measured": len(sell) - n_none, "no_rise": n_none}
+        out.append(r)
+    return out
+
+
+def _raid_recs(variant, detected, seeds=(0, 1)):
+    days = [("ABCBTC", f"2021-01-{1 + i:02d}") for i in range(len(detected))]
+    return [
+        rec("m4_sell", f"bear_raid:{variant}", 2, s, detected, provenance="SEMI-SYN", days=days)
+        for s in seeds
+    ]
+
+
+def test_m4_report_section_per_phase_and_paired_pump_recall(research, tmp_path):
+    pump = [1] * 15 + [0] * 5
+    sell = [True] * 6 + [False] * 10 + [None] * 4
+    records = [
+        *_m4_recs("base", pump, sell, [False] * 20),
+        *_m4_recs(
+            "sell", pump, [True] * 12 + [False] * 4 + [None] * 4, [True] * 10 + [False] * 10, fa=1.2
+        ),  # fmt: skip
+        *_raid_recs("base", [0] * 12),
+        *_raid_recs("sell", [1] * 9 + [0] * 3),
+    ]
+    write(research, records)
+    data, text = _report(research, tmp_path)
+    m4 = data["m4_sell"]
+    rows = {r["variant"]: r for r in m4["rows"]}
+    assert [r["variant"] for r in m4["rows"]] == ["base", "sell"]
+    b, s = rows["base"], rows["sell"]
+    assert b["recall_pump_phase"] == pytest.approx(0.75) and b["recall_pump_phase_ci"]
+    assert b["n_sell_events"] == 16  # events without a sell window are left out
+    assert b["recall_sell_phase"] == pytest.approx(6 / 16)
+    assert s["recall_sell_phase"] == pytest.approx(12 / 16)
+    assert b["recall_sell_phase_correct"] == 0.0
+    assert s["recall_sell_phase_correct"] == pytest.approx(10 / 16)
+    assert s["fa"] == pytest.approx(1.2) and b["fa_hard"] == pytest.approx(3.0)
+    assert b["sell_status_counts"] == {"measured": 16, "no_rise": 4}
+    assert s["bear_raid_recall_any"] == pytest.approx(0.75) and s["bear_raid_recall_any_ci"]
+    assert b["bear_raid_recall_any"] == 0.0 and s["bear_raid_provenance"] == "SEMI-SYN"
+    p = m4["paired_pump"]
+    assert p["diff_mean"] == 0.0 and p["drop"] is False and p["n_clusters"] == 20
+    section = _section(text, "m4_sell")
+    assert "### m4_sell" in section and "recall ช่วงเทขาย" in section
+    assert "recall ช่วงพุ่งไม่ลดลงอย่างมีนัย" in section
+    assert "ความผิดปกติทางสถิติ" in section and "ไม่ใช่ความน่าจะเป็น" in section
+    assert "SEMI-SYN" in section and "accuracy" not in section.lower()
+
+
+def test_m4_report_flags_a_significant_pump_recall_drop(research, tmp_path):
+    sell = [True] * 20
+    write(
+        research,
+        [
+            *_m4_recs("base", [1] * 18 + [0] * 2, sell, sell),
+            *_m4_recs("sell", [1] * 8 + [0] * 12, sell, sell),
+        ],
+    )
+    data, text = _report(research, tmp_path)
+    p = data["m4_sell"]["paired_pump"]
+    assert p["diff_mean"] == pytest.approx(-0.5) and p["drop"] is True
+    assert "กฎฝั่งขายทำให้ recall ช่วงพุ่งลดลงอย่างมีนัย" in _section(text, "m4_sell")
+
+
+def test_m4_report_without_records(research, tmp_path):
+    write(research, [rec("real_t001", "full", 2, 0, [1, 0])])
+    data, _ = _report(research, tmp_path)
+    assert data["m4_sell"] is None
+
+
+def test_m4_report_paired_sell_phase_differences(research, tmp_path):
+    pump = [1] * 20
+    sell_base = [False] * 18 + [None] * 2
+    sell_sell = [True] * 15 + [False] * 3 + [None] * 2
+    write(
+        research,
+        [
+            *_m4_recs("base", pump, sell_base, [False] * 20),
+            *_m4_recs("sell", pump, sell_sell, [True] * 15 + [False] * 5),
+        ],
+    )
+    data, text = _report(research, tmp_path)
+    paired = data["m4_sell"]["paired"]
+    assert set(paired) == {"recall_pump_phase", "recall_sell_phase", "recall_sell_phase_correct"}
+    sp = paired["recall_sell_phase"]
+    assert sp["n_clusters"] == 18  # events without a sell window are left out
+    assert sp["diff_mean"] == pytest.approx(15 / 18) and sp["rise"] is True
+    assert paired["recall_sell_phase_correct"]["diff_mean"] == pytest.approx(15 / 18)
+    assert paired["recall_pump_phase"]["diff_mean"] == 0.0
+    section = _section(text, "m4_sell")
+    assert "ผลต่าง recall ช่วงเทขาย (sell − base)" in section
+    assert "recall ช่วงเทขายสูงขึ้นอย่างมีนัย" in section
+    assert "ผลต่าง ระบุช่วงเทขายถูก (sell − base)" in section
+
+
+def test_m4_report_drops_short_sell_windows_from_denominators(research, tmp_path):
+    pump = [1] * 20
+    base = _m4_recs("base", pump, [False] * 20, [False] * 20)
+    sell = _m4_recs("sell", pump, [True] * 20, [True] * 20)
+    for r in [*base, *sell]:  # events e0, e1: the dump was over within 60 s
+        for lid in ("e0", "e1"):
+            pe = r["per_event"][lid]
+            pe.update(sell_window_short=True, detected_sell_phase=None,
+                      detected_sell_phase_correct=None)  # fmt: skip
+    write(research, [*base, *sell])
+    data, text = _report(research, tmp_path)
+    rows = {r["variant"]: r for r in data["m4_sell"]["rows"]}
+    assert rows["sell"]["n_sell_short"] == 2 and rows["sell"]["n_sell_events"] == 18
+    assert rows["sell"]["recall_sell_phase"] == 1.0
+    assert data["m4_sell"]["paired"]["recall_sell_phase"]["n_clusters"] == 18
+    assert "เหตุการณ์ที่เทขายจบภายใน 60 วินาที 2 รายการ" in _section(text, "m4_sell")
+
+
+# ---------------------------------------------------------------- M2 selection
+def _m2_row(variant, fa, fa_hard, gain=None, sig=False):
+    return {"variant": variant, "fa": fa, "fa_hard": fa_hard, "gain": gain, "gain_significant": sig}
+
+
+REF = _m2_row("no_ai", 2.0, 5.0)
+
+
+def test_m2_select_ineligible_by_hard_fa_and_by_fa():
+    rows = [
+        REF,
+        _m2_row("ae:fuse", 2.0, 5.6, gain=0.3, sig=True),  # hard FA 5.6 > 1.10 x 5.0
+        _m2_row("ae:shift2", 2.3, 5.0, gain=0.2, sig=True),  # FA 2.3 > 1.10 x 2.0
+        _m2_row("iforest:shift2", 2.2, 5.5, gain=0.1, sig=True),  # both exactly at 1.10 x
+    ]
+    sel = m2_select(rows)
+    assert sel["chosen"] == "iforest:shift2"
+    assert set(sel["excluded"]) == {"ae:fuse", "ae:shift2"}
+    assert "FA-hard" in sel["excluded"]["ae:fuse"]
+    assert "FA-hard" not in sel["excluded"]["ae:shift2"] and "FA" in sel["excluded"]["ae:shift2"]
+    assert sel["eligible"] == ["iforest:shift2"]
+
+
+def test_m2_select_largest_gain_must_be_significant_else_no_ai():
+    rows = [
+        REF,
+        _m2_row("ae:shift2", 2.0, 5.0, gain=0.10, sig=True),
+        _m2_row("iforest:fuse", 2.0, 5.0, gain=0.15, sig=False),  # the largest gain, not sig
+    ]
+    sel = m2_select(rows)
+    assert sel["top"] == "iforest:fuse" and sel["chosen"] == "no_ai"
+    # a variant without a paired gain cannot be ranked, so it is not eligible
+    sel = m2_select([REF, _m2_row("ae:fuse", 1.0, 1.0)])
+    assert sel["chosen"] == "no_ai" and "ae:fuse" in sel["excluded"] and sel["top"] is None
+    # nothing eligible, or no reference: no_ai / no selection
+    assert m2_select([REF])["chosen"] == "no_ai"
+    assert m2_select([_m2_row("ae:fuse", 1.0, 1.0, 0.3, True)])["chosen"] is None
+
+
+def test_m2_select_tie_order():
+    def tie(*variants):
+        return m2_select([REF, *[_m2_row(v, 2.0, 5.0, gain=0.2, sig=True) for v in variants]])
+
+    # fewer AI models first, then AE before iforest, then fuse < shift1 < shift2
+    assert tie("ae+iforest:fuse", "iforest:shift2")["chosen"] == "iforest:shift2"
+    assert tie("iforest:fuse", "ae_wide:shift2")["chosen"] == "ae_wide:shift2"
+    assert tie("ae:shift2", "ae:shift1", "ae:fuse")["chosen"] == "ae:fuse"
+    assert tie("ae_wide:fuse", "ae_narrow:fuse", "ae:shift1")["chosen"] == "ae:shift1"
+    assert tie("ae_wide:fuse", "ae_narrow:fuse")["chosen"] == "ae_narrow:fuse"
+
+
+def _m2_recs(split, variant, detected, fa, fa_hard, seeds=(0, 1)):
+    out = []
+    for s in seeds:
+        r = rec("m2_ai", f"{split}:{variant}", 2, s, detected)
+        r["metrics"]["fa_per_symbol_day"] = fa
+        r["metrics"]["fa_per_symbol_day_hard"] = fa_hard
+        out.append(r)
+    return out
+
+
+def test_m2_report_selects_on_accept_only(research, tmp_path):
+    ref = [1] * 8 + [0] * 12
+    better = [1] * 18 + [0] * 2  # significantly above no_ai
+    records = [
+        *_m2_recs("accept", "no_ai", ref, 2.0, 5.0),
+        *_m2_recs("accept", "ae:fuse", better, 2.0, 9.0),  # more recall, but hard FA too high
+        *_m2_recs("accept", "ae:shift2", better[:-1] + [1], 2.1, 5.2),  # eligible, largest gain
+        *_m2_recs("accept", "iforest:shift1", better, 2.0, 5.0),
+        # test numbers would favour iforest:shift1: they must not change the choice
+        *_m2_recs("test", "no_ai", ref, 2.0, 5.0),
+        *_m2_recs("test", "ae:shift2", ref, 2.0, 5.0),
+        *_m2_recs("test", "iforest:shift1", better, 1.0, 1.0),
+        *_m2_recs("test", "ae:alone", ref, 9.0, 9.0),
+        *_m2_recs("test", "iforest:alone", better, 9.0, 9.0),
+    ]
+    write(research, records)
+    data, text = _report(research, tmp_path)
+    m2 = data["m2_ai"]
+    sel = m2["selection"]
+    assert sel["chosen"] == "ae:shift2" and sel["top"] == "ae:shift2"
+    assert set(sel["excluded"]) == {"ae:fuse"}
+    acc = {r["variant"]: r for r in m2["splits"]["accept"]["rows"]}
+    assert list(acc) == ["no_ai", "ae:fuse", "ae:shift2", "iforest:shift1"]
+    assert acc["no_ai"]["vs_ref"] is None and acc["ae:shift2"]["vs_ref"]["diff_mean"] > 0.5
+    assert acc["ae:shift2"]["gain_significant"] is True
+    assert set(m2["splits"]) == {"accept", "test"}
+    assert "ae:alone" not in {r["variant"] for r in m2["splits"]["test"]["rows"]}
+    alone = m2["ae_vs_iforest"]
+    assert alone["diff_mean"] < 0 and alone["significant_reverse"] is True  # iforest detects more
+    section = _section(text, "m2_ai")
+    assert "### m2_ai" in section and "#### accept (REAL)" in section
+    assert "**ผลการเลือก (accept):** ae:shift2" in section
+    assert "ตัดออก ae:fuse" in section and "AE เดี่ยว เทียบ iforest เดี่ยว" in section
+    assert "ไม่ใช่ความน่าจะเป็น" in section and "accuracy" not in section.lower()
+    assert "ความผิดปกติทางสถิติ" in section
+
+
+def test_m2_report_without_no_ai_does_not_select(research, tmp_path):
+    write(research, _m2_recs("accept", "ae:fuse", [1] * 12, 2.0, 3.0))
+    data, _ = _report(research, tmp_path)
+    assert data["m2_ai"]["selection"] is None
+    assert any("no_ai" in n for n in data["m2_ai"]["notes"])
+
+
+def test_m2_select_excludes_errored_variants_and_mismatched_seed_sets():
+    ref = {**REF, "seeds": [0, 1]}
+    rows = [
+        ref,
+        {**_m2_row("ae:fuse", None, None), "seeds": [], "error": "งบนี้ใช้ไม่ได้. English"},
+        {**_m2_row("ae:shift1", 2.0, 5.0, gain=0.3, sig=True), "seeds": [0]},  # seed 1 missing
+        {**_m2_row("ae:shift2", 2.0, 5.0, gain=0.1, sig=True), "seeds": [0, 1]},
+    ]
+    sel = m2_select(rows)
+    assert sel["chosen"] == "ae:shift2"
+    assert sel["excluded"]["ae:fuse"].startswith("ประเมินไม่ได้ (error: งบนี้ใช้ไม่ได้.")
+    assert "seed" in sel["excluded"]["ae:shift1"]
+
+
+def test_m2_report_shows_errored_variants(research, tmp_path):
+    ref = [1] * 8 + [0] * 12
+    bad = [
+        {**r, "metrics": None, "per_event": {}, "error": "ชุดข้อมูลสอบเทียบเล็กเกินไป. Too small"}
+        for r in _m2_recs("accept", "ae+iforest:fuse", ref, 2.0, 5.0)
+    ]
+    write(research, [*_m2_recs("accept", "no_ai", ref, 2.0, 5.0), *bad])
+    data, text = _report(research, tmp_path)
+    m2 = data["m2_ai"]
+    row = {r["variant"]: r for r in m2["splits"]["accept"]["rows"]}["ae+iforest:fuse"]
+    assert row["error"] and row["recall_any"] is None and row["n_seeds"] == 0
+    assert m2["selection"]["chosen"] == "no_ai"
+    assert (
+        "ประเมินไม่ได้ (error: ชุดข้อมูลสอบเทียบเล็กเกินไป."
+        in m2["selection"]["excluded"]["ae+iforest:fuse"]
+    )
+    section = _section(text, "m2_ai")
+    assert "| ae+iforest:fuse |" in section and "ชุดข้อมูลสอบเทียบเล็กเกินไป." in section
+    assert "Too small" not in section
+
+
+# ---------------------------------------------------------------- M3 selection
+def _m3_row(variant, fa=2.0, fa_hard=5.0, gain=None, sig=False, below=False, **kw):
+    return {"variant": variant, "fa": fa, "fa_hard": fa_hard, "gain_correct": gain,
+            "gain_correct_significant": sig, "below_ref": below, **kw}  # fmt: skip
+
+
+M3_BASE = _m3_row("base")
+
+
+def test_m3_select_largest_significant_recall_correct_gain_wins():
+    from idsai.eval.report import m3_select
+
+    rows = [
+        M3_BASE,
+        _m3_row("attr", gain=0.30, sig=True),
+        _m3_row("wash2", gain=0.10, sig=True),
+        _m3_row("attr+wash2", gain=0.40, sig=False),  # largest, but not significant
+    ]
+    sel = m3_select(rows)
+    assert sel["chosen"] == "attr"
+    assert sel["eligible"] == ["base", "attr", "wash2", "attr+wash2"]
+
+
+def test_m3_select_fa_cap_recall_any_gate_and_ties_to_the_simpler():
+    from idsai.eval.report import m3_select
+
+    rows = [
+        M3_BASE,
+        _m3_row("attr", gain=0.2, sig=True),
+        _m3_row("wash2", fa=2.05, gain=0.5, sig=True),  # FA 2.05 > 1.02 x 2.0
+        _m3_row("attr+wash2", fa_hard=5.1, gain=0.2, sig=True),  # exactly at 1.02 x: eligible
+    ]
+    sel = m3_select(rows)
+    assert sel["chosen"] == "attr"  # tie with attr+wash2 goes to the simpler
+    assert set(sel["excluded"]) == {"wash2"} and "FA" in sel["excluded"]["wash2"]
+    rows[1] = _m3_row("attr", gain=0.2, sig=True, below=True)
+    sel = m3_select(rows)
+    assert "attr" in sel["excluded"] and "recall_any" in sel["excluded"]["attr"]
+    assert sel["chosen"] == "attr+wash2"
+
+
+def test_m3_select_nothing_significant_or_no_base():
+    from idsai.eval.report import m3_select
+
+    assert m3_select([M3_BASE, _m3_row("attr", gain=0.3)])["chosen"] == "base"
+    assert m3_select([_m3_row("attr", gain=0.3, sig=True)])["chosen"] is None
+    sel = m3_select([M3_BASE, _m3_row("attr", error="boom")])
+    assert sel["chosen"] == "base" and "attr" in sel["excluded"]

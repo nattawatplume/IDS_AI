@@ -1,0 +1,22 @@
+# M3 candidate: rev 2 of the wash rule 100501 (configs/signatures.yaml keeps rev 1 and its sha).
+# Read only by the `wash2` variants of the `m3_attr` eval; promoting it into signatures.yaml (and
+# so into live) is a separate step after the results.
+# Rev history of 100501:
+#   rev 1: z_pingpong_300 >= 5, |ret_300| <= 0.002, z_quote_vol_300 >= 3
+#   rev 2: drops z_quote_vol_300 >= 3. Train check (M3, train range 2018-01..2019-06 only): rev 1
+#          fired in 0 of 24 wash_pingpong injections into train-normal days (the injector adds
+#          about log(1 + vol_mult) of log volume, so z_quote_vol_300 peaks near 1-1.6); rev 2 fires
+#          in 24 of 24, on 0 of 1,382,400 train-normal rows and on 0 rows of the 183 train REAL
+#          pump days (z_pingpong_300 >= 5 alone fires on 0 train-normal rows).
+# Caveat: our own injector defines wash_pingpong, so tuning against it is partly circular; the
+# real-data FA check (train-normal rows, train REAL pump days) is the guard.
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100501
+    technique: MM-T005.001
+    layer: rule
+    rev: 2
+    name: ซื้อขายลักษณะ wash-like (ping-pong)
+    conditions:
+      - {feature: z_pingpong_300, op: ">=", thr: 5}
+      - {feature: ret_300, op: "abs<=", thr: 0.002}

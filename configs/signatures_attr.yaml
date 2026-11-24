@@ -1,0 +1,33 @@
+# M3 naming-only signatures (layer "attr"), loaded only with `chief.attr_rules: true`.
+# They never enter F, p-values, agreement or tau: the Chief consults them only for an episode that
+# no F-rule row and no cusum row named (MM-T000), over every row the episode spans (its first to
+# its last exceedance), and takes the first rule in this file's order that fires on any of them.
+# Thresholds are set from train-period data only (<= 2019-06-30); never tuned on cal/accept/test.
+# Train check (M3, scratch script, train range 2018-01..2019-06 only): 160 train-normal days at least
+# 2 days from any label (1,382,400 rows, random seed 1), the 183 train REAL pumps (match window
+# t_start - 120 s .. t_start + 300 s), and wash_pingpong injected into 24 train-normal days.
+# Not added: a stealth naming rule (ret_1800 >= 0.03 and buy_imb_1800 >= 0.2) fires on 0.8 % of
+# train-normal rows and named no extra REAL pump, only more false alarms.
+# Bump `rev` whenever a threshold or condition changes.
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100191  # 1001xx = MM-T001; x9x = naming-only
+    technique: MM-T001.001
+    layer: attr
+    rev: 1
+    name: กฎระบุเทคนิค pump-and-dump แบบพุ่งเร็ว (burst)
+    # train: fires on 231 of 1,382,400 train-normal rows (0.017 %); in the match window of 161 of
+    # 183 REAL pumps (rule 100101 fires on 0 of them: z_quote_vol_60 >= 6 is out of reach)
+    conditions:
+      - {feature: ret_60, op: ">=", thr: 0.02}
+      - {feature: z_rush_60, op: ">=", thr: 4}
+  - sid: 100591  # 1005xx = MM-T005; x9x = naming-only
+    technique: MM-T005.001
+    layer: attr
+    rev: 1
+    name: กฎระบุเทคนิค ซื้อขายลักษณะ wash-like (ping-pong)
+    # train: fires on 0 of 1,382,400 train-normal rows and 0 rows of the REAL pump days; in 24 of
+    # 24 wash_pingpong injections (train and test scenario ranges alike)
+    conditions:
+      - {feature: z_pingpong_300, op: ">=", thr: 5}
+      - {feature: ret_300, op: "abs<=", thr: 0.002}

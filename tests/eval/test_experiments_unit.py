@@ -385,3 +385,48 @@ def test_fa_by_day_records_the_multiplicity_of_days_loaded_by_several_parts():
     # one part per day: no multiplicity key (older readers see the same record shape)
     _, _, single = _evaluate(chief, 3.0, [chief.fuse(parts[0].frame)], parts[:1], None, 120, 300)
     assert "normal_mult" not in single
+
+
+def test_m2_models_grid_and_variants():
+    from idsai.eval import experiments as ex
+
+    cfg = load_settings()
+    models = ex.m2_ai_models(cfg, seed=3)
+    assert {k: d.name for k, d in models.items()} == ex.M2_AI_NAMES
+    assert all(d.layer == "ai" and d.seed == 3 for d in models.values())
+    assert (models["ae"].cfg.hidden, models["ae"].cfg.bottleneck) == (64, 16)  # today's config
+    assert (models["ae_wide"].cfg.hidden, models["ae_wide"].cfg.bottleneck) == (128, 16)
+    assert (models["ae_narrow"].cfg.hidden, models["ae_narrow"].cfg.bottleneck) == (64, 8)
+    for k in ("ae_wide", "ae_narrow"):  # only the size changes
+        other = models[k].cfg.model_dump(exclude={"hidden", "bottleneck"})
+        assert other == cfg.ae.model_dump(exclude={"hidden", "bottleneck"})
+    assert type(models["ae"]).name == "ai.autoencoder_trade"  # the class name is untouched
+    v = ex.m2_variants()
+    assert len(v) == 16 and v["no_ai"][0] is None and v["no_ai"][1].mode == "exclude"
+    assert v["ae+iforest:shift2"] == ("ae+iforest", ex.M2_FUSIONS["shift2"])
+    assert "m2_ai" in ex.EXPERIMENTS and "m2_ai" in ex.INJECTING
+    assert set(ex.M2_AI_NAMES.values()) <= ex.SEEDED  # never tagged deterministic
+
+
+def test_m3_live_stack_wash2_and_naming_detectors():
+    from idsai.config import REPO_ROOT
+    from idsai.eval import experiments as ex
+
+    cfg = load_settings(REPO_ROOT / "configs" / "eval_prev_live.yaml")  # AE in cfg.detectors
+    live, wash2, naming = ex.m3_detectors(cfg, seed=2)
+    names = [d.name for d in live]
+    assert names[-3:] == ["stat.robust_z", "stat.cusum", "ai.iforest"]
+    assert "ai.autoencoder_trade" not in names and "rule.100501" in names
+    assert (wash2.name, wash2.signature_id, wash2.rev, wash2.layer) == (
+        "rule.100501.rev2",
+        100501,
+        2,
+        "rule",
+    )
+    assert [d.name for d in naming] == ["attr.100191", "attr.100591"]  # flag off: still built
+    swapped = [d.name for d in ex.m3_variant_detectors(live, wash2, 2)]
+    assert swapped == [("rule.100501.rev2" if n == "rule.100501" else n) for n in names]
+    assert ex.m3_variant_detectors(live, wash2, 1) == live
+    assert list(ex.M3_VARIANTS) == ["base", "attr", "wash2", "attr+wash2"]
+    assert ex.M3_FUSION.as_dict() == {"mode": "shift", "shift": 1.0, "regime_feature": None}
+    assert "m3_attr" in ex.EXPERIMENTS and "m3_attr" in ex.INJECTING

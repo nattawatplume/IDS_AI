@@ -7,6 +7,11 @@ log1p_quote) the scale is split: above the median `tail = (q99 - med) / 2.326`, 
 `tail = (med - q01) / 2.326`; ret / jump / ratio features use one symmetric
 `tail = (q99.5 - q0.5) / (2 * 2.576)`. Floors: 0.25 (log), max(1e-4, tick size) (ret), 0.05 (ratio).
 State features (`cusum_*`, `kk_*`) are sequential and are not z-scored.
+
+M4 sell side (`FeatureCfg.sell_side`): the window bases `sell_rush`, `drop` (raw + z) and the state
+feature `cusum_sell` exist only when the flag is on. They are appended after every existing column
+(`raw, z, state, sell raw, sell z, sell state`), so the flag never moves an existing column, and
+they are never model inputs (`model_features` lists its bases explicitly).
 """
 
 import re
@@ -84,30 +89,61 @@ _SPECS = [
     ),
 ]
 
-REGISTRY: dict[str, FeatureSpec] = {s.name: s for s in _SPECS}
+_SELL_SPECS = [
+    FeatureSpec(
+        "sell_rush",
+        "orders",
+        "จำนวน rush order ฝั่งขาย (fill ฝั่งขาย ≥ 2 รายการในมิลลิวินาทีเดียวกัน)",
+        "log1p",
+        "log",
+    ),
+    FeatureSpec("drop", "relative", "ราคาต่ำสุดในหน้าต่างเทียบราคาปิดก่อนหน้าต่าง (−1)", "none", "ret"),
+    FeatureSpec(
+        "cusum_sell",
+        "sigma",
+        "ค่าสะสม CUSUM ด้านขายของความไม่สมดุลซื้อ-ขาย 10 วินาที (แรงขายที่ต่อเนื่อง)",
+        "none",
+        "ratio",
+        zscored=False,
+    ),
+]
+
+REGISTRY: dict[str, FeatureSpec] = {s.name: s for s in (*_SPECS, *_SELL_SPECS)}
 
 # deterministic orders (the kernel packs its row vector in exactly this order)
 WINDOW_BASES: tuple[str, ...] = tuple(s.name for s in _SPECS if s.zscored)
 STATE_FEATURES: tuple[str, ...] = tuple(s.name for s in _SPECS if not s.zscored)
+SELL_WINDOW_BASES: tuple[str, ...] = tuple(s.name for s in _SELL_SPECS if s.zscored)
+SELL_STATE_FEATURES: tuple[str, ...] = tuple(s.name for s in _SELL_SPECS if not s.zscored)
+ALL_WINDOW_BASES: tuple[str, ...] = (*WINDOW_BASES, *SELL_WINDOW_BASES)
+# the autoencoder / IsolationForest / PCA / robust-z inputs: fixed, whatever the flags say
+MODEL_BASES: tuple[str, ...] = WINDOW_BASES
+MODEL_STATE: tuple[str, ...] = ("cusum_ret", "cusum_imb")
 
 
 def raw_columns(cfg: FeatureCfg) -> list[str]:
-    return [f"{base}_{w}" for base in WINDOW_BASES for w in cfg.windows_s]
+    """Raw window columns in kernel pack order (sell bases last, only with `sell_side`)."""
+    bases = ALL_WINDOW_BASES if cfg.sell_side else WINDOW_BASES
+    return [f"{base}_{w}" for base in bases for w in cfg.windows_s]
 
 
 def feature_columns(cfg: FeatureCfg) -> list[str]:
-    """All window-row feature columns: raw, then `z_<raw>`, then state features."""
-    raw = raw_columns(cfg)
-    return [*raw, *(f"z_{c}" for c in raw), *STATE_FEATURES]
+    """All window-row feature columns: raw, then `z_<raw>`, then state features; with
+    `sell_side` the sell raw, sell `z_` and sell state columns follow (existing ones never move)."""
+    raw = [f"{base}_{w}" for base in WINDOW_BASES for w in cfg.windows_s]
+    cols = [*raw, *(f"z_{c}" for c in raw), *STATE_FEATURES]
+    if cfg.sell_side:
+        sell = [f"{base}_{w}" for base in SELL_WINDOW_BASES for w in cfg.windows_s]
+        cols += [*sell, *(f"z_{c}" for c in sell), *SELL_STATE_FEATURES]
+    return cols
 
 
 def model_features(cfg: FeatureCfg) -> list[str]:
-    """Model inputs: all `z_*`, then raw `buy_imb_*`, `round_frac_*`, then `cusum_*`."""
-    cols = feature_columns(cfg)
-    z = [c for c in cols if c.startswith("z_")]
+    """Model inputs: `z_*` of `MODEL_BASES`, then raw `buy_imb_*`, `round_frac_*`, then
+    `cusum_ret`, `cusum_imb`. Explicit lists: the sell-side columns are never model inputs."""
+    z = [f"z_{b}_{w}" for b in MODEL_BASES for w in cfg.windows_s]
     ratios = [f"{b}_{w}" for b in ("buy_imb", "round_frac") for w in cfg.windows_s]
-    cusum = [c for c in STATE_FEATURES if c.startswith("cusum_")]
-    return [*z, *ratios, *cusum]
+    return [*z, *ratios, *MODEL_STATE]
 
 
 _COL_RE = re.compile(r"^(?:z_)?(?P<base>[a-z_]+?)_(?P<w>\d+)$")
@@ -118,6 +154,6 @@ def spec_for(column: str) -> FeatureSpec:
     if column in REGISTRY:
         return REGISTRY[column]
     m = _COL_RE.match(column)
-    if m and m["base"] in WINDOW_BASES:
+    if m and m["base"] in ALL_WINDOW_BASES:
         return REGISTRY[m["base"]]
     raise KeyError(f"unknown feature column {column!r}")

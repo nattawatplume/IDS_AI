@@ -13,13 +13,14 @@ from idsai.config import REPO_ROOT
 
 DEFAULT_SCENARIOS = REPO_ROOT / "configs" / "scenarios.yaml"
 
-Family = Literal["pump_burst", "pump_stealth", "wash_pingpong"]
+Family = Literal["pump_burst", "pump_stealth", "wash_pingpong", "bear_raid"]
 Region = Literal["train", "test"]
 
 TECHNIQUES: dict[str, tuple[str, str]] = {
     "pump_burst": ("MM-T001", "MM-T001.001"),
     "pump_stealth": ("MM-T001", "MM-T001.002"),
     "wash_pingpong": ("MM-T005", "MM-T005.001"),
+    "bear_raid": ("MM-T006", "MM-T006.001"),  # M4: the sell-side mirror of pump_burst
 }
 
 

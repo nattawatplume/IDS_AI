@@ -28,9 +28,45 @@ negatives and computed here, so `Split` and its sha are unchanged), `test:<v>` (
 `semisyn:<v>` (the injected test-normal days, scored once and shared like the ablation). Rows
 keep the regime feature (`m1_regime_feature`) for the Mondrian variant.
 
+`m2_ai` (M2: does an AI layer earn its place) fits four AI models once per seed: today's
+autoencoder (`ae`), two grid points of it (`ae_wide`: hidden 128 / bottleneck 16, `ae_narrow`:
+hidden 64 / bottleneck 8; every other `ae` setting as configured) and IsolationForest on the AI
+layer (`ai.iforest`). Every set is scored once with the rules, stats and all four models; each
+variant then fuses those scores through its own Chief: the AI set `ae`, `ae_wide`, `ae_narrow`,
+`iforest` or `ae+iforest` (both enter F) with fusion `fuse`, `shift1` or `shift2` (`AiFusion`;
+the shift applies to each AI detector), plus the reference `no_ai` (today's AE scored but
+excluded: exactly m1_fusion's `no_ai`). Records are `<split>:<model>:<fusion>` and
+`<split>:no_ai` for split accept (accept-hard as in m1_fusion), test (REAL) and semisyn (the
+injected test-normal days, scored in the same single pass), plus the diagnostics
+`test:ae:alone` and `test:iforest:alone` (that AI model alone through its own Chief, on the same
+scores) for the report's AE-vs-iforest line.
+
 `fa_by_day` holds per-day unmatched-episode counts; when several parts load the same symbol-day
 (the SEMI-SYN families of one variant) it also holds `normal_mult`, how many parts loaded each
 day (missing keys and older records: 1), so the report's FA CI is the ratio `sum n / sum m`.
+
+`m4_sell` (M4: the sell side) runs with `features.sell_side` on for every load (the existing
+columns are bit-identical to the flag-off ones, so the AE fit and every existing score are the
+`real_t001` ones), fits and scores once per seed, then fuses two detector sets: `base` (the
+configured detectors, without the sell-side rules) and `sell` (with them). Records are
+`test:<v>` (REAL, with the per-phase recall of `idsai.eval.sell_labels`: the sell windows are
+measured once per call and shared by both variants) and `bear_raid:<v>` (SEMI-SYN: the `bear_raid`
+injection over the test-normal days, FA counted on every injected day). Every record keeps the
+invoking config's `config_hash` (one report block) and adds `sell_side` and `signatures_sell_sha`.
+
+`m3_attr` (M3: name the technique of detected events) runs the live stack inside the experiment
+whatever the invoking config says (`M3_LIVE`: rules, stat.robust_z, stat.cusum, ai.iforest with
+`AiFusion("shift", 1.0)`), so the eval config and its `config_hash` stay as they are. It fits
+`ai.iforest` once per seed and scores every set once with the live detectors, the candidate wash
+rule 100501 rev 2 (`configs/signatures_wash2.yaml`, scored as `rule.100501.rev2`) and the naming
+rules (`configs/signatures_attr.yaml`, whatever `chief.attr_rules` says). Variants re-fuse those
+scores: `base`, `attr` (naming rules on), `wash2` (rev 2 in place of rev 1) and `attr+wash2`.
+`attr` keeps the base Chief's calibration, tau and exceedances by construction; `wash2` changes an
+F-rule, so its FA can move. Records are `<split>:<variant>` for accept (accept-hard as in
+m1_fusion), test (REAL) and semisyn (the injected test-normal days); they add `attr_rules`,
+`wash_rev`, `ai_fusion`, the two signature shas, and the FA-naming counts in `metrics`
+(`n_fa_episodes`, `n_fa_named`: unmatched normal-day episodes with a technique other than
+MM-T000, `n_fa_named_by_rule`: those named by a naming rule).
 
 `retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
 its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
@@ -55,15 +91,29 @@ import numpy as np
 import polars as pl
 from sklearn.ensemble import RandomForestClassifier
 
-from idsai.ai.chief import CUSUM_NAME, AiFusion, CalibrationError, Chief
+from idsai.ai.chief import (
+    CUSUM_NAME,
+    NAMING_SOURCE,
+    UNCLASSIFIED,
+    AiFusion,
+    CalibrationError,
+    Chief,
+)
 from idsai.ai.learning import training_mask
 from idsai.config import REPO_ROOT, Settings, config_hash, file_sha
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
 from idsai.contracts.frames import LABELS, conform, empty
 from idsai.data.store import DAY_US, Store
 from idsai.detection.features.registry import model_features
-from idsai.detection.registry import build_detectors
-from idsai.detection.rules import SIGNATURES_PATH
+from idsai.detection.registry import build_detectors, sell_rule_detectors
+from idsai.detection.rules import (
+    NAMING_SIGNATURES_PATH,
+    SELL_SIGNATURES_PATH,
+    SIGNATURES_PATH,
+    WASH2_SIGNATURES_PATH,
+    SignatureDetector,
+    load_signatures,
+)
 from idsai.detection.simulator import (
     Scenario,
     assert_injection_allowed,
@@ -79,6 +129,7 @@ from idsai.eval.metrics import (
     window_positive,
     window_pr_auc,
 )
+from idsai.eval.sell_labels import SellPhase, derive_sell_labels
 from idsai.eval.splits import (
     SymDay,
     day_of_us,
@@ -110,7 +161,16 @@ ABLATION: dict[str, list[str] | None] = {
     "all": None,  # cfg.detectors
 }
 # detectors whose scores depend on the run seed (everything else is deterministic)
-SEEDED = {AE, "baseline.iforest", "baseline.random", RF_NAME}
+SEEDED = {
+    AE,
+    "baseline.iforest",
+    "baseline.random",
+    RF_NAME,
+    # the M2 AI models (names spelled out: the M2 constants are defined further down)
+    "ai.iforest",
+    "ai.autoencoder_wide",
+    "ai.autoencoder_narrow",
+}
 MASK_MARGIN_S = 3600
 RF_POSITIVE_S = 300
 MIN_TICKS = 2.0  # skip pumps whose impact moves the price by fewer ticks
@@ -121,6 +181,55 @@ SATURATION_WARNING = r"alert budget .* is at or above the peak episode rate"
 REAL, SEMI = "REAL", "SEMI-SYN"
 M1 = "m1_fusion"
 M1_SPLITS = ("accept", "test", "semisyn")
+M2 = "m2_ai"
+M2_SPLITS = ("accept", "test", "semisyn")
+# the AE grid (kept small on purpose: laptop CPU); `ae` is today's config
+M2_AE_GRID: dict[str, dict[str, int]] = {
+    "ae": {},
+    "ae_wide": {"hidden": 128, "bottleneck": 16},
+    "ae_narrow": {"hidden": 64, "bottleneck": 8},
+}
+IFOREST_AI = "ai.iforest"
+# detector name of each fitted AI model (the grid points need their own score columns)
+M2_AI_NAMES = {
+    "ae": AE,
+    "ae_wide": "ai.autoencoder_wide",
+    "ae_narrow": "ai.autoencoder_narrow",
+    "iforest": IFOREST_AI,
+}
+# the AI set of each variant model: which fitted models enter the fusion
+M2_MODELS: dict[str, tuple[str, ...]] = {
+    "ae": ("ae",),
+    "ae_wide": ("ae_wide",),
+    "ae_narrow": ("ae_narrow",),
+    "iforest": ("iforest",),
+    "ae+iforest": ("ae", "iforest"),
+}
+M2_FUSIONS = {
+    "fuse": AiFusion(),
+    "shift1": AiFusion("shift", 1.0),
+    "shift2": AiFusion("shift", 2.0),
+}
+M2_REF = "no_ai"
+M2_ALONE = ("ae", "iforest")  # diagnostics on test: the AI model alone, its own Chief
+M4 = "m4_sell"
+M4_VARIANTS = ("base", "sell")
+BEAR_RAID = "bear_raid"
+BEAR_RAID_STREAM = len(FAMILIES)  # rng stream index of bear_raid scenarios (after FAMILIES)
+M3 = "m3_attr"
+M3_SPLITS = ("accept", "test", "semisyn")
+# the live stack of feat/live-ai, built inside m3_attr (the eval config keeps its hash)
+M3_LIVE = ("rules", "stat.robust_z", "stat.cusum", "ai.iforest")
+M3_FUSION = AiFusion("shift", 1.0)
+# variant -> (naming rules on, wash rule rev); the selection's tie order is this order
+M3_VARIANTS: dict[str, tuple[bool, int]] = {
+    "base": (False, 1),
+    "attr": (True, 1),
+    "wash2": (False, 2),
+    "attr+wash2": (True, 2),
+}
+WASH_SID = 100501
+WASH2_NAME = "rule.100501.rev2"
 
 
 def m1_regime_feature(cfg: Settings) -> str:
@@ -428,9 +537,12 @@ class _Ctx:
 
     # ---- semi-synthetic scenarios
 
-    def scenario(self, sd: SymDay, fam_idx: int, ranges: dict) -> Scenario | None:
-        """One test-region scenario for `sd` (None: a pump too small for the price tick)."""
-        family = FAMILIES[fam_idx]
+    def scenario(
+        self, sd: SymDay, fam_idx: int, ranges: dict, family: str | None = None
+    ) -> Scenario | None:
+        """One test-region scenario for `sd` (None: a pump or bear raid too small for the price
+        tick). `family` defaults to `FAMILIES[fam_idx]`; `fam_idx` always picks the rng stream."""
+        family = FAMILIES[fam_idx] if family is None else family
         rng = np.random.default_rng([self.seed, fam_idx, stable_int(sd.symbol, sd.day)])
         d0 = day_start_us(sd.day)
         sc = sample_scenario(family, "test", d0 + SCENARIO_LEAD_S * S_US, rng, ranges)
@@ -438,7 +550,7 @@ class _Ctx:
         if hi < SCENARIO_LEAD_S:
             raise ValueError(f"{family} duration {sc.duration_s} s does not fit in one day")
         sc = replace(sc, t_start_us=d0 + int(rng.integers(SCENARIO_LEAD_S, hi + 1)) * S_US)
-        if family.startswith("pump"):
+        if family.startswith("pump") or family == BEAR_RAID:
             trades = self.store.read_trades(sd.symbol, d0 - DAY_US, d0 + DAY_US)
             ts = trades["ts_us"].to_numpy()
             before = ts < sc.t_start_us
@@ -467,6 +579,21 @@ class _Ctx:
             part.skipped_tick = n_tick
             parts.append(part)
         return parts
+
+    def bear_raid_part(self, detectors: list[Detector], **kw: Any) -> _Part:
+        """The `bear_raid` injection over `test_normal` (M4; FA counted on every day)."""
+        assert_injection_allowed(self.cfg.mode)  # Red-Team injection: replay only
+        ranges = load_scenario_ranges()
+        items, n_tick = [], 0
+        for sd in self.split.test_normal:
+            sc = self.scenario(sd, BEAR_RAID_STREAM, ranges, family=BEAR_RAID)
+            if sc is None:
+                n_tick += 1
+            else:
+                items.append((sd, sc))
+        part = self.load(items, detectors, **kw)
+        part.skipped_tick = n_tick
+        return part
 
     def real_parts(
         self, events: list[SymDay], normal: list[SymDay], detectors: list[Detector], **kw: Any
@@ -558,6 +685,12 @@ def _fa_by_day(onsets: list[tuple[str, int]], days: list[SymDay]) -> dict[str, i
     return dict(sorted(out.items()))
 
 
+def _unmatched(alerts: list, onsets: list[tuple[str, int]]) -> list:
+    """The alerts whose `(symbol, window start)` is among `onsets` (`unmatched_onsets`)."""
+    keys = set(onsets)
+    return [a for a in alerts if (a.symbol, a.window[0]) in keys]
+
+
 def _evaluate(
     chief: Chief,
     tau: float,
@@ -566,9 +699,14 @@ def _evaluate(
     hard: tuple[pl.DataFrame, _Part] | None,
     before_s: int,
     after_s: int,
+    phase: SellPhase | None = None,
+    fa_names: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, int]]]:
     """`(metrics, per_event, fa_by_day)`; `fa_by_day` = `{"normal": {...}, "hard": {...}}`,
-    plus `"normal_mult"` (parts per day) when a day is loaded by more than one part."""
+    plus `"normal_mult"` (parts per day) when a day is loaded by more than one part. With
+    `phase` (M4) every event also gets the sell-phase keys and the metrics the per-phase recall.
+    With `fa_names` (M3) the metrics count the unmatched normal-day episodes and how many of them
+    carry a name (`n_fa_episodes`, `n_fa_named`, `n_fa_named_by_rule`)."""
     det_any: dict[str, bool] = {}
     det_ok: dict[str, bool] = {}
     ttd: dict[str, float] = {}
@@ -579,8 +717,17 @@ def _evaluate(
     fa_unmatched, fa_days = 0, 0
     Fs, ys = [], []
     info: dict[str, dict[str, Any]] = {}
+    phase_pe: dict[str, dict[str, Any]] = {}
+    fa_alerts: list = []  # unmatched normal-day episodes (M3 `fa_names`)
     for fused, part in zip(fused_parts, parts, strict=True):
         alerts = _episodes(chief, fused, tau)
+        if phase is not None:
+            ex = fused.filter((pl.col("F") >= tau) & (pl.col("F") > 0))  # the episodes' rows
+            exceed = {
+                str(k[0]): g["t_end_us"].to_numpy()
+                for k, g in ex.select("symbol", "t_end_us").group_by("symbol")
+            }
+            phase_pe.update(phase.per_event(alerts, part.labels, exceed))
         mr = match_events(alerts, part.labels, before_s, after_s)
         det_any.update(mr.detected_any)
         det_ok.update(mr.detected_correct)
@@ -592,17 +739,19 @@ def _evaluate(
         if part.fa_days is None:
             fa_unmatched += mr.n_alerts - mr.n_alerts_matched
             fa_days += len(part.days)
-            day_counts = _fa_by_day(
-                unmatched_onsets(alerts, part.labels, before_s, after_s), part.days
-            )
+            onsets = unmatched_onsets(alerts, part.labels, before_s, after_s)
+            day_counts = _fa_by_day(onsets, part.days)
+            if fa_names:
+                fa_alerts += _unmatched(alerts, onsets)
         else:
             normal = _episodes(chief, _normal_rows(fused, part.fa_days), tau)
             mn = match_events(normal, part.labels, before_s, after_s)
             fa_unmatched += mn.n_alerts - mn.n_alerts_matched
             fa_days += len(part.fa_days)
-            day_counts = _fa_by_day(
-                unmatched_onsets(normal, part.labels, before_s, after_s), part.fa_days
-            )
+            onsets = unmatched_onsets(normal, part.labels, before_s, after_s)
+            day_counts = _fa_by_day(onsets, part.fa_days)
+            if fa_names:
+                fa_alerts += _unmatched(normal, onsets)
         for k, v in day_counts.items():
             fa_normal[k] = fa_normal.get(k, 0) + v
             fa_mult[k] = fa_mult.get(k, 0) + 1
@@ -626,6 +775,10 @@ def _evaluate(
     metrics["n_alerts"] = n_alerts
     metrics["n_alerts_matched"] = n_matched
     metrics["n_fa_days"] = fa_days
+    if fa_names:
+        metrics["n_fa_episodes"] = len(fa_alerts)
+        metrics["n_fa_named"] = sum(a.technique_id != UNCLASSIFIED for a in fa_alerts)
+        metrics["n_fa_named_by_rule"] = sum(a.technique_source == NAMING_SOURCE for a in fa_alerts)
     fa_by_day: dict[str, dict[str, int]] = {"normal": dict(sorted(fa_normal.items())), "hard": {}}
     if any(m != 1 for m in fa_mult.values()):  # several parts per day (SEMI-SYN families)
         fa_by_day["normal_mult"] = dict(sorted(fa_mult.items()))
@@ -648,9 +801,12 @@ def _evaluate(
             "detected_correct": det_ok[lid],
             "ttd_s": _json_float(ttd.get(lid, math.nan)),
             "techniques": techs.get(lid, []),
+            **phase_pe.get(lid, {}),
         }
         for lid in sorted(det_any)
     }
+    if phase is not None:
+        metrics.update(phase.summarize(per_event))
     return _clean(metrics), per_event, fa_by_day
 
 
@@ -694,10 +850,14 @@ def _variant(
     hard: _Part | None,
     extra: dict[str, Any],
     ai: AiFusion | None = None,
+    phase: SellPhase | None = None,
+    naming: list[Detector] | None = None,
+    fa_names: bool = False,
 ) -> list[dict[str, Any]]:
-    """Calibrate one Chief on `cal` (with the AI fusion mode `ai`), then one record per budget."""
+    """Calibrate one Chief on `cal` (with the AI fusion mode `ai` and the M3 naming rules
+    `naming`), then one record per budget (`phase`: the M4 per-phase recall, `fa_names`: the M3
+    FA-naming counts, see `_evaluate`)."""
     cfg = ctx.cfg
-    names = [d.name for d in detectors]
     skips = _skips(cal=cal, eval=parts, hard=hard, **extra.pop("_skips", {}))
     base = {
         **_describe(detectors, provenance),
@@ -707,8 +867,8 @@ def _variant(
         "n_skipped": skips,
         **extra,
     }
-    chief = Chief(detectors, cfg.chief, ctx.config_hash, model_versions, ai=ai)
-    cols = ["symbol", "t_end_us", *[f"score__{n}" for n in names]]
+    chief = Chief(detectors, cfg.chief, ctx.config_hash, model_versions, ai=ai, naming=naming)
+    cols = ["symbol", "t_end_us", *[f"score__{d.name}" for d in chief.score_detectors]]
     if ai is not None and ai.regime_feature is not None:
         cols.append(ai.regime_feature)
     chief.calibrate(cal.frame.select(cols))
@@ -730,7 +890,15 @@ def _variant(
             out.append(rec)
             continue
         metrics, per_event, fa_by_day = _evaluate(
-            chief, tau, fused_parts, parts, hard_pair, cfg.eval.before_s, cfg.eval.after_s
+            chief,
+            tau,
+            fused_parts,
+            parts,
+            hard_pair,
+            cfg.eval.before_s,
+            cfg.eval.after_s,
+            phase,
+            fa_names,
         )
         rec.update(
             metrics=metrics,
@@ -1034,6 +1202,236 @@ def _exp_m1_fusion(ctx: _Ctx) -> list[dict]:
     return out
 
 
+def m2_ai_models(cfg: Settings, seed: int) -> dict[str, Detector]:
+    """The four unfitted M2 AI models (`M2_AI_NAMES`): today's AE, its grid points (only
+    `hidden` / `bottleneck` change, under their own detector names) and `ai.iforest`."""
+    from idsai.ai.autoencoder import AutoencoderDetector  # lazy: keeps torch off import path
+
+    out: dict[str, Detector] = {}
+    for key, grid in M2_AE_GRID.items():
+        if not grid:
+            (out[key],) = build_detectors([AE], cfg, seed)
+            continue
+        ae_cfg = cfg.ae.model_copy(update=grid)
+        det = AutoencoderDetector(model_features(cfg.features), ae_cfg, seed)
+        det.name = M2_AI_NAMES[key]
+        out[key] = det
+    (out["iforest"],) = build_detectors([IFOREST_AI], cfg, seed)
+    for key, det in out.items():
+        if det.name != M2_AI_NAMES[key] or det.layer != "ai":
+            raise ValueError(f"M2 model {key}: got {det.name} on layer {det.layer}")
+    return out
+
+
+def m2_variants() -> dict[str, tuple[str | None, AiFusion]]:
+    """`variant -> (model or None, AiFusion)`: `no_ai` and every `<model>:<fusion>`."""
+    out: dict[str, tuple[str | None, AiFusion]] = {M2_REF: (None, AiFusion("exclude"))}
+    for m in M2_MODELS:
+        for f, ai in M2_FUSIONS.items():
+            out[f"{m}:{f}"] = (m, ai)
+    return out
+
+
+def _m2_grid(cfg: Settings) -> dict[str, dict[str, int]]:
+    return {
+        k: {"hidden": cfg.ae.hidden, "bottleneck": cfg.ae.bottleneck, **g}
+        for k, g in M2_AE_GRID.items()
+    }
+
+
+def _exp_m2_ai(ctx: _Ctx) -> list[dict]:
+    sp, cfg = ctx.split, ctx.cfg
+    # the rules and stats of the configured set (today's AE is built by m2_ai_models instead)
+    groups = ctx.build(n for n in cfg.detectors if n != AE)
+    base = [d for d in _flatten(groups, groups) if d.layer != "ai"]
+    models = m2_ai_models(cfg, ctx.seed)
+    variants = m2_variants()
+
+    def dets_of(model: str | None) -> list[Detector]:
+        keys = M2_MODELS[model] if model is not None else ("ae",)  # no_ai: today's AE, excluded
+        return [*base, *(models[k] for k in keys)]
+
+    def fields(model: str | None, ai: AiFusion | None) -> dict[str, Any]:
+        return {
+            "ai_model": model,
+            "ai_fusion": ai.as_dict() if ai is not None else None,
+            "ae_grid": _m2_grid(cfg),
+        }
+
+    every = [*base, *models.values()]
+    try:
+        mv, info = ctx.fit(every, sp.train_normal)
+    except _VariantError as err:
+        out = []
+        for v, (m, ai) in variants.items():
+            for split in M2_SPLITS:
+                prov = SEMI if split == "semisyn" else REAL
+                out += _error_records(
+                    ctx, M2, f"{split}:{v}", prov, err, dets_of(m), **fields(m, ai)
+                )
+        for m in M2_ALONE:
+            out += _error_records(
+                ctx, M2, f"test:{m}:alone", REAL, err, [models[m]], **fields(m, None)
+            )
+        return out
+    # every set is scored once with every detector; the variants only re-fuse these scores
+    cal = ctx.clean(sp.cal_normal, every)
+    acc = ctx.real_parts(sp.accept_events, sp.accept_normal, every)
+    hard_days = _most_volatile(ctx, sp.accept_normal, m1_hard_k(cfg, len(sp.accept_normal)))
+    acc_hard = _subpart(acc, hard_days)
+    test = ctx.real_parts(sp.test_events, sp.test_normal, every)
+    test_hard = ctx.clean(sp.test_hard_negative, every)
+    semi = ctx.semisyn_parts(every)
+    hard_keys = [_day_key(sd.symbol, sd.day) for sd in acc_hard.days]
+    sets = (
+        ("accept", REAL, [acc], acc_hard, {"accept_hard_days": hard_keys}),
+        ("test", REAL, [test], test_hard, {}),
+        ("semisyn", SEMI, semi, None, {"n_skipped_tick": sum(p.skipped_tick for p in semi)}),
+    )
+    out = []
+    for v, (m, ai) in variants.items():
+        dets = dets_of(m)
+        vmv = _versions_for(mv, dets)
+        for split, prov, parts, hard, more in sets:
+            extra = {**info, **fields(m, ai), **more}
+            out += _variant(
+                ctx, M2, f"{split}:{v}", prov, dets, vmv, cal, parts, hard, extra, ai=ai
+            )
+    for m in M2_ALONE:
+        dets = [models[m]]
+        extra = {**info, **fields(m, None)}
+        vmv = _versions_for(mv, dets)
+        out += _variant(ctx, M2, f"test:{m}:alone", REAL, dets, vmv, cal, [test], test_hard, extra)
+    return out
+
+
+def m4_sell_cfg(cfg: Settings) -> Settings:
+    """`cfg` with `features.sell_side` on (the M4 eval computes every feature this way)."""
+    return cfg.model_copy(update={"features": cfg.features.model_copy(update={"sell_side": True})})
+
+
+def _exp_m4_sell(ctx: _Ctx) -> list[dict]:
+    sp = ctx.split
+    # every load computes the sell features too; the existing columns are bit-identical to the
+    # flag-off ones, so the fitted models and existing scores are those of real_t001
+    ctx.cfg = m4_sell_cfg(ctx.cfg)
+    ctx.meta["signatures_sell_sha"] = file_sha(SELL_SIGNATURES_PATH)
+    groups = ctx.build(ctx.cfg.detectors)
+    dets = _flatten(groups, groups)
+    sell_names = {d.name for d in sell_rule_detectors()}
+    sets = {"base": [d for d in dets if d.name not in sell_names], "sell": dets}
+    mv, info, err = _fit_groups(ctx, groups, sp.train_normal)
+    if err is not None:
+        return [
+            r
+            for v in M4_VARIANTS
+            for split, prov in (("test", REAL), (BEAR_RAID, SEMI))
+            for r in _error_records(
+                ctx, M4, f"{split}:{v}", prov, err, sets[v], sell_side=v == "sell"
+            )
+        ]
+    cal, real, hard = _real_sets(ctx, dets)
+    raid = ctx.bear_raid_part(dets)
+    phase = SellPhase(derive_sell_labels(ctx.store, real.labels))  # once, shared by both
+    out = []
+    for v in M4_VARIANTS:
+        vd, vmv = sets[v], _versions_for(mv, sets[v])
+        base = {**info, "sell_side": v == "sell"}
+        out += _variant(
+            ctx, M4, f"test:{v}", REAL, vd, vmv, cal, [real], hard, dict(base), phase=phase
+        )
+        extra = {**base, "n_skipped_tick": raid.skipped_tick}
+        out += _variant(ctx, M4, f"{BEAR_RAID}:{v}", SEMI, vd, vmv, cal, [raid], None, extra)
+    return out
+
+
+def m3_detectors(cfg: Settings, seed: int) -> tuple[list[Detector], Detector, list[Detector]]:
+    """`(live, wash2, naming)`: the unfitted live stack (`M3_LIVE`), rule 100501 rev 2 under its
+    own name (`WASH2_NAME`) and the naming rules in priority order (always, whatever
+    `chief.attr_rules` says: the variants choose)."""
+    live = build_detectors(list(M3_LIVE), cfg, seed)
+    if not any(d.name == f"rule.{WASH_SID}" for d in live):
+        raise ValueError(f"the live rules lack rule.{WASH_SID}")
+    (sig,) = load_signatures(WASH2_SIGNATURES_PATH)
+    if (sig.sid, sig.rev) != (WASH_SID, 2):
+        raise ValueError(f"{WASH2_SIGNATURES_PATH.name} must hold {WASH_SID} rev 2")
+    wash2 = SignatureDetector(sig)
+    wash2.name = WASH2_NAME
+    naming: list[Detector] = [SignatureDetector(s) for s in load_signatures(NAMING_SIGNATURES_PATH)]
+    return live, wash2, naming
+
+
+def m3_variant_detectors(live: list[Detector], wash2: Detector, rev: int) -> list[Detector]:
+    """The detectors of a variant: the live stack, with rev 2 in rev 1's place when `rev == 2`."""
+    if rev == 1:
+        return list(live)
+    return [wash2 if d.name == f"rule.{WASH_SID}" else d for d in live]
+
+
+def _exp_m3_attr(ctx: _Ctx) -> list[dict]:
+    sp, cfg = ctx.split, ctx.cfg
+    ctx.meta["signatures_attr_sha"] = file_sha(NAMING_SIGNATURES_PATH)
+    ctx.meta["signatures_wash2_sha"] = file_sha(WASH2_SIGNATURES_PATH)
+    live, wash2, naming = m3_detectors(cfg, ctx.seed)
+
+    def fields(v: str) -> dict[str, Any]:
+        on, rev = M3_VARIANTS[v]
+        return {"attr_rules": on, "wash_rev": rev, "ai_fusion": M3_FUSION.as_dict()}
+
+    try:
+        mv, info = ctx.fit(live, sp.train_normal)
+    except _VariantError as err:
+        return [
+            r
+            for v, (_, rev) in M3_VARIANTS.items()
+            for split in M3_SPLITS
+            for r in _error_records(
+                ctx,
+                M3,
+                f"{split}:{v}",
+                SEMI if split == "semisyn" else REAL,
+                err,
+                m3_variant_detectors(live, wash2, rev),
+                **fields(v),
+            )
+        ]
+    # every set is scored once with every detector; the variants only re-fuse these scores
+    every = [*live, wash2, *naming]
+    cal = ctx.clean(sp.cal_normal, every)
+    acc = ctx.real_parts(sp.accept_events, sp.accept_normal, every)
+    hard_days = _most_volatile(ctx, sp.accept_normal, m1_hard_k(cfg, len(sp.accept_normal)))
+    acc_hard = _subpart(acc, hard_days)
+    test = ctx.real_parts(sp.test_events, sp.test_normal, every)
+    test_hard = ctx.clean(sp.test_hard_negative, every)
+    semi = ctx.semisyn_parts(every)
+    hard_keys = [_day_key(sd.symbol, sd.day) for sd in acc_hard.days]
+    sets = (
+        ("accept", REAL, [acc], acc_hard, {"accept_hard_days": hard_keys}),
+        ("test", REAL, [test], test_hard, {}),
+        ("semisyn", SEMI, semi, None, {"n_skipped_tick": sum(p.skipped_tick for p in semi)}),
+    )
+    out = []
+    for v, (on, rev) in M3_VARIANTS.items():
+        dets = m3_variant_detectors(live, wash2, rev)
+        for split, prov, parts, hard, more in sets:
+            out += _variant(
+                ctx,
+                M3,
+                f"{split}:{v}",
+                prov,
+                dets,
+                dict(mv),
+                cal,
+                parts,
+                hard,
+                {**info, **fields(v), **more},
+                ai=M3_FUSION,
+                naming=naming if on else None,
+                fa_names=True,
+            )
+    return out
+
+
 _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "real_t001": _exp_real_t001,
     "semisyn": _exp_semisyn,
@@ -1042,9 +1440,12 @@ _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "ref_supervised": _exp_ref_supervised,
     "retrain_drift": _exp_retrain_drift,
     M1: _exp_m1_fusion,
+    M2: _exp_m2_ai,
+    M3: _exp_m3_attr,
+    M4: _exp_m4_sell,
 }
 EXPERIMENTS = tuple(_RUNNERS)
-INJECTING = ("semisyn", "ablation", M1)  # experiments that run Red-Team injection
+INJECTING = ("semisyn", "ablation", M1, M2, M3, M4)  # experiments that run Red-Team injection
 
 
 def run_experiment(
@@ -1090,7 +1491,8 @@ def fit_and_calibrate(
 ) -> Fitted:
     """The experiments' protocol for one deployable model set: build `names` (default
     `cfg.detectors`), fit them on the masked, grid-thinned rows of `train_days` (`_Ctx.fit`),
-    calibrate the Chief on `cal_days` and fit `tau` for the budget.
+    calibrate the Chief (with the configured AI fusion, `AiFusion.from_cfg`) on `cal_days` and fit
+    `tau` for the budget.
 
     `train_days` and `cal_days` must not share a symbol-day. Raises ValueError when nothing can be
     fitted or calibrated (no rows, a failed fit) and `CalibrationError` when the calibration set
@@ -1111,7 +1513,9 @@ def fit_and_calibrate(
     if cal.frame.height == 0:
         raise ValueError(f"no calibration rows from {len(cal_days)} day(s): {dict(cal.skipped)}")
     cols = ["symbol", "t_end_us", *[f"score__{d.name}" for d in dets]]
-    chief = Chief(dets, cfg.chief, ctx.config_hash, mv)
+    # a deployable Chief runs the configured AI fusion (`chief.ai_mode`); the experiments pass
+    # their own `AiFusion` per variant instead
+    chief = Chief(dets, cfg.chief, ctx.config_hash, mv, ai=AiFusion.from_cfg(cfg.chief))
     chief.calibrate(cal.frame.select(cols))
     chief.fit_threshold(chief.fuse(cal.frame.select(cols)), budget_per_symbol_day)
     info = {k: v for k, v in info.items() if not k.startswith("_")}
