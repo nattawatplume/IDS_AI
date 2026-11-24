@@ -4,9 +4,10 @@ The golden digests below were computed from the code before M4 (commit fdf7eb4) 
 synthetic stream; any change to the flag-off feature frame, rule scores, alerts, Chief state,
 config hashes or the signatures sha breaks this test.
 
-`configs/default.yaml` has since moved to the live AI layer (`ai.iforest`, `chief.ai_mode: shift`);
-`PRE_LIVE_AI` puts the old values back, so the digests (default config hash included) also prove
-that `ChiefCfg.ai_*` at their defaults leave the dump byte-identical.
+`configs/default.yaml` has since moved to the live AI layer (`ai.iforest`, `chief.ai_mode: shift`),
+turned `features.sell_side` and the M3 naming rules (`chief.attr_rules`) on; `PRE_LIVE_AI` puts the
+old values back, so the digests (default config hash included) also prove that `ChiefCfg.ai_*` and
+`chief.attr_rules` at their defaults leave the dump byte-identical.
 """
 
 import hashlib
@@ -41,6 +42,7 @@ OLD_BARS = [
 PRE_LIVE_AI = {
     "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
     "chief": {"ai_mode": "fuse", "ai_shift": 0.0, "attr_rules": False},
+    "features": {"sell_side": False},  # default.yaml turns it on since the live sell-side change
 }
 
 GOLDEN = {
