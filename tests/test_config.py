@@ -290,3 +290,23 @@ def test_chief_attr_rules_on_is_dumped_and_changes_the_hash():
     )
     dumped = both.model_dump(mode="json")["chief"]
     assert dumped["attr_rules"] is True and "ai_mode" not in dumped
+
+
+# ---------------------------------------------------------------- M5 rule rev 2 flag
+
+
+def test_chief_rule_rev2_empty_is_absent_and_keeps_the_pinned_hashes():
+    for cfg in (load_settings(), load_settings(overrides={"chief": {"rule_rev2": []}})):
+        assert cfg.chief.rule_rev2 == []
+        assert "rule_rev2" not in cfg.model_dump(mode="json")["chief"]
+        assert config_hash(cfg) == "9aff5e3482f2"  # the live default (M3 on, sell side on)
+    prev = load_settings(REPO_ROOT / "configs/eval_prev_live.yaml")
+    assert prev.chief.rule_rev2 == [] and config_hash(prev) == "53e3b662ab96"
+    assert config_hash(load_settings(overrides=OLD_DEFAULT)) == "6da45ffe7efd"
+
+
+def test_chief_rule_rev2_on_is_dumped_and_changes_the_hash():
+    a = load_settings(overrides={"chief": {"rule_rev2": [100101]}})
+    b = load_settings(overrides={"chief": {"rule_rev2": [100101, 100102]}})
+    assert a.model_dump(mode="json")["chief"]["rule_rev2"] == [100101]
+    assert len({config_hash(a), config_hash(b), "9aff5e3482f2"}) == 3

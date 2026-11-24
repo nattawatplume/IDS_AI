@@ -115,10 +115,16 @@ class ChiefCfg(_Cfg):
     # or cusum row named; they never enter F, p, agreement or tau. Off leaves every output
     # bit-identical and is absent from every dump (like `FeatureCfg.sell_side`).
     attr_rules: bool = False
+    # M5: pump-rule ids whose rev 2 (`configs/signatures_r2.yaml`) replaces rev 1 in the rule
+    # layer (e.g. [100101, 100102]); rev 2 keeps the detector name `rule.<sid>`. Empty (default)
+    # leaves every output bit-identical and is absent from every dump (like `attr_rules`).
+    rule_rev2: list[int] = []
 
     @model_validator(mode="after")
     def _check_ai(self) -> "ChiefCfg":
         check_ai_fusion(self.ai_mode, self.ai_shift, self.ai_regime_feature)
+        if len(set(self.rule_rev2)) != len(self.rule_rev2):
+            raise ValueError(f"chief.rule_rev2 lists a rule twice: {self.rule_rev2}")
         return self
 
     @model_serializer(mode="wrap")
@@ -131,6 +137,8 @@ class ChiefCfg(_Cfg):
                 out.pop(k, None)
         if not self.attr_rules:
             out.pop("attr_rules", None)
+        if not self.rule_rev2:
+            out.pop("rule_rev2", None)
         return out
 
 
