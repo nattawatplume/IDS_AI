@@ -40,7 +40,7 @@ OLD_BARS = [
 
 PRE_LIVE_AI = {
     "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
-    "chief": {"ai_mode": "fuse", "ai_shift": 0.0},
+    "chief": {"ai_mode": "fuse", "ai_shift": 0.0, "attr_rules": False},
 }
 
 GOLDEN = {

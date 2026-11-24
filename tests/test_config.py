@@ -162,10 +162,10 @@ def test_config_hash_matches_the_existing_demo_pack():
 
 # ---------------------------------------------------------------- live AI fusion (ChiefCfg.ai_*)
 
-# configs/default.yaml before the live AI layer (AE, fusion "fuse")
+# configs/default.yaml before the live AI layer (AE, fusion "fuse") and before M3 naming rules
 OLD_DEFAULT = {
     "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
-    "chief": {"ai_mode": "fuse", "ai_shift": 0},
+    "chief": {"ai_mode": "fuse", "ai_shift": 0, "attr_rules": False},
 }
 
 
@@ -230,20 +230,29 @@ def test_aifusion_from_cfg():
 
 
 def test_chief_attr_rules_off_is_absent_and_keeps_the_pinned_hashes():
-    default = load_settings()
-    assert default.chief.attr_rules is False
-    assert "attr_rules" not in default.model_dump(mode="json")["chief"]
-    explicit = load_settings(overrides={"chief": {"attr_rules": False}})
-    assert config_hash(explicit) == config_hash(default)
+    off = load_settings(overrides={"chief": {"attr_rules": False}})
+    assert off.chief.attr_rules is False
+    assert "attr_rules" not in off.model_dump(mode="json")["chief"]
+    # the flag off reproduces default.yaml's hash from before M3 went live
+    assert config_hash(off) == "7c3324364f13"
     prev = load_settings(REPO_ROOT / "configs/eval_prev_live.yaml")
+    assert prev.chief.attr_rules is False
     assert config_hash(prev) == "53e3b662ab96"
     assert config_hash(load_settings(overrides=OLD_DEFAULT)) == "6da45ffe7efd"
+
+
+def test_default_config_runs_the_m3_naming_rules():
+    # M3 (docs/REPORT.md section 12): default.yaml turns the naming rules on
+    default = load_settings()
+    assert default.chief.attr_rules is True
+    assert default.model_dump(mode="json")["chief"]["attr_rules"] is True
+    assert config_hash(default) == "ee772544606c"
 
 
 def test_chief_attr_rules_on_is_dumped_and_changes_the_hash():
     on = load_settings(overrides={"chief": {"attr_rules": True}})
     assert on.model_dump(mode="json")["chief"]["attr_rules"] is True
-    assert config_hash(on) != config_hash(load_settings())
+    assert config_hash(on) != config_hash(load_settings(overrides={"chief": {"attr_rules": False}}))
     # the AI flags keep their own drop rule beside it
     assert "ai_mode" in on.model_dump(mode="json")["chief"]
     both = load_settings(

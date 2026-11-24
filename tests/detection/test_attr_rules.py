@@ -12,7 +12,7 @@ from idsai.detection.rules import (
     load_signatures,
 )
 
-OFF = load_settings()
+OFF = load_settings(overrides={"chief": {"attr_rules": False}})
 ON = load_settings(overrides={"chief": {"attr_rules": True}})
 
 

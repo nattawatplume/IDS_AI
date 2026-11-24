@@ -43,7 +43,7 @@ def namer(sid: int, technique: str, feature: str = "na") -> SignatureDetector:
     return SignatureDetector(sig)
 
 
-CFG_OFF = load_settings()
+CFG_OFF = load_settings(overrides={"chief": {"attr_rules": False}})
 BURST, WASH = namer(191, "MM-T001.001", "na"), namer(591, "MM-T005.001", "nb")
 
 
@@ -80,7 +80,7 @@ def _with_naming_scores(sc: pl.DataFrame, seed: int) -> pl.DataFrame:
 
 
 def test_flag_off_outputs_equal_the_pre_m3_golden():
-    assert naming_detectors(load_settings()) == []
+    assert naming_detectors(CFG_OFF) == []
     h = hashlib.sha256()
     for mode in ("fuse", "shift"):
         dets, sc = _mixed_world(seed=11)
