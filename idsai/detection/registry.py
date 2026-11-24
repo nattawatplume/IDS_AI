@@ -21,7 +21,9 @@ from idsai.detection.features.registry import model_features
 from idsai.detection.rules import (
     KK_SID,
     NAMING_SIGNATURES_PATH,
+    R2_SIGNATURES_PATH,
     SELL_SIGNATURES_PATH,
+    Signature,
     SignatureDetector,
     load_signatures,
 )
@@ -52,9 +54,26 @@ def build_detectors(names: list[str], cfg: Settings, seed: int = 0) -> list[Dete
     return out
 
 
+def rev2_signatures(sids: list[int]) -> dict[int, Signature]:
+    """M5 rev 2 of the listed rule ids (`signatures_r2.yaml`); an unknown id raises."""
+    r2 = {s.sid: s for s in load_signatures(R2_SIGNATURES_PATH)}
+    bad = [sid for sid in sids if sid not in r2 or r2[sid].layer != "rule" or r2[sid].rev != 2]
+    if bad:
+        raise ValueError(f"no rule rev 2 in {R2_SIGNATURES_PATH.name} for {bad}")
+    return {sid: r2[sid] for sid in sids}
+
+
 def rule_signatures(cfg: Settings) -> list:
-    """Rule-layer signatures: `signatures.yaml`, plus `signatures_sell.yaml` with `sell_side`."""
+    """Rule-layer signatures: `signatures.yaml` (with `chief.rule_rev2`, each listed sid's rev 2
+    from `signatures_r2.yaml` in its rev 1's place), plus `signatures_sell.yaml` with
+    `sell_side`."""
     sigs = [s for s in load_signatures() if s.layer == "rule"]
+    if cfg.chief.rule_rev2:
+        r2 = rev2_signatures(cfg.chief.rule_rev2)
+        missing = set(r2) - {s.sid for s in sigs}
+        if missing:
+            raise ValueError(f"chief.rule_rev2 lists rules not in signatures.yaml: {missing}")
+        sigs = [r2.get(s.sid, s) for s in sigs]
     if cfg.features.sell_side:
         sigs += [s for s in load_signatures(SELL_SIGNATURES_PATH) if s.layer == "rule"]
     sids = [s.sid for s in sigs]

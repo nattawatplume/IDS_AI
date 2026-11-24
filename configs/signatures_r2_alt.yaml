@@ -1,0 +1,18 @@
+# M5 alternative candidate: 100101 rev 2 with z_quote_vol_60 >= 2.5 instead of 3
+# (configs/signatures_r2.yaml). Read only by the `r101_25` variant of the `m5_rules` eval (scored
+# as `rule.100101.rev2_25`); never by live. If it is the one chosen, its threshold replaces the
+# one in signatures_r2.yaml before any promotion.
+# Train check (M5, same data as signatures_r2.yaml): 202 of 3,075,840 train-normal rows (6.57e-5;
+# 53 fire episodes = 0.149 per symbol-day), 122/183 train REAL pumps (rev 1: 0 rows, 0/183;
+# 3: 58 rows, 105/183).
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100101
+    technique: MM-T001.001
+    layer: rule
+    rev: 2
+    name: pump-and-dump แบบพุ่งเร็ว (burst)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 2.5}
+      - {feature: ret_60, op: ">=", thr: 0.02}
+      - {feature: z_rush_60, op: ">=", thr: 4}
