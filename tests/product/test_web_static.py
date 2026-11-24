@@ -4436,3 +4436,9 @@ def test_hud_behaviour_in_node(tmp_path):
     assert out["r2"] == 0 and out["r3"] == 0  # off, and disabled: no ripple
     assert out["r4"] == "50px"  # a keyboard press ripples from the centre
     assert out["p0"] is True and out["p1"] == 0 and out["pointerleaveOnDoc"] is False
+
+
+def test_naming_rule_badge_reads_technique_source():
+    js = text("app.js")
+    assert "a.technique_source" in js and "กฎระบุเทคนิค" in js
+    assert js.count("sourceBadge(a)") == 3  # the definition's use plus card and detail head

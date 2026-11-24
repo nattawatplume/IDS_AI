@@ -162,10 +162,10 @@ def test_config_hash_matches_the_existing_demo_pack():
 
 # ---------------------------------------------------------------- live AI fusion (ChiefCfg.ai_*)
 
-# configs/default.yaml before the live AI layer (AE, fusion "fuse")
+# configs/default.yaml before the live AI layer (AE, fusion "fuse") and before M3 naming rules
 OLD_DEFAULT = {
     "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
-    "chief": {"ai_mode": "fuse", "ai_shift": 0},
+    "chief": {"ai_mode": "fuse", "ai_shift": 0, "attr_rules": False},
     "features": {"sell_side": False},
 }
 
@@ -200,10 +200,15 @@ def test_default_config_runs_the_sell_side():
     s = load_settings()
     assert s.features.sell_side is True
     assert s.model_dump(mode="json")["features"]["sell_side"] is True
-    # the live sell-side default: AI shift 1 plus sell side; re-pin only on a deliberate change
-    assert config_hash(s) == "145385c5dab2"
-    # the flag is dumped only when on: off gives back the hash of the iforest-shift1 default
-    off = load_settings(overrides={"features": {"sell_side": False}})
+
+
+def test_sell_side_flag_is_dumped_only_when_on_and_keeps_the_pinned_hashes():
+    # with M3 naming rules held off: the live sell-side default (AI shift 1 plus sell side) ...
+    attr_off = {"chief": {"attr_rules": False}}
+    assert config_hash(load_settings(overrides=attr_off)) == "145385c5dab2"
+    # ... and sell side off gives back the hash of the iforest-shift1 default
+    off = load_settings(overrides={**attr_off, "features": {"sell_side": False}})
+    assert "sell_side" not in off.model_dump(mode="json")["features"]
     assert config_hash(off) == "7c3324364f13"
 
 
@@ -236,3 +241,52 @@ def test_aifusion_from_cfg():
         overrides={"chief": {"ai_mode": "mondrian", "ai_shift": 0, "ai_regime_feature": "x"}}
     )
     assert AiFusion.from_cfg(cfg.chief) == AiFusion("mondrian", regime_feature="x")
+
+
+# ---------------------------------------------------------------- M3 naming rules flag
+
+
+def test_chief_attr_rules_off_is_absent_and_keeps_the_pinned_hashes():
+    off = load_settings(overrides={"chief": {"attr_rules": False}})
+    assert off.chief.attr_rules is False
+    assert "attr_rules" not in off.model_dump(mode="json")["chief"]
+    # the flag off reproduces default.yaml's hash from before M3 went live (sell side on) ...
+    assert config_hash(off) == "145385c5dab2"
+    # ... and, with sell side also off, the iforest-shift1 default from before both
+    both_off = {"chief": {"attr_rules": False}, "features": {"sell_side": False}}
+    assert config_hash(load_settings(overrides=both_off)) == "7c3324364f13"
+    prev = load_settings(REPO_ROOT / "configs/eval_prev_live.yaml")
+    assert prev.chief.attr_rules is False
+    assert config_hash(prev) == "53e3b662ab96"
+    assert config_hash(load_settings(overrides=OLD_DEFAULT)) == "6da45ffe7efd"
+
+
+def test_default_config_runs_the_m3_naming_rules():
+    # M3 (docs/REPORT.md section 12): default.yaml turns the naming rules on
+    default = load_settings()
+    assert default.chief.attr_rules is True
+    assert default.model_dump(mode="json")["chief"]["attr_rules"] is True
+
+
+def test_default_config_hash_is_pinned_with_sell_side_and_naming_rules_on():
+    # the live default: AI shift 1 + sell side (REPORT section 10) + M3 naming rules (section 12);
+    # re-pin only on a deliberate change
+    default = load_settings()
+    assert default.features.sell_side is True and default.chief.attr_rules is True
+    assert config_hash(default) == "9aff5e3482f2"
+    # naming rules on with sell side off: the M3 branch's default before the sell-side merge
+    sell_off = load_settings(overrides={"features": {"sell_side": False}})
+    assert config_hash(sell_off) == "ee772544606c"
+
+
+def test_chief_attr_rules_on_is_dumped_and_changes_the_hash():
+    on = load_settings(overrides={"chief": {"attr_rules": True}})
+    assert on.model_dump(mode="json")["chief"]["attr_rules"] is True
+    assert config_hash(on) != config_hash(load_settings(overrides={"chief": {"attr_rules": False}}))
+    # the AI flags keep their own drop rule beside it
+    assert "ai_mode" in on.model_dump(mode="json")["chief"]
+    both = load_settings(
+        overrides={**OLD_DEFAULT, "chief": {**OLD_DEFAULT["chief"], "attr_rules": True}}
+    )
+    dumped = both.model_dump(mode="json")["chief"]
+    assert dumped["attr_rules"] is True and "ai_mode" not in dumped

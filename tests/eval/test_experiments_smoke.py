@@ -91,7 +91,7 @@ def make_cfg(tmp):
             },
             "eval": {"budgets_per_symbol_day": BUDGETS, "hard_negative_k": 2, "n_boot": 200},
             "ae": {"epochs": 2, "hidden": 16, "bottleneck": 4, "patience": 1},
-        }
+        },
     )
 
 
@@ -545,3 +545,80 @@ def test_m2_ai_fits_each_model_once_and_no_ai_equals_m1(world, monkeypatch):
     # one accept event: no paired gain can be significant, so the pick stays no_ai
     assert m2["selection"]["chosen"] == "no_ai"
     assert m2["ae_vs_iforest"] is not None or any("iforest" in n for n in m2["notes"])
+
+
+def test_m3_attr_fits_once_and_naming_changes_only_names(world, monkeypatch):
+    """m3_attr: the live stack is built inside the experiment (the eval config keeps its hash),
+    ai.iforest is fit once per seed, every (symbol-day, scenario) is scored once; `attr` keeps
+    base's tau, FA and recall_any exactly (only names move), and wash2 swaps one rule."""
+    from idsai.ai.baselines import IsolationForestDetector
+    from idsai.eval import experiments as ex
+
+    cfg, app, research, tmp = world
+    fits, loads = [], []
+    real_fit, real_load = IsolationForestDetector.fit, ex._Ctx.load
+
+    def if_fit(self, normal):
+        fits.append(self.name)
+        return real_fit(self, normal)
+
+    def load(self, items, detectors, **kw):
+        items = list(items)
+        if detectors:
+            loads.extend((sd, None if sc is None else sc.family) for sd, sc in items)
+        return real_load(self, items, detectors, **kw)
+
+    monkeypatch.setattr(IsolationForestDetector, "fit", if_fit)
+    monkeypatch.setattr(ex._Ctx, "load", load)
+    recs = run_experiment("m3_attr", cfg, app, seed=0, research=research)
+    assert fits == ["ai.iforest"]
+    assert len(loads) == len(set(loads))  # no symbol-day (or injected day) scored twice
+    assert {r["variant"] for r in recs} == {
+        f"{s}:{v}" for s in ex.M3_SPLITS for v in ex.M3_VARIANTS
+    }
+    by = {(r["variant"], r["budget"]): r for r in recs}
+    for r in recs:
+        assert RECORD_KEYS <= set(r)
+        assert r["experiment"] == "m3_attr" and r["config_hash"] == config_hash(cfg)
+        on, rev = ex.M3_VARIANTS[r["variant"].split(":")[1]]
+        assert (r["attr_rules"], r["wash_rev"]) == (on, rev)
+        assert r["ai_fusion"] == AiFusion("shift", 1.0).as_dict()
+        assert len(r["signatures_attr_sha"]) == 12 and len(r["signatures_wash2_sha"]) == 12
+        names = r["detectors"]
+        assert "ai.iforest" in names and "ai.autoencoder_trade" not in names
+        assert ("rule.100501.rev2" in names) == (rev == 2)
+        assert ("rule.100501" in names) == (rev == 1)
+        assert not any(n.startswith("attr.") for n in names)  # naming rules never fused
+        if r["budget"] == 10.0:
+            assert r["error"] is None, (r["variant"], r["error"])
+            assert {"n_fa_episodes", "n_fa_named", "n_fa_named_by_rule"} <= set(r["metrics"])
+            if not on:
+                assert r["metrics"]["n_fa_named_by_rule"] == 0
+    for split in ex.M3_SPLITS:
+        for b in BUDGETS:
+            base, attr = by[(f"{split}:base", b)], by[(f"{split}:attr", b)]
+            for key in ("tau", "tau_saturated", "n_cal", "fa_by_day", "detectors", "error"):
+                assert attr.get(key) == base.get(key), (split, b, key)
+            if base["metrics"] is None:
+                continue
+            for k in ("recall_any", "fa_per_symbol_day", "fa_per_symbol_day_hard", "n_alerts",
+                      "n_fa_episodes", "pr_auc"):  # fmt: skip
+                assert attr["metrics"].get(k) == base["metrics"].get(k), (split, b, k)
+            for lid, pe in base["per_event"].items():
+                assert attr["per_event"][lid]["detected_any"] == pe["detected_any"]
+                assert pe["detected_correct"] <= attr["per_event"][lid]["detected_correct"]
+
+    from idsai.eval import report
+
+    monkeypatch.setattr(report, "PAIRED_BUDGET", 10.0)
+    md, js = tmp / "m3.md", tmp / "m3.json"
+    data = build_report(research, md, js, cfg=cfg)
+    text = md.read_text(encoding="utf-8")
+    assert "### m3_attr" in text and "accuracy" not in text.lower()
+    assert "#### confusion semisyn:attr" in text
+    m3 = data["m3_attr"]
+    assert set(m3["splits"]) == set(ex.M3_SPLITS)
+    assert {r["variant"] for r in m3["splits"]["accept"]["rows"]} == set(ex.M3_VARIANTS)
+    # one accept event: no paired gain can be significant, so the pick stays base
+    assert m3["selection"]["chosen"] == "base"
+    assert m3["confusion"]["semisyn"]["base"]["rows"]

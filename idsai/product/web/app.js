@@ -1991,6 +1991,13 @@ function phaseBadge(a) {
   return PHASE_TH[p] ? el("span", { class: `badge alert-phase phase-${p}` }, `ช่วง: ${PHASE_TH[p]}`) : null;
 }
 
+// M3: the technique name came from a naming rule (กฎระบุเทคนิค), not from the detection evidence
+function sourceBadge(a) {
+  return a && a.technique_source === "naming_rule"
+    ? el("span", { class: "badge alert-source" }, "ชื่อเทคนิคจากกฎระบุเทคนิค (ไม่ใช่หลักฐานการตรวจจับ)")
+    : null;
+}
+
 function alertCard(a) {
   return hudMark(el(
     "a",
@@ -2005,6 +2012,7 @@ function alertCard(a) {
         el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
         el("span", {}, a.symbol),
         phaseBadge(a),
+        sourceBadge(a),
       ),
     ),
     el(
@@ -2151,6 +2159,7 @@ async function showAlert(id) {
         el("span", { class: `sev sev-${a.severity}` }, `ระดับ${SEVERITY_TH[a.severity] || "–"}`),
         el("span", {}, a.symbol),
         phaseBadge(a),
+        sourceBadge(a),
         el("span", { class: "muted" }, fmtThaiTime(a.ts_event_us, true)),
         chipSlot,
       ),
