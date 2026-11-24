@@ -275,7 +275,8 @@ def test_default_config_hash_is_pinned_with_sell_side_and_naming_rules_on():
     assert default.features.sell_side is True and default.chief.attr_rules is True
     assert config_hash(default) == "9aff5e3482f2"
     # naming rules on with sell side off: the M3 branch's default before the sell-side merge
-    assert config_hash(load_settings(overrides={"features": {"sell_side": False}})) == "ee772544606c"
+    sell_off = load_settings(overrides={"features": {"sell_side": False}})
+    assert config_hash(sell_off) == "ee772544606c"
 
 
 def test_chief_attr_rules_on_is_dumped_and_changes_the_hash():
