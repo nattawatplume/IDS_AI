@@ -68,6 +68,19 @@ m1_fusion), test (REAL) and semisyn (the injected test-normal days); they add `a
 (`n_fa_episodes`, `n_fa_named`: unmatched normal-day episodes with a technique other than
 MM-T000, `n_fa_named_by_rule`: those named by a naming rule).
 
+`m5_rules` (M5: reachable pump-rule thresholds) runs today's live stack inside the experiment
+whatever the invoking config says (`m5_cfg`: `features.sell_side` on, `M3_LIVE` with
+`AiFusion("shift", 1.0)`, the naming rules of `configs/signatures_attr.yaml` on in every variant,
+every rule at rev 1), so the eval config and its `config_hash` stay as they are. It fits
+`ai.iforest` once per seed and scores every set once with the live detectors plus the rev 2
+candidates of `M5_CANDIDATES` (each under its own name, e.g. `rule.100101.rev2`). Variants re-fuse
+those scores with the candidates in their rev 1's place: `base`, `r101` (100101 at
+z_quote_vol_60 >= 3), `r101_25` (at 2.5), `r102` (100102 at cusum_imb >= 6) and `r101+r102`.
+Rules enter F, so every variant gets its own calibration and tau and its FA can move. Records are
+`<split>:<variant>` for accept (accept-hard as in m1_fusion), test (REAL) and semisyn (the
+injected test-normal days); they add `rule_rev2` (the sids at rev 2), `sell_side`, `attr_rules`,
+`ai_fusion`, the shas of the two rev 2 files and the M3 FA-naming counts.
+
 `retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
 its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
 detector set can name a technique at all (a rule or `stat.cusum`), so recall_correct of
@@ -108,6 +121,8 @@ from idsai.detection.features.registry import model_features
 from idsai.detection.registry import build_detectors, sell_rule_detectors
 from idsai.detection.rules import (
     NAMING_SIGNATURES_PATH,
+    R2_ALT_SIGNATURES_PATH,
+    R2_SIGNATURES_PATH,
     SELL_SIGNATURES_PATH,
     SIGNATURES_PATH,
     WASH2_SIGNATURES_PATH,
@@ -230,6 +245,22 @@ M3_VARIANTS: dict[str, tuple[bool, int]] = {
 }
 WASH_SID = 100501
 WASH2_NAME = "rule.100501.rev2"
+M5 = "m5_rules"
+M5_SPLITS = ("accept", "test", "semisyn")
+# rev 2 candidates of the pump rules: key -> (signature file, sid, detector name in the eval)
+M5_CANDIDATES: dict[str, tuple[Any, int, str]] = {
+    "r101": (R2_SIGNATURES_PATH, 100101, "rule.100101.rev2"),
+    "r101_25": (R2_ALT_SIGNATURES_PATH, 100101, "rule.100101.rev2_25"),
+    "r102": (R2_SIGNATURES_PATH, 100102, "rule.100102.rev2"),
+}
+# variant -> the candidates that replace their rev 1; the selection's tie order is this order
+M5_VARIANTS: dict[str, tuple[str, ...]] = {
+    "base": (),
+    "r101": ("r101",),
+    "r101_25": ("r101_25",),
+    "r102": ("r102",),
+    "r101+r102": ("r101", "r102"),
+}
 
 
 def m1_regime_feature(cfg: Settings) -> str:
@@ -1432,6 +1463,118 @@ def _exp_m3_attr(ctx: _Ctx) -> list[dict]:
     return out
 
 
+def m5_cfg(cfg: Settings) -> Settings:
+    """`cfg` with the live feature set (`features.sell_side` on) and every rule at rev 1
+    (`chief.rule_rev2` empty), whatever the invoking config says."""
+    cfg = m4_sell_cfg(cfg)
+    return cfg.model_copy(update={"chief": cfg.chief.model_copy(update={"rule_rev2": []})})
+
+
+def m5_detectors(
+    cfg: Settings, seed: int
+) -> tuple[list[Detector], dict[str, Detector], list[Detector]]:
+    """`(live, candidates, naming)`: the unfitted live stack (`M3_LIVE` under `m5_cfg`: rules at
+    rev 1, sell-side rules included), the rev 2 candidates under their own names
+    (`M5_CANDIDATES`) and the naming rules in priority order."""
+    cfg = m5_cfg(cfg)
+    live = build_detectors(list(M3_LIVE), cfg, seed)
+    names = {d.name for d in live}
+    cands: dict[str, Detector] = {}
+    for key, (path, sid, name) in M5_CANDIDATES.items():
+        if f"rule.{sid}" not in names:
+            raise ValueError(f"the live rules lack rule.{sid}")
+        (sig,) = [s for s in load_signatures(path) if s.sid == sid]
+        if (sig.layer, sig.rev) != ("rule", 2):
+            raise ValueError(f"{path.name} must hold rule {sid} rev 2")
+        det = SignatureDetector(sig)
+        det.name = name
+        cands[key] = det
+    naming: list[Detector] = [SignatureDetector(s) for s in load_signatures(NAMING_SIGNATURES_PATH)]
+    return live, cands, naming
+
+
+def m5_variant_detectors(
+    live: list[Detector], cands: dict[str, Detector], variant: str
+) -> list[Detector]:
+    """The detectors of a variant: the live stack with its candidates in their rev 1's place."""
+    swap = {f"rule.{M5_CANDIDATES[k][1]}": cands[k] for k in M5_VARIANTS[variant]}
+    return [swap.get(d.name, d) for d in live]
+
+
+def _exp_m5_rules(ctx: _Ctx) -> list[dict]:
+    sp = ctx.split
+    live, cands, naming = m5_detectors(ctx.cfg, ctx.seed)
+    ctx.cfg = m5_cfg(ctx.cfg)  # every load computes the live (sell-side) feature set
+    for key, path in (
+        ("signatures_r2_sha", R2_SIGNATURES_PATH),
+        ("signatures_r2_alt_sha", R2_ALT_SIGNATURES_PATH),
+        ("signatures_sell_sha", SELL_SIGNATURES_PATH),
+        ("signatures_attr_sha", NAMING_SIGNATURES_PATH),
+    ):
+        ctx.meta[key] = file_sha(path)
+
+    def fields(v: str) -> dict[str, Any]:
+        return {
+            "rule_rev2": sorted({M5_CANDIDATES[k][1] for k in M5_VARIANTS[v]}),
+            "sell_side": True,
+            "attr_rules": True,
+            "ai_fusion": M3_FUSION.as_dict(),
+        }
+
+    try:
+        mv, info = ctx.fit(live, sp.train_normal)
+    except _VariantError as err:
+        return [
+            r
+            for v in M5_VARIANTS
+            for split in M5_SPLITS
+            for r in _error_records(
+                ctx,
+                M5,
+                f"{split}:{v}",
+                SEMI if split == "semisyn" else REAL,
+                err,
+                m5_variant_detectors(live, cands, v),
+                **fields(v),
+            )
+        ]
+    # every set is scored once with every detector; the variants only re-fuse these scores
+    every = [*live, *cands.values(), *naming]
+    cal = ctx.clean(sp.cal_normal, every)
+    acc = ctx.real_parts(sp.accept_events, sp.accept_normal, every)
+    hard_days = _most_volatile(ctx, sp.accept_normal, m1_hard_k(ctx.cfg, len(sp.accept_normal)))
+    acc_hard = _subpart(acc, hard_days)
+    test = ctx.real_parts(sp.test_events, sp.test_normal, every)
+    test_hard = ctx.clean(sp.test_hard_negative, every)
+    semi = ctx.semisyn_parts(every)
+    hard_keys = [_day_key(sd.symbol, sd.day) for sd in acc_hard.days]
+    sets = (
+        ("accept", REAL, [acc], acc_hard, {"accept_hard_days": hard_keys}),
+        ("test", REAL, [test], test_hard, {}),
+        ("semisyn", SEMI, semi, None, {"n_skipped_tick": sum(p.skipped_tick for p in semi)}),
+    )
+    out = []
+    for v in M5_VARIANTS:
+        dets = m5_variant_detectors(live, cands, v)
+        for split, prov, parts, hard, more in sets:
+            out += _variant(
+                ctx,
+                M5,
+                f"{split}:{v}",
+                prov,
+                dets,
+                dict(mv),
+                cal,
+                parts,
+                hard,
+                {**info, **fields(v), **more},
+                ai=M3_FUSION,
+                naming=naming,
+                fa_names=True,
+            )
+    return out
+
+
 _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "real_t001": _exp_real_t001,
     "semisyn": _exp_semisyn,
@@ -1443,9 +1586,10 @@ _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     M2: _exp_m2_ai,
     M3: _exp_m3_attr,
     M4: _exp_m4_sell,
+    M5: _exp_m5_rules,
 }
 EXPERIMENTS = tuple(_RUNNERS)
-INJECTING = ("semisyn", "ablation", M1, M2, M3, M4)  # experiments that run Red-Team injection
+INJECTING = ("semisyn", "ablation", M1, M2, M3, M4, M5)  # experiments that run Red-Team injection
 
 
 def run_experiment(

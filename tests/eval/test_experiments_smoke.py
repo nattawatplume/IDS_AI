@@ -622,3 +622,77 @@ def test_m3_attr_fits_once_and_naming_changes_only_names(world, monkeypatch):
     # one accept event: no paired gain can be significant, so the pick stays base
     assert m3["selection"]["chosen"] == "base"
     assert m3["confusion"]["semisyn"]["base"]["rows"]
+
+
+def test_m5_rules_fits_once_and_swaps_only_the_pump_rules(world, monkeypatch):
+    """m5_rules: the live stack (sell side, naming rules, ai.iforest shift 1) is built inside the
+    experiment (the eval config keeps its hash), ai.iforest is fit once per seed, every
+    (symbol-day, scenario) is scored once; each variant swaps only its rev 2 pump rules in."""
+    from idsai.ai.baselines import IsolationForestDetector
+    from idsai.eval import experiments as ex
+
+    cfg, app, research, tmp = world
+    fits, loads = [], []
+    real_fit, real_load = IsolationForestDetector.fit, ex._Ctx.load
+
+    def if_fit(self, normal):
+        fits.append(self.name)
+        return real_fit(self, normal)
+
+    def load(self, items, detectors, **kw):
+        items = list(items)
+        if detectors:
+            loads.extend((sd, None if sc is None else sc.family) for sd, sc in items)
+        return real_load(self, items, detectors, **kw)
+
+    monkeypatch.setattr(IsolationForestDetector, "fit", if_fit)
+    monkeypatch.setattr(ex._Ctx, "load", load)
+    recs = run_experiment("m5_rules", cfg, app, seed=0, research=research)
+    assert fits == ["ai.iforest"]
+    assert len(loads) == len(set(loads))  # no symbol-day (or injected day) scored twice
+    assert {r["variant"] for r in recs} == {
+        f"{s}:{v}" for s in ex.M5_SPLITS for v in ex.M5_VARIANTS
+    }
+    swapped = {"r101": {"rule.100101": "rule.100101.rev2"},
+               "r101_25": {"rule.100101": "rule.100101.rev2_25"},
+               "r102": {"rule.100102": "rule.100102.rev2"},
+               "r101+r102": {"rule.100101": "rule.100101.rev2",
+                             "rule.100102": "rule.100102.rev2"}}  # fmt: skip
+    by = {(r["variant"], r["budget"]): r for r in recs}
+    for r in recs:
+        assert RECORD_KEYS <= set(r)
+        assert r["experiment"] == "m5_rules" and r["config_hash"] == config_hash(cfg)
+        v = r["variant"].split(":")[1]
+        assert r["rule_rev2"] == sorted(ex.M5_CANDIDATES[k][1] for k in ex.M5_VARIANTS[v])
+        assert (r["sell_side"], r["attr_rules"]) == (True, True)
+        assert r["ai_fusion"] == AiFusion("shift", 1.0).as_dict()
+        for k in ("signatures_r2_sha", "signatures_r2_alt_sha", "signatures_sell_sha",
+                  "signatures_attr_sha"):  # fmt: skip
+            assert len(r[k]) == 12
+        names = r["detectors"]
+        base = by[(f"{r['variant'].split(':')[0]}:base", r["budget"])]["detectors"]
+        want = [swapped.get(v, {}).get(n, n) for n in base]
+        assert names == want
+        assert "ai.iforest" in names and "ai.autoencoder_trade" not in names
+        assert "rule.100104" in names and "rule.100601" in names  # the live sell-side rules
+        assert not any(n.startswith("attr.") for n in names)  # naming rules never fused
+        if r["budget"] == 10.0:
+            assert r["error"] is None, (r["variant"], r["error"])
+            assert {"n_fa_episodes", "n_fa_named", "n_fa_named_by_rule"} <= set(r["metrics"])
+    # the base variant is the live stack at rev 1
+    assert {n for n in by[("test:base", 10.0)]["detectors"] if ".rev2" in n} == set()
+
+    from idsai.eval import report
+
+    monkeypatch.setattr(report, "PAIRED_BUDGET", 10.0)
+    md, js = tmp / "m5.md", tmp / "m5.json"
+    data = build_report(research, md, js, cfg=cfg)
+    text = md.read_text(encoding="utf-8")
+    assert "### m5_rules" in text and "accuracy" not in text.lower()
+    assert "#### confusion semisyn:r101+r102" in text
+    m5 = data["m5_rules"]
+    assert set(m5["splits"]) == set(ex.M5_SPLITS)
+    assert [r["variant"] for r in m5["splits"]["accept"]["rows"]] == list(ex.M5_VARIANTS)
+    # one accept event: no paired gain can be significant, so the pick stays base
+    assert m5["selection"]["chosen"] == "base"
+    assert m5["confusion"]["semisyn"]["base"]["rows"]
