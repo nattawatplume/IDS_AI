@@ -34,7 +34,17 @@ The retrain, AE-vs-baselines and ablation blocks each use only the records of th
 False alerts: when every record of a cell carries `fa_by_day` (per symbol-day unmatched-episode
 counts, zero days included), FA and FA-hard get a 95 % CI: per symbol-day the mean over the
 cell's records (seeds), then symbol-days resampled with replacement (`bootstrap_ci`). Older
-records without it show the mean alone.
+records without it show the mean alone. When a record also carries `<which>_mult` (how many
+parts loaded each day, e.g. the three SEMI-SYN families of one ablation arm; missing keys = 1),
+the CI is the symbol-day ratio bootstrap of `sum n / sum m` (`ratio_bootstrap_ci`); without it a
+day summed over three parts read as three times its rate.
+
+M1 (`m1_fusion`, budget 2): one table per split (accept, test, semisyn) of every AI fusion
+variant, with the paired recall_any difference against V0 `all`. The variant is chosen on the
+accept split only, by a rule fixed in advance (`m1_select`): among the variants whose accept
+REAL recall_any is not significantly below V0 (paired event bootstrap, `significant` with
+`min_effect`), the lowest accept-hard FA; ties go to the simpler one, `all` < `no_ai` <
+`ai_shift1` < `ai_shift2` < `ai_mondrian` (V0 < V1 < V3 < V2). Test numbers are only reported.
 
 Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
 label family, the share of events whose matched episodes carry each parent technique (or none),
@@ -260,6 +270,20 @@ def _fa_ci(records: list[dict], which: str, n_boot: int) -> list[float] | None:
     days = [(r.get("fa_by_day") or {}).get(which) for r in records]
     if not days or not all(days):
         return None
+    mults = [(r.get("fa_by_day") or {}).get(f"{which}_mult") for r in records]
+    if any(m is not None for m in mults):
+        # several parts per day: the rate is sum(count) / sum(parts) over days (ratio bootstrap)
+        n: dict[str, float] = defaultdict(float)
+        m: dict[str, float] = defaultdict(float)
+        for d, mult in zip(days, mults, strict=True):
+            for k, v in d.items():
+                n[k] += float(v)
+                m[k] += float((mult or {}).get(k, 1))
+        keys = sorted(n)
+        _, (lo, hi) = ratio_bootstrap_ci(
+            np.array([n[k] for k in keys]), np.array([m[k] for k in keys]), n_boot, CI_SEED
+        )
+        return [lo, hi] if math.isfinite(lo) else None
     per_day: dict[str, list[float]] = defaultdict(list)
     for d in days:
         for k, v in d.items():
@@ -623,6 +647,186 @@ def _paired_ablation_md(pa: dict[str, Any], min_effect: float) -> list[str]:
     return lines
 
 
+M1 = "m1_fusion"
+M1_V0 = "all"
+# tie order of the selection rule: simpler first (V0 < V1 < V3 < V2)
+M1_SIMPLICITY = ("all", "no_ai", "ai_shift1", "ai_shift2", "ai_mondrian")
+M1_LABEL = {
+    "all": "V0 all",
+    "no_ai": "V1 no_ai",
+    "ai_shift1": "V3 ai_shift1",
+    "ai_shift2": "V3 ai_shift2",
+    "ai_mondrian": "V2 ai_mondrian",
+}
+M1_SPLITS = (("accept", "REAL"), ("test", "REAL"), ("semisyn", "SEMI-SYN"))
+M1_TIE_TOL = 1e-12
+M1_RULE_TH = (
+    "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัดตัวแปรที่ recall_any บน accept "
+    "ต่ำกว่า V0 all อย่างมีนัย (paired bootstrap ข้ามเหตุการณ์, CI ล่างของ (V0 − X) > 0 และผลต่าง ≥ "
+    "min_effect) และตัวแปรที่ตัดสิน recall เทียบ V0 ไม่ได้ (เหตุการณ์น้อยเกินไป) "
+    "แล้วเลือกตัวที่ FA ของวันผันผวนสูงของ accept (accept-hard) ต่ำสุดที่งบ 2; "
+    "ถ้าเท่ากันเลือกตัวที่ง่ายกว่า: all < no_ai < ai_shift1 < ai_shift2 < ai_mondrian"
+)
+M1_NOTES_TH = [
+    "ผล test และ semisyn รายงานไว้ดูเท่านั้น ไม่ได้ใช้เลือกตัวแปร",
+    "ทุกตัวแปรใช้คะแนนของตัวตรวจจับชุดเดียวกัน (fit และ score ครั้งเดียวต่อ seed) ต่างกันเฉพาะการรวมคะแนน "
+    "และ τ ที่ fit ใหม่บนข้อมูลสอบเทียบของแต่ละตัวแปร",
+    "no_ai: AE ยังถูกคำนวณและแสดง p แต่ไม่เข้า F, agreement และเทคนิค; ai_shiftδ: AE ต้องหายากขึ้น "
+    "(ส่วนของ AE ใน F = max(0, −log10 p − δ)); ai_mondrian: p ของ AE เทียบกับคะแนนสอบเทียบ"
+    "ในช่วงเดียวกันของช่วงราคาขาขึ้นในหน้าต่าง 1800 วินาที (jump_1800) (3 ช่วงจาก tercile บนข้อมูลสอบเทียบ); "
+    "jump_1800 ไม่ใช่ความผันผวนสัมบูรณ์ และแถวที่มีการปั่นราคาขึ้นมีค่า jump สูงโดยธรรมชาติ "
+    "ai_mondrian จึงอาจลด recall ของ AE ซึ่งเกณฑ์ recall ของกฎเลือกจะคัดออกเอง",
+    "F คือ −log10 ของ anomaly p-value (ความหายากเทียบตลาดปกติ) ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา",
+    "accept-hard = วัน accept-normal ที่ผันผวนสูงสุดตามเกณฑ์เดียวกับ hard negative ของ test "
+    "(realized volatility 1 นาที) และยังนับรวมใน FA ของ accept ด้วย",
+]
+NO_M1_TH = "ยังไม่มีผล m1_fusion"
+
+
+def _m1_arms(recs: list[dict], split: str) -> dict[str, dict[int, dict]]:
+    arms: dict[str, dict[int, dict]] = defaultdict(dict)
+    for r in recs:
+        sp, _, v = r["variant"].partition(":")
+        if sp == split and r.get("metrics") is not None:
+            arms[v][r["seed"]] = r
+    return arms
+
+
+def m1_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The M1 selection rule on accept rows (`variant`, `fa_hard`, `below_v0`, `undecided`); see
+    the module docstring. A variant whose recall comparison with V0 could not be decided
+    (`undecided`: no paired result, or too few clusters) is excluded: it cannot win on FA alone.
+    V0 itself is always eligible. Returns the chosen variant (None if none qualifies) and the
+    excluded ones with a Thai reason."""
+    rank = {v: i for i, v in enumerate(M1_SIMPLICITY)}
+    excluded = {r["variant"]: "recall ต่ำกว่า V0 อย่างมีนัย" for r in rows if r["below_v0"]}
+    for r in rows:
+        if r["variant"] != M1_V0 and r["variant"] not in excluded and r.get("undecided"):
+            why = r.get("reason_th") or "ไม่มีผลเทียบแบบจับคู่กับ V0"
+            excluded[r["variant"]] = f"ตัดสิน recall เทียบ V0 ไม่ได้ ({why}) จึงชนะด้วย FA อย่างเดียวไม่ได้"
+    for r in rows:
+        if r["variant"] not in excluded and r["fa_hard"] is None:
+            excluded[r["variant"]] = "ไม่มีค่า FA-hard"
+    ok = [r for r in rows if r["variant"] not in excluded]
+    if not ok:
+        return {"chosen": None, "excluded": excluded, "candidates": []}
+    best = min(r["fa_hard"] for r in ok)
+    tied = [r["variant"] for r in ok if r["fa_hard"] <= best + M1_TIE_TOL]
+    chosen = min(tied, key=lambda v: (rank.get(v, len(rank)), v))
+    return {"chosen": chosen, "excluded": excluded, "candidates": sorted(r["variant"] for r in ok)}
+
+
+def _m1(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """M1 tables per split, paired recall_any vs V0, and the accept-only selection (budget 2)."""
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == M1 and float(r["budget"]) == PAIRED_BUDGET]
+    )
+    if not recs:
+        return None
+    notes = [config_note] if config_note else []
+    splits: dict[str, Any] = {}
+    for split, provenance in M1_SPLITS:
+        arms = _m1_arms(recs, split)
+        if not arms:
+            continue
+        rows = []
+        order = [v for v in M1_SIMPLICITY if v in arms] + sorted(set(arms) - set(M1_SIMPLICITY))
+        for v in order:
+            c = _cell(list(arms[v].values()), n_boot)
+            m, ci, fa_ci = c["mean"] or {}, c["ci"] or {}, c["fa_ci"] or {}
+            row: dict[str, Any] = {
+                "variant": v,
+                "label": M1_LABEL.get(v, v),
+                "n_seeds": c["n_seeds"],
+                "n_events": c["n_events"],
+                "recall_any": m.get("recall_any"),
+                "recall_any_ci": ci.get("recall_any"),
+                "recall_correct": m.get("recall_correct"),
+                "fa": m.get("fa_per_symbol_day"),
+                "fa_ci": fa_ci.get("fa_per_symbol_day"),
+                "fa_hard": m.get("fa_per_symbol_day_hard"),
+                "fa_hard_ci": fa_ci.get("fa_per_symbol_day_hard"),
+                "vs_v0": None,
+                "below_v0": False,
+                "reason_th": None,
+            }
+            if v != M1_V0 and M1_V0 in arms:
+                pair, why = _ablation_pair(arms[M1_V0], arms[v], n_boot, min_effect)
+                if pair is None:
+                    row["reason_th"] = why
+                else:
+                    # diff_mean = V0 - X; `significant` = V0 detects significantly more
+                    row["vs_v0"] = {k: pair[k] for k in ("diff_mean", "ci", "ci_unit")}
+                    row["below_v0"] = bool(pair["significant"])
+                    row["above_v0"] = bool(pair["significant_reverse"])
+                    row["reason_th"] = pair["reason_th"]
+            # recall vs V0 not decided (no paired result, or too few clusters)
+            row["undecided"] = v != M1_V0 and (row["vs_v0"] is None or row["reason_th"] is not None)
+            rows.append(row)
+        splits[split] = {"provenance": provenance, "rows": rows}
+    selection = None
+    if "accept" in splits:
+        if M1_V0 not in _m1_arms(recs, "accept"):
+            notes.append("เลือกตัวแปรไม่ได้: ไม่มีผล accept:all (V0) ที่งบ 2")
+        else:
+            selection = m1_select(splits["accept"]["rows"])
+    return {
+        "budget": PAIRED_BUDGET,
+        "splits": splits,
+        "selection": selection,
+        "rule_th": M1_RULE_TH,
+        "notes": notes,
+    }
+
+
+def _m1_md(m1: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = ["", f"### m1_fusion: ตัวแปรการรวมคะแนนของ AE (budget {PAIRED_BUDGET:g})"]
+    if m1 is None:
+        return [*lines, "", f"- {NO_M1_TH}"]
+    for split, block in m1["splits"].items():
+        lines += [
+            "",
+            f"#### {split} ({block['provenance']})",
+            "",
+            "| ตัวแปร | seeds | events | recall_any [95% CI] | recall_correct | "
+            "FA/symbol-day [95% CI] | FA hard [95% CI] | "
+            "ผลต่าง recall_any (V0 − X) [95% CI] | อ่านว่า |",
+            "|" + "---|" * 9,
+        ]
+        for r in block["rows"]:
+            if r["variant"] == M1_V0:
+                diff, verdict = "–", "ตัวอ้างอิง"
+            elif r["vs_v0"] is None:
+                diff, verdict = "–", r["reason_th"] or "–"
+            else:
+                diff = _fmt_ci(r["vs_v0"]["diff_mean"], r["vs_v0"]["ci"])
+                if r["reason_th"]:
+                    verdict = r["reason_th"]
+                elif r["below_v0"]:
+                    verdict = "ต่ำกว่า V0 อย่างมีนัย"
+                elif r.get("above_v0"):
+                    verdict = "สูงกว่า V0 อย่างมีนัย"
+                else:
+                    verdict = "ไม่ต่างจาก V0 อย่างมีนัย"
+            lines.append(
+                f"| {r['label']} | {r['n_seeds']} | {r['n_events']} | "
+                f"{_fmt_ci(r['recall_any'], r['recall_any_ci'])} | {_fmt(r['recall_correct'])} | "
+                f"{_fmt_ci(r['fa'], r['fa_ci'])} | {_fmt_ci(r['fa_hard'], r['fa_hard_ci'])} | "
+                f"{diff} | {verdict} |"
+            )
+    lines += ["", f"- {m1['rule_th']} (min_effect = {min_effect:g})"]
+    sel = m1["selection"]
+    if sel is not None:
+        for v, why in sorted(sel["excluded"].items()):
+            lines.append(f"- ตัดออก {M1_LABEL.get(v, v)}: {why}")
+        if sel["chosen"] is None:
+            lines.append("- **ผลการเลือก (accept):** ไม่มีตัวแปรที่ผ่านเกณฑ์")
+        else:
+            lines.append(f"- **ผลการเลือก (accept):** {M1_LABEL.get(sel['chosen'], sel['chosen'])}")
+    lines += [f"- {n}" for n in [*M1_NOTES_TH, *m1["notes"]]]
+    return lines
+
+
 RETRAIN = "retrain_drift"
 RETRAIN_PAIRS = {"primary": ("v1", "v2"), "ai_only": ("v1:ai", "v2:ai")}
 AI_ONLY_LABEL = "AE alone (diagnostic)"
@@ -948,6 +1152,7 @@ def build_report(
     paired = _paired(runs, n_boot, cfg.eval.min_effect)
     paired_ablation = _paired_ablation(runs, n_boot, cfg.eval.min_effect)
     retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
+    m1 = _m1(runs, n_boot, cfg.eval.min_effect)
     confusion = _confusion(runs)
     data = {
         "header": header,
@@ -959,6 +1164,7 @@ def build_report(
         "paired_bootstrap": paired,
         "paired_ablation": paired_ablation,
         "retrain_decision": retrain,
+        "m1_fusion": m1,
         "confusion": confusion,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
@@ -1001,6 +1207,8 @@ def build_report(
             lines += [_row_md(v, b, c) for b, c in by_b.items()]
         if exp == ABLATION:
             lines += _paired_ablation_md(paired_ablation, cfg.eval.min_effect)
+        if exp == M1:
+            lines += _m1_md(m1, cfg.eval.min_effect)
     lines += [
         "",
         f"## AE vs baselines (paired bootstrap, budget {PAIRED_BUDGET:g}, real_t001 events)",

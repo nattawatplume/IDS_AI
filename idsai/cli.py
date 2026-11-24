@@ -74,6 +74,7 @@ EXPERIMENT_NAMES = (
     "baselines",
     "ref_supervised",
     "retrain_drift",
+    "m1_fusion",
 )
 LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1", "[::1]")
 WILDCARD_BINDS = ("0.0.0.0", "::", "[::]")

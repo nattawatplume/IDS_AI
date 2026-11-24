@@ -283,3 +283,75 @@ def test_other_experiments_run(world):
             det = {r["variant"]: r["deterministic"] for r in recs}
             assert det["real_t001:rules"] and not det["real_t001:all"]
             assert not det["semisyn:rules"]
+
+
+def test_m1_fusion_fits_and_scores_once_and_refuses_per_variant(world, monkeypatch):
+    """m1_fusion: detectors are fit once and every (symbol-day, scenario) is scored once per
+    seed; the five variants only re-fuse those scores."""
+    from idsai.ai.autoencoder import AutoencoderDetector
+    from idsai.eval import experiments as ex
+
+    cfg, app, research, tmp = world
+    fits, scores, loads = [], [], []
+    real_fit, real_score, real_load = (
+        AutoencoderDetector.fit,
+        AutoencoderDetector.score,
+        ex._Ctx.load,
+    )
+
+    def fit(self, normal):
+        fits.append(normal.height)
+        return real_fit(self, normal)
+
+    def score(self, windows):
+        scores.append(windows.height)
+        return real_score(self, windows)
+
+    def load(self, items, detectors, **kw):
+        items = list(items)
+        if detectors:
+            loads.extend((sd, None if sc is None else sc.family) for sd, sc in items)
+        return real_load(self, items, detectors, **kw)
+
+    monkeypatch.setattr(AutoencoderDetector, "fit", fit)
+    monkeypatch.setattr(AutoencoderDetector, "score", score)
+    monkeypatch.setattr(ex._Ctx, "load", load)
+    recs = run_experiment("m1_fusion", cfg, app, seed=0, research=research)
+
+    variants = set(ex.m1_variants(cfg))
+    assert variants == {"all", "no_ai", "ai_mondrian", "ai_shift1", "ai_shift2"}
+    assert {r["variant"] for r in recs} == {f"{s}:{v}" for s in ex.M1_SPLITS for v in variants}
+    assert len(fits) == 1  # one AE fit per seed
+    assert len(loads) == len(set(loads))  # no symbol-day (or injected day) scored twice
+    assert len(scores) <= len(loads)  # at most one AE score call per loaded day
+    sp = ex._Ctx(cfg, app, 0).split
+    n_days = len(sp.cal_normal) + len(sp.accept_events) + len(sp.accept_normal)
+    n_days += len(sp.test_events) + len(sp.test_normal) + len(sp.test_hard_negative)
+    assert len(loads) == n_days + len(ex.FAMILIES) * len(sp.test_normal)
+
+    by = {(r["variant"], r["budget"]): r for r in recs}
+    for r in recs:
+        assert RECORD_KEYS <= set(r)
+        assert r["experiment"] == "m1_fusion"
+        assert r["provenance"] == ("SEMI-SYN" if r["variant"].startswith("semisyn:") else "REAL")
+        assert r["regime_feature"] == "jump_1800"
+        v = r["variant"].split(":", 1)[1]
+        assert r["ai_fusion"] == ex.m1_variants(cfg)[v].as_dict()
+        if r["budget"] == 10.0:
+            assert r["error"] is None, (r["variant"], r["error"])
+            assert math.isfinite(r["metrics"]["fa_per_symbol_day"])
+    acc = by[("accept:all", 10.0)]
+    k = ex.m1_hard_k(cfg, len(sp.accept_normal))
+    assert len(acc["accept_hard_days"]) == acc["metrics"]["n_hard_days"] == k
+    assert set(acc["per_event"]) == {"L2"} and set(by[("test:all", 10.0)]["per_event"]) == {"L3"}
+    # the same fitted models in every variant
+    assert len({json.dumps(r["model_versions"], sort_keys=True) for r in recs}) == 1
+    # semisyn parts share their days: the multiplicity travels with the counts
+    semi = by[("semisyn:all", 10.0)]["fa_by_day"]
+    assert set(semi["normal_mult"].values()) == {len(ex.FAMILIES)}
+
+    md, js = tmp / "m1.md", tmp / "m1.json"
+    data = build_report(research, md, js, cfg=cfg)
+    text = md.read_text(encoding="utf-8")
+    assert "### m1_fusion" in text and "accuracy" not in text.lower()
+    assert data["m1_fusion"] is None  # the smoke budgets (0.1, 10) have no budget-2 records

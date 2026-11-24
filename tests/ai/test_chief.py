@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from idsai.ai.chief import CalibrationError, Chief, ChiefStream
+from idsai.ai.chief import AiFusion, CalibrationError, Chief, ChiefStream
 from idsai.config import ChiefCfg
 from idsai.contracts.alert import Alert
 from idsai.contracts.detector import Detector, Evidence
@@ -742,3 +742,220 @@ def test_peak_technique_equals_technique_when_the_peak_row_classifies():
     sc = frame("A", [0], stat_a=[-1.0], rule_501=[1.5])
     batch, _ = _both_paths(ch, sc)
     assert batch.technique_id == batch.peak_technique_id == "MM-T005"
+
+
+# ---------------------------------------------------------------- AI fusion modes (M1)
+
+REGIME = "jump_1800"
+MODES = {
+    "fuse": AiFusion(),
+    "exclude": AiFusion("exclude"),
+    "mondrian": AiFusion("mondrian", regime_feature=REGIME),
+    "shift": AiFusion("shift", 1.0),
+}
+
+
+def ai_chief(ai: AiFusion, *dets: Detector) -> Chief:
+    dets = dets or (Stub("stat.a", "stat"), Stub("ai.c", "ai"))
+    return Chief(list(dets), CFG, config_hash="cfg123", model_versions=VERSIONS, ai=ai)
+
+
+def test_ai_fusion_validation():
+    assert AiFusion() == AiFusion("fuse", 0.0, None)
+    for bad in (
+        dict(mode="nope"),
+        dict(mode="shift", shift=-1.0),
+        dict(mode="shift", shift=math.inf),
+        dict(mode="fuse", shift=1.0),
+        dict(mode="mondrian"),
+        dict(mode="exclude", regime_feature=REGIME),
+    ):
+        with pytest.raises(ValueError):
+            AiFusion(**bad)
+    with pytest.raises(ValueError, match="exclude"):
+        ai_chief(AiFusion("exclude"), Stub("ai.c", "ai"))  # nothing left to fuse
+
+
+def test_explicit_fuse_mode_equals_the_default_chief():
+    cal = iid(seed=0, n_sym=5, n_days=2)
+    a, b = ai_chief(AiFusion()), chief(Stub("stat.a", "stat"), Stub("ai.c", "ai"))
+    a.calibrate(cal)
+    b.calibrate(cal)
+    sc = iid(seed=1, n_sym=5, n_days=2)
+    assert a.fuse(sc).equals(b.fuse(sc))
+    assert a.fit_threshold(a.fuse(cal), 2.0) == b.fit_threshold(b.fuse(cal), 2.0)
+    assert a.n_cal == b.n_cal
+
+
+def test_exclude_drops_the_ai_layer_from_F_agreement_and_best():
+    ch = ai_chief(AiFusion("exclude"))
+    ch.calibrate(cal_with("stat.a", range(1000), extra={"ai.c": range(1000)}))
+    sc = frame("A", [0, 10], stat_a=[995.0, -1.0], ai_c=[5000.0, 5000.0])
+    out = ch.fuse(sc)
+    assert out["F"].to_list() == pytest.approx([-math.log10(6 / 1001), 0.0])
+    assert out["best_detector"].to_list() == ["stat.a", "stat.a"]
+    assert out["agreement"].to_list() == [1, 0]  # the AE (p = 1/1001) does not count
+    assert out["p__ai.c"].to_list() == pytest.approx([1 / 1001] * 2)  # still computed
+    (alert,) = ch.episodes(out, tau=1.0)
+    assert {d.name for d in alert.detectors} == {"stat.a", "ai.c"}  # listed, not fused
+    # the default mode fuses the AE: F = log10(1001) on both rows
+    fuse = ai_chief(AiFusion())
+    fuse.calibrate(cal_with("stat.a", range(1000), extra={"ai.c": range(1000)}))
+    assert fuse.fuse(sc)["F"].to_list() == pytest.approx([math.log10(1001)] * 2)
+
+
+def test_exclude_resolution_guard_counts_only_the_fused_detectors():
+    ch = ai_chief(AiFusion("exclude"))
+    ch.calibrate(cal_with("stat.a", range(100), extra={"ai.c": [1.0, 2.0] + [NAN] * 98}))
+    assert ch.n_cal == 100  # the 2-row AE does not limit the resolution of F
+
+
+def mondrian_cal() -> pl.DataFrame:
+    """Regime 0 / 1 / 2 (300 rows each); AE scores 0..299 shifted by 1000 * regime."""
+    r = np.repeat([0.0, 1.0, 2.0], 300)
+    ae = np.tile(np.arange(300.0), 3) + 1000.0 * r
+    n = r.size
+    return pl.DataFrame(
+        {
+            "symbol": ["CALUSDT"] * n,
+            "t_end_us": [T0_US + 10 * i * S_US for i in range(n)],
+            "score__stat.a": np.arange(float(n)),
+            "score__ai.c": ae,
+            REGIME: r,
+        }
+    )
+
+
+def test_mondrian_p_uses_only_same_bin_cal_scores():
+    ch = ai_chief(MODES["mondrian"])
+    cal = mondrian_cal()
+    ch.calibrate(cal)
+    assert ch.n_cal == 300  # the smallest bin
+    # AE score 1150: in regime 1 it beats 150 of 300 bin scores, pooled 450 of 900
+    sc = frame("A", [0, 10, 20, 30, 40], stat_a=[-1.0] * 5, ai_c=[1150.0] * 5)
+    sc = sc.with_columns(pl.Series(REGIME, [1.0, 0.0, 2.0, NAN, 7.0]))
+    p = ch.fuse(sc)["p__ai.c"].to_list()
+    pooled = (1 + int((cal["score__ai.c"] >= 1150.0).sum())) / 901
+    assert p[0] == pytest.approx((1 + 150) / 301)  # own bin: 1150..1299 are >= 1150
+    assert p[1] == pytest.approx(1 / 301)  # above every regime-0 score
+    assert p[2] == pytest.approx(1.0)  # below every regime-2 score: 301 / 301
+    assert p[3] == pytest.approx(pooled)  # NaN regime: pooled cal scores
+    assert p[4] == p[2]  # above the top edge: last bin
+    below = frame("A", [0], stat_a=[-1.0], ai_c=[1150.0]).with_columns(pl.Series(REGIME, [-5.0]))
+    assert ch.fuse(below)["p__ai.c"][0] == p[1]  # below the bottom edge: first bin
+    # rules and stats are unchanged by the regime
+    assert ch.fuse(sc)["p__stat.a"].to_list() == pytest.approx([1.0] * 5)
+    with pytest.raises(KeyError, match=REGIME):
+        ch.fuse(sc.drop(REGIME))
+
+
+def test_mondrian_empty_bin_falls_back_to_pooled():
+    ch = ai_chief(MODES["mondrian"])
+    cal = mondrian_cal().with_columns(pl.lit(5.0).alias(REGIME))  # one regime value: edges 5, 5
+    ch.calibrate(cal)
+    sc = frame("A", [0, 10], stat_a=[-1.0] * 2, ai_c=[1150.0] * 2)
+    out = ch.fuse(sc.with_columns(pl.Series(REGIME, [1.0, 9.0])))
+    pooled = ch.pvalues("ai.c", np.array([1150.0]))[0]
+    assert out["p__ai.c"].to_list() == pytest.approx([pooled, pooled])  # bin 0 empty; bin 2 = all
+
+
+def test_shift_F_formula_and_agreement():
+    ch = ai_chief(AiFusion("shift", 1.0))
+    ch.calibrate(cal_with("stat.a", range(1000), extra={"ai.c": range(1000)}))
+    sc = frame("A", [0, 1000, 2000, 3000], stat_a=[-1.0] * 4, ai_c=[5000.0, 995.0, 950.0, 499.5])
+    out = ch.fuse(sc)
+    p = out["p__ai.c"].to_numpy()  # the raw anomaly p-value is kept
+    assert p.tolist() == pytest.approx([1 / 1001, 6 / 1001, 51 / 1001, 501 / 1001])
+    ai_part = np.maximum(-np.log10(p) - 1.0, 0.0)
+    stat_part = 0.0  # stat.a at -1.0 is below every cal score: p = 1
+    np.testing.assert_allclose(out["F"].to_numpy(), np.maximum(ai_part, stat_part))
+    # agreement: the AE counts only when p < agreement_p * 10^-1 = 0.001
+    assert out["agreement"].to_list() == [1, 0, 0, 0]
+    two = ai_chief(AiFusion("shift", 2.0))
+    two.calibrate(cal_with("stat.a", range(1000), extra={"ai.c": range(1000)}))
+    assert two.fuse(sc)["F"][0] == pytest.approx(math.log10(1001) - 2.0)
+
+
+def _mixed_world(seed: int = 7):
+    dets = [
+        rule(101, "MM-T001.001", feature="fa"),
+        CusumDetector(),
+        Stub("ai.c", "ai", requires=("fa", "fb")),
+        Stub("baseline.d", "baseline"),
+    ]
+    rng = np.random.default_rng(seed)
+    n_sym, per_sym, stride = 3, 2000, 10
+    syms = np.tile([f"S{i}USDT" for i in range(n_sym)], per_sym)
+    t = np.repeat(T0_US + np.arange(per_sym, dtype=np.int64) * stride * S_US, n_sym)
+    n = syms.size
+    rule_s = np.where(rng.random(n) < 0.01, rng.random(n), -rng.random(n))
+    regime = rng.random(n)
+    regime[rng.random(n) < 0.02] = NAN
+    sc = pl.DataFrame(
+        {
+            "symbol": syms,
+            "t_end_us": t,
+            "score__rule.101": rule_s,
+            "score__stat.cusum": np.where(rng.random(n) < 0.02, NAN, rng.standard_normal(n)),
+            "score__ai.c": rng.standard_normal(n) + 2 * regime,
+            "score__baseline.d": rng.standard_normal(n),
+            "fa": rng.standard_normal(n),
+            "fb": rng.standard_normal(n),
+            "cusum_ret": rng.standard_normal(n),
+            "cusum_imb": rng.standard_normal(n),
+            REGIME: regime,
+        }
+    )
+    return dets, sc
+
+
+@pytest.mark.parametrize("mode", list(MODES))
+def test_stream_matches_batch_in_every_ai_mode(mode):
+    dets, sc = _mixed_world()
+    ch = ai_chief(MODES[mode], *dets)
+    ch.calibrate(sc)
+    fused = ch.fuse(sc)
+    ch.fit_threshold(fused, 15.0)
+    batch = ch.episodes(fused)
+    assert len(batch) > 10
+    st = ChiefStream(ch, provenance="replay")
+    emitted = [a for r in sc.to_dicts() for a in st.step(r)] + st.flush()
+    closed = [a for a in emitted if a.status == "closed"]
+    assert sorted(a.model_dump_json() for a in closed) == sorted(a.model_dump_json() for a in batch)
+    # F of a row is bit-identical alone and in the batch
+    alone = [float(ch.fuse(sc[i : i + 1])["F"][0]) for i in range(0, sc.height, 97)]
+    assert alone == fused["F"].to_list()[::97]
+
+
+@pytest.mark.parametrize("mode", list(MODES))
+def test_state_round_trip_in_every_ai_mode(mode):
+    dets, sc = _mixed_world(seed=3)
+    ch = ai_chief(MODES[mode], *dets)
+    ch.calibrate(sc)
+    ch.fit_threshold(ch.fuse(sc), 15.0)
+    state = pickle.loads(pickle.dumps(ch.state_dict()))
+    assert state["version"] == 2 and state["ai"] == MODES[mode].as_dict()
+    assert bool(state["mondrian"]) == (mode == "mondrian")
+    ch2 = ai_chief(MODES[mode], *dets)
+    ch2.load_state_dict(state)
+    assert (ch2.tau, ch2.n_cal) == (ch.tau, ch.n_cal)
+    assert ch2.fuse(sc).equals(ch.fuse(sc))
+    other = next(m for k, m in MODES.items() if k != mode)
+    with pytest.raises(ValueError, match="ai fusion"):
+        ai_chief(other, *dets).load_state_dict(state)
+
+
+def test_version_1_state_still_loads_as_fuse():
+    dets, sc = _mixed_world(seed=4)
+    ch = ai_chief(AiFusion(), *dets)
+    ch.calibrate(sc)
+    ch.fit_threshold(ch.fuse(sc), 15.0)
+    old = {k: v for k, v in ch.state_dict().items() if k not in ("ai", "mondrian")}
+    old["version"] = 1  # the keys STATE_VERSION 1 wrote
+    ch2 = chief(*dets)
+    ch2.load_state_dict(old)
+    assert ch2.fuse(sc).equals(ch.fuse(sc)) and ch2.tau == ch.tau
+    with pytest.raises(ValueError, match="ai fusion"):
+        ai_chief(AiFusion("exclude"), *dets).load_state_dict(old)
+    with pytest.raises(ValueError, match="version"):
+        chief(*dets).load_state_dict({**old, "version": 99})

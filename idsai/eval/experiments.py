@@ -20,6 +20,18 @@ set's events are only the labels whose `t_start` falls on one of its event days:
 through the near-midnight extension or an overlap belongs to another period, or was dropped from
 the split (`missing_day`), and is not counted here.
 
+`m1_fusion` (M1: false alarms the AE adds on volatile days) fits and scores the detectors once
+per seed, then re-fuses the same scores under every `m1_variants` AI fusion mode (`AiFusion`),
+each with its own calibration and `tau`. Records are `accept:<v>` (the accept split; hard
+negatives are the `m1_hard_k` most volatile accept-normal days, picked like the test hard
+negatives and computed here, so `Split` and its sha are unchanged), `test:<v>` (REAL) and
+`semisyn:<v>` (the injected test-normal days, scored once and shared like the ablation). Rows
+keep the regime feature (`m1_regime_feature`) for the Mondrian variant.
+
+`fa_by_day` holds per-day unmatched-episode counts; when several parts load the same symbol-day
+(the SEMI-SYN families of one variant) it also holds `normal_mult`, how many parts loaded each
+day (missing keys and older records: 1), so the report's FA CI is the ratio `sum n / sum m`.
+
 `retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
 its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
 detector set can name a technique at all (a rule or `stat.cusum`), so recall_correct of
@@ -43,7 +55,7 @@ import numpy as np
 import polars as pl
 from sklearn.ensemble import RandomForestClassifier
 
-from idsai.ai.chief import CUSUM_NAME, CalibrationError, Chief
+from idsai.ai.chief import CUSUM_NAME, AiFusion, CalibrationError, Chief
 from idsai.ai.learning import training_mask
 from idsai.config import REPO_ROOT, Settings, config_hash, file_sha
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
@@ -73,6 +85,7 @@ from idsai.eval.splits import (
     day_start_us,
     drift_ranges,
     make_split,
+    realized_vol_1m,
     split_def,
 )
 from idsai.pipeline.batch import load_day_windows, score_windows
@@ -106,6 +119,32 @@ SCENARIO_TAIL_S = 600
 SUPERVISED_NOTE = "supervised reference (uses labels)"
 SATURATION_WARNING = r"alert budget .* is at or above the peak episode rate"
 REAL, SEMI = "REAL", "SEMI-SYN"
+M1 = "m1_fusion"
+M1_SPLITS = ("accept", "test", "semisyn")
+
+
+def m1_regime_feature(cfg: Settings) -> str:
+    """Regime variable of the Mondrian variant: `jump_<longest window>` (e.g. `jump_1800`).
+
+    The registry has no return-dispersion feature; `jump` (highest price of the window against
+    the close before it, minus 1) is an upward price range over the window, not an absolute
+    volatility measure ("ช่วงราคาขาขึ้นในหน้าต่าง 1800 วินาที (jump_1800)"). It is used raw (a
+    `z_` column is re-centred on each symbol's own 24 h). Causal: past bars only. Caveat: pump
+    rows have a high jump by construction, so Mondrian bins may lower AE recall on pumps; the
+    selection's recall gate against V0 handles that.
+    """
+    return f"jump_{max(cfg.features.windows_s)}"
+
+
+def m1_variants(cfg: Settings) -> dict[str, AiFusion]:
+    """V0 `all`, V1 `no_ai`, V2 `ai_mondrian`, V3 `ai_shift1` / `ai_shift2`."""
+    return {
+        "all": AiFusion(),
+        "no_ai": AiFusion("exclude"),
+        "ai_mondrian": AiFusion("mondrian", regime_feature=m1_regime_feature(cfg)),
+        "ai_shift1": AiFusion("shift", 1.0),
+        "ai_shift2": AiFusion("shift", 2.0),
+    }
 
 
 class _VariantError(Exception):
@@ -300,8 +339,12 @@ class _Ctx:
         detectors: list[Detector],
         keep_features: bool = False,
         row_filter: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
+        keep: tuple[str, ...] = (),
     ) -> _Part:
-        """Load, (inject,) score and concatenate symbol-days in `(symbol, day)` order."""
+        """Load, (inject,) score and concatenate symbol-days in `(symbol, day)` order.
+
+        Without `keep_features` only `symbol`, `t_end_us`, the `keep` columns and the scores stay.
+        """
         frames, labels, days = [], [], []
         skipped: Counter = Counter()
         schema: dict[str, Any] | None = None
@@ -324,7 +367,7 @@ class _Ctx:
                 w = row_filter(w)
             w = score_windows(w, detectors)
             if not keep_features:
-                w = w.select("symbol", "t_end_us", *_score_cols(w))
+                w = w.select("symbol", "t_end_us", *keep, *_score_cols(w))
             schema = schema or dict(w.schema)
             frames.append(w)
             lab = r.labels if sc is not None else r.labels.filter(pl.col("provenance") == REAL)
@@ -332,6 +375,7 @@ class _Ctx:
             days.append(sd)
         if schema is None:
             schema = {"symbol": pl.String, "t_end_us": pl.Int64}
+            schema.update({c: pl.Float64 for c in keep})
             schema.update({f"score__{d.name}": pl.Float64 for d in detectors})
         lab = pl.concat(labels) if labels else empty(LABELS)
         lab = lab.unique(subset=["label_id"], keep="first", maintain_order=True)
@@ -406,7 +450,7 @@ class _Ctx:
                     return None
         return sc
 
-    def semisyn_parts(self, detectors: list[Detector]) -> list[_Part]:
+    def semisyn_parts(self, detectors: list[Detector], **kw: Any) -> list[_Part]:
         """One injected part per family over `test_normal` (FA counted on every day)."""
         assert_injection_allowed(self.cfg.mode)  # Red-Team injection: replay only
         ranges = load_scenario_ranges()
@@ -419,15 +463,15 @@ class _Ctx:
                     n_tick += 1
                 else:
                     items.append((sd, sc))
-            part = self.load(items, detectors)
+            part = self.load(items, detectors, **kw)
             part.skipped_tick = n_tick
             parts.append(part)
         return parts
 
     def real_parts(
-        self, events: list[SymDay], normal: list[SymDay], detectors: list[Detector]
+        self, events: list[SymDay], normal: list[SymDay], detectors: list[Detector], **kw: Any
     ) -> _Part:
-        part = self.clean([*events, *normal], detectors)
+        part = self.clean([*events, *normal], detectors, **kw)
         loaded = set(part.days)
         part.fa_days = [sd for sd in normal if sd in loaded]
         part.labels = _labels_on_days(part.labels, events)
@@ -523,12 +567,14 @@ def _evaluate(
     before_s: int,
     after_s: int,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, int]]]:
-    """`(metrics, per_event, fa_by_day)`; `fa_by_day` = `{"normal": {...}, "hard": {...}}`."""
+    """`(metrics, per_event, fa_by_day)`; `fa_by_day` = `{"normal": {...}, "hard": {...}}`,
+    plus `"normal_mult"` (parts per day) when a day is loaded by more than one part."""
     det_any: dict[str, bool] = {}
     det_ok: dict[str, bool] = {}
     ttd: dict[str, float] = {}
     techs: dict[str, list[str]] = {}
     fa_normal: dict[str, int] = {}
+    fa_mult: dict[str, int] = {}  # parts that loaded each normal day
     n_alerts = n_matched = n_events = 0
     fa_unmatched, fa_days = 0, 0
     Fs, ys = [], []
@@ -559,6 +605,7 @@ def _evaluate(
             )
         for k, v in day_counts.items():
             fa_normal[k] = fa_normal.get(k, 0) + v
+            fa_mult[k] = fa_mult.get(k, 0) + 1
         y = window_positive(
             fused["symbol"].to_numpy(), fused["t_end_us"].to_numpy(), part.labels, before_s, after_s
         )
@@ -580,6 +627,8 @@ def _evaluate(
     metrics["n_alerts_matched"] = n_matched
     metrics["n_fa_days"] = fa_days
     fa_by_day: dict[str, dict[str, int]] = {"normal": dict(sorted(fa_normal.items())), "hard": {}}
+    if any(m != 1 for m in fa_mult.values()):  # several parts per day (SEMI-SYN families)
+        fa_by_day["normal_mult"] = dict(sorted(fa_mult.items()))
     if hard is not None:
         h_fused, h_part = hard
         h_alerts = _episodes(chief, h_fused, tau)
@@ -644,8 +693,9 @@ def _variant(
     parts: list[_Part],
     hard: _Part | None,
     extra: dict[str, Any],
+    ai: AiFusion | None = None,
 ) -> list[dict[str, Any]]:
-    """Calibrate one Chief on `cal`, then one record per budget."""
+    """Calibrate one Chief on `cal` (with the AI fusion mode `ai`), then one record per budget."""
     cfg = ctx.cfg
     names = [d.name for d in detectors]
     skips = _skips(cal=cal, eval=parts, hard=hard, **extra.pop("_skips", {}))
@@ -657,8 +707,10 @@ def _variant(
         "n_skipped": skips,
         **extra,
     }
-    chief = Chief(detectors, cfg.chief, ctx.config_hash, model_versions)
+    chief = Chief(detectors, cfg.chief, ctx.config_hash, model_versions, ai=ai)
     cols = ["symbol", "t_end_us", *[f"score__{n}" for n in names]]
+    if ai is not None and ai.regime_feature is not None:
+        cols.append(ai.regime_feature)
     chief.calibrate(cal.frame.select(cols))
     cal_fused = chief.fuse(cal.frame.select(cols))
     fused_parts = [chief.fuse(p.frame.select(cols)) for p in parts]
@@ -908,6 +960,80 @@ def _exp_retrain_drift(ctx: _Ctx) -> list[dict]:
     return out
 
 
+def m1_hard_k(cfg: Settings, n_normal: int) -> int:
+    """Accept hard negatives: `hard_negative_k`, at most a third of the accept-normal days."""
+    return min(cfg.eval.hard_negative_k, n_normal // 3)
+
+
+def _most_volatile(ctx: _Ctx, days: list[SymDay], k: int) -> list[SymDay]:
+    """The `k` days of `days` with the highest `realized_vol_1m`, ties by `(symbol, day)` order
+    (the rule `make_split` uses for the test hard negatives); sorted by `(symbol, day)`."""
+    days = sorted(days)
+    vols = [
+        realized_vol_1m(
+            ctx.store.read_trades(s.symbol, day_start_us(s.day), day_start_us(s.day) + DAY_US)
+        )
+        for s in days
+    ]
+    order = sorted(range(len(days)), key=lambda i: (-vols[i], days[i]))
+    pick = set(order[:k])
+    return [s for i, s in enumerate(days) if i in pick]
+
+
+def _subpart(part: _Part, days: list[SymDay]) -> _Part:
+    """The rows of `part` on `days` (no re-scoring); `days` limited to those `part` loaded."""
+    loaded = set(part.days)
+    keep = [sd for sd in days if sd in loaded]
+    return _Part(_normal_rows(part.frame, keep), _labels_on_days(part.labels, keep), keep)
+
+
+def _exp_m1_fusion(ctx: _Ctx) -> list[dict]:
+    sp, cfg = ctx.split, ctx.cfg
+    variants = m1_variants(cfg)
+    regime = m1_regime_feature(cfg)
+    groups = ctx.build(cfg.detectors)
+    dets = _flatten(groups, groups)
+    mv, info, err = _fit_groups(ctx, groups, sp.train_normal)
+    if err is not None:
+        return [
+            r
+            for v, ai in variants.items()
+            for split in M1_SPLITS
+            for r in _error_records(
+                ctx,
+                M1,
+                f"{split}:{v}",
+                SEMI if split == "semisyn" else REAL,
+                err,
+                dets,
+                ai_fusion=ai.as_dict(),
+            )
+        ]
+    keep = (regime,)
+    # every set is scored once; the variants only re-fuse these scores
+    cal = ctx.clean(sp.cal_normal, dets, keep=keep)
+    acc = ctx.real_parts(sp.accept_events, sp.accept_normal, dets, keep=keep)
+    hard_days = _most_volatile(ctx, sp.accept_normal, m1_hard_k(cfg, len(sp.accept_normal)))
+    acc_hard = _subpart(acc, hard_days)
+    test = ctx.real_parts(sp.test_events, sp.test_normal, dets, keep=keep)
+    test_hard = ctx.clean(sp.test_hard_negative, dets, keep=keep)
+    semi = ctx.semisyn_parts(dets, keep=keep)
+    hard_keys = [_day_key(sd.symbol, sd.day) for sd in acc_hard.days]
+    out = []
+    for v, ai in variants.items():
+        base = {**info, "ai_fusion": ai.as_dict(), "regime_feature": regime}
+        sets = (
+            ("accept", REAL, [acc], acc_hard, {"accept_hard_days": hard_keys}),
+            ("test", REAL, [test], test_hard, {}),
+            ("semisyn", SEMI, semi, None, {"n_skipped_tick": sum(p.skipped_tick for p in semi)}),
+        )
+        for split, prov, parts, hard, more in sets:
+            out += _variant(
+                ctx, M1, f"{split}:{v}", prov, dets, mv, cal, parts, hard, {**base, **more}, ai=ai
+            )
+    return out
+
+
 _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "real_t001": _exp_real_t001,
     "semisyn": _exp_semisyn,
@@ -915,9 +1041,10 @@ _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "baselines": _exp_baselines,
     "ref_supervised": _exp_ref_supervised,
     "retrain_drift": _exp_retrain_drift,
+    M1: _exp_m1_fusion,
 }
 EXPERIMENTS = tuple(_RUNNERS)
-INJECTING = ("semisyn", "ablation")  # experiments that run Red-Team injection
+INJECTING = ("semisyn", "ablation", M1)  # experiments that run Red-Team injection
 
 
 def run_experiment(
