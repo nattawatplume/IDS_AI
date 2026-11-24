@@ -252,7 +252,8 @@ class StreamPipeline:
         if row is None:
             return
         frame = round_f32(pl.DataFrame([row], schema=self._schema), self.cfg.features)
-        scored = score_windows(frame, self.detectors)
+        # the Chief's M3 naming rules are scored too (none unless `chief.attr_rules`)
+        scored = score_windows(frame, [*self.detectors, *self.chief.naming])
         alerts = self._stream.step(scored.to_dicts()[0])
         self.latency_ms.append((time.monotonic() - received) * 1000.0)
 

@@ -11,7 +11,8 @@ from pydantic import BaseModel, field_validator
 
 MAX_EVIDENCE = 5
 
-Layer = Literal["rule", "stat", "ai", "baseline"]
+# "attr" (M3): naming-only signatures; never fused into F, p, agreement or tau
+Layer = Literal["rule", "stat", "ai", "baseline", "attr"]
 Track = Literal["T", "B"]
 
 

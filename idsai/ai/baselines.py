@@ -1,9 +1,21 @@
 """Non-AI-layer baselines (IsolationForest, PCA, random) for the baselines experiment.
 
-Baselines run alone and never take part in fusion. Rows with any NaN feature score NaN (NaN-only
-masking, as in rules/stats: ±inf is an extreme value, its standardized value is clipped to
-±`Z_CAP` so it scores finite and high). `fit` uses only fully finite rows, since mean/std and
-the sklearn models cannot be fit on inf.
+Baselines run alone and never take part in fusion. The one exception is
+`AiIsolationForestDetector` (M2): the same IsolationForest as `baseline.iforest`, named
+`ai.iforest` on the `ai` layer so the Chief fuses it like the autoencoder (its raw score goes
+through the same split-conformal p-value path; the Chief is score-agnostic).
+
+IsolationForest scoring goes through `ForestScorer`, a NumPy re-implementation of sklearn's
+`score_samples` over the fitted trees (all trees at once, row chunks), because sklearn's per-call
+overhead is ~24 ms for one row (the live stream scores one row at a time). It reproduces sklearn
+step for step (float32 input, `x <= threshold` with NaN to `missing_go_to_left`, per-leaf
+`depth + c(n_leaf) - 1`, summed over trees in estimator order, `2 ** (-depth / (T * c(psi)))`),
+so its scores equal `-model.score_samples` bit for bit; a test pins that. The derived arrays are
+rebuilt from the model at fit and load and never stored, so the state (and its sha) is unchanged.
+
+Rows with any NaN feature score NaN (NaN-only masking, as in rules/stats: ±inf is an extreme
+value, its standardized value is clipped to ±`Z_CAP` so it scores finite and high). `fit` uses
+only fully finite rows, since mean/std and the sklearn models cannot be fit on inf.
 """
 
 import hashlib
@@ -13,6 +25,7 @@ import numpy as np
 import polars as pl
 from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
+from sklearn.ensemble._iforest import _average_path_length
 
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
 
@@ -79,20 +92,84 @@ class _FeatureModel(Detector):
         )
 
 
+class ForestScorer:
+    """`-IsolationForest.score_samples(x)` (higher = more anomalous) for a fitted forest, in NumPy.
+
+    Built once from the model: per tree (padded to the largest tree) the children, the split
+    column in the full input (the estimator's feature subset already applied), the threshold,
+    the NaN direction and the per-leaf `depth + c(n_leaf) - 1` sklearn adds up.
+    """
+
+    CHUNK_ROWS = 2048  # bounds the (rows, trees) temporaries to a few MB
+
+    def __init__(self, model: IsolationForest):
+        trees = [e.tree_ for e in model.estimators_]
+        n_trees, width = len(trees), max(t.node_count for t in trees)
+        subsample = model._max_features != model.n_features_in_  # as sklearn decides it
+        self.left = np.zeros((n_trees, width), dtype=np.int64)
+        self.right = np.zeros((n_trees, width), dtype=np.int64)
+        self.column = np.zeros((n_trees, width), dtype=np.int64)
+        self.threshold = np.zeros((n_trees, width), dtype=np.float64)
+        self.nan_left = np.zeros((n_trees, width), dtype=bool)
+        self.leaf_value = np.zeros((n_trees, width), dtype=np.float64)
+        for i, (t, feats) in enumerate(zip(trees, model.estimators_features_, strict=True)):
+            n = t.node_count
+            leaf = t.children_left == -1
+            nodes = np.arange(n)
+            # a leaf points to itself, so extra steps leave it where it is
+            self.left[i, :n] = np.where(leaf, nodes, t.children_left)
+            self.right[i, :n] = np.where(leaf, nodes, t.children_right)
+            f = np.where(leaf, 0, t.feature)
+            self.column[i, :n] = np.asarray(feats)[f] if subsample else f
+            self.threshold[i, :n] = t.threshold
+            self.nan_left[i, :n] = np.asarray(t.missing_go_to_left, dtype=bool)
+            # sklearn: depths += decision_path_lengths[leaf] + avg_path_length[leaf] - 1.0
+            self.leaf_value[i, :n] = (
+                model._decision_path_lengths[i] + model._average_path_length_per_tree[i] - 1.0
+            )
+        self.steps = max(t.max_depth for t in trees)
+        self.denominator = float(n_trees * _average_path_length([model._max_samples])[0])
+        self._trees = np.arange(n_trees)
+
+    def score(self, x: np.ndarray) -> np.ndarray:
+        x32 = np.asarray(x, dtype=np.float32)  # sklearn validates to float32
+        out = np.empty(x32.shape[0], dtype=np.float64)
+        for lo in range(0, x32.shape[0], self.CHUNK_ROWS):
+            out[lo : lo + self.CHUNK_ROWS] = self._score(x32[lo : lo + self.CHUNK_ROWS])
+        return out
+
+    def _score(self, x: np.ndarray) -> np.ndarray:
+        rows = np.arange(x.shape[0])[:, None]
+        trees = self._trees[None, :]
+        node = np.zeros((x.shape[0], self._trees.size), dtype=np.int64)
+        for _ in range(self.steps):
+            v = x[rows, self.column[trees, node]].astype(np.float64)
+            go_left = (v <= self.threshold[trees, node]) | (
+                np.isnan(v) & self.nan_left[trees, node]
+            )
+            node = np.where(go_left, self.left[trees, node], self.right[trees, node])
+        # cumsum adds tree by tree from 0, in estimator order, like sklearn's `depths +=`
+        depths = np.cumsum(self.leaf_value[trees, node], axis=1)[:, -1]
+        if self.denominator == 0:  # one training sample: sklearn sets depth / denominator to 1
+            return 2 ** (-np.ones_like(depths))
+        return 2 ** (-np.divide(depths, self.denominator))
+
+
 class IsolationForestDetector(_FeatureModel):
     name = "baseline.iforest"
 
     def __init__(self, features: list[str], seed: int = 0):
         super().__init__(features, seed)
         self._model: IsolationForest | None = None
+        self._scorer: ForestScorer | None = None
 
     def _fit_std(self, z: np.ndarray) -> None:
         model = IsolationForest(n_estimators=N_ESTIMATORS, random_state=self.seed)
         model.fit(z)
-        self._model = model
+        self._model, self._scorer = model, ForestScorer(model)
 
     def _score_std(self, z: np.ndarray) -> np.ndarray:
-        return -self._model.score_samples(z)
+        return self._scorer.score(z)
 
     def state_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +184,14 @@ class IsolationForestDetector(_FeatureModel):
         self.requires = list(d["features"])
         self.seed = d["seed"]
         self._mu, self._sd, self._model = d["mu"], d["sd"], d["model"]
+        self._scorer = None if self._model is None else ForestScorer(self._model)
+
+
+class AiIsolationForestDetector(IsolationForestDetector):
+    """`baseline.iforest` as an AI-layer detector (M2): identical model and raw scores."""
+
+    name = "ai.iforest"
+    layer = "ai"
 
 
 class PCADetector(_FeatureModel):

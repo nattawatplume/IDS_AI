@@ -6,6 +6,11 @@ config hashes or the signatures sha breaks this test.
 
 The float-derived digests (windows, scores, Chief state, alerts) depend on the platform's libm/BLAS,
 so they are pinned for Windows only (Linux CI digests were not stable across branches).
+
+`configs/default.yaml` has since moved to the live AI layer (`ai.iforest`, `chief.ai_mode: shift`),
+turned `features.sell_side` and the M3 naming rules (`chief.attr_rules`) on; `PRE_LIVE_AI` puts the
+old values back, so the digests (default config hash included) also prove that `ChiefCfg.ai_*` and
+`chief.attr_rules` at their defaults leave the dump byte-identical.
 """
 
 import hashlib
@@ -37,6 +42,12 @@ OLD_BARS = [
     "symbol", "t_us", "n_trades", "buy_quote", "sell_quote", "quote_vol", "open", "high",
     "low", "close", "rush_orders", "max_trade_quote", "pingpong", "n_round",
 ]  # fmt: skip
+
+PRE_LIVE_AI = {
+    "detectors": ["rules", "stat.robust_z", "stat.cusum", "ai.autoencoder_trade"],
+    "chief": {"ai_mode": "fuse", "ai_shift": 0.0, "attr_rules": False},
+    "features": {"sell_side": False},  # default.yaml turns it on since the live sell-side change
+}
 
 GOLDEN = {
     "model_features": "6b99d52943321bce",
@@ -101,7 +112,7 @@ def _trades() -> pl.DataFrame:
 
 
 def _digests() -> dict[str, str]:
-    cfg = load_settings()
+    cfg = load_settings(overrides=PRE_LIVE_AI)
     fcfg = cfg.features
     out = {"model_features": _sha(json.dumps(model_features(fcfg)).encode())}
     trades = _trades()

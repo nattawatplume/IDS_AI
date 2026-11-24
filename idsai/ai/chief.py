@@ -43,6 +43,26 @@ AI fusion mode (`AiFusion`, M1; the default `"fuse"` is the fusion above, unchan
   `agreement` only when `p < agreement_p * 10**-shift`.
 Every mode reads `-log10 p` from lookup tables built at calibration (per bin, already shifted),
 so batch/stream parity holds in each.
+
+Naming-only rules (M3, `naming`, from `chief.attr_rules`): signature detectors of layer `"attr"`
+that the Chief holds apart from `detectors`. They get no calibration, no p-value and no column in
+`fuse`, and never enter `F`, `best_detector`, `agreement`, `tau` or the state, so the rows over
+`tau` and every alert's id, window, `fused_p`, detectors, agreement and evidence are identical with
+or without them. They are read from their `score__<name>` columns (`score_detectors` lists what a
+caller must score) only for an episode whose attribution above is still `MM-T000`: over every row
+of that symbol from the episode's first to its last exceedance (rows with `F < tau` in between
+included), the first naming rule in list order that fires on any of those rows names the episode
+(`technique_id` its parent technique, `signature_id`, `rev`, and `technique_source =
+"naming_rule"`); `peak_technique_id` and `phase` stay the detection's. The stream keeps, per open
+episode, the naming rules that fired from its first to its last exceedance plus those that fired
+after the last one (pending: they count only if a later exceedance extends the episode), so the
+closed alert equals the batch one; a name that arrives emits `updated`.
+
+Several AI detectors (M2, e.g. the autoencoder and `ai.iforest`): every `ai`-layer detector gets
+its own conformal p-value; `"fuse"` and `"shift"` put each of them in `F` (the shift applies to
+each), `"exclude"` drops them all, `"mondrian"` bins each on its own cal scores, and the `ai`
+layer still counts once in `agreement` (any of its detectors below its threshold). The state
+layout is unchanged (one entry per detector name), so `STATE_VERSION` stays 2.
 """
 
 import math
@@ -53,7 +73,7 @@ from typing import Any, Literal
 import numpy as np
 import polars as pl
 
-from idsai.config import ChiefCfg
+from idsai.config import AiMode, ChiefCfg, check_ai_fusion
 from idsai.contracts.alert import Alert, DetectorRef, phase_of
 from idsai.contracts.detector import Detector, feature_matrix
 
@@ -66,10 +86,10 @@ DEDUP_BUCKET_US = 300_000_000
 STATE_VERSION = 2
 LOADABLE_STATE_VERSIONS = (1, 2)  # version 1: before AiFusion, always mode "fuse"
 REGIME_BINS = 3
-AI_MODES = ("fuse", "exclude", "mondrian", "shift")
+NAMING_LAYER = "attr"
+NAMING_SOURCE = "naming_rule"
 
 Provenance = Literal["live", "replay", "sim"]
-AiMode = Literal["fuse", "exclude", "mondrian", "shift"]
 
 
 class CalibrationError(ValueError):
@@ -120,14 +140,12 @@ class AiFusion:
     regime_feature: str | None = None
 
     def __post_init__(self) -> None:
-        if self.mode not in AI_MODES:
-            raise ValueError(f"unknown ai mode {self.mode!r}; valid: {AI_MODES}")
-        if not (math.isfinite(self.shift) and self.shift >= 0):
-            raise ValueError(f"ai shift must be finite and >= 0, got {self.shift}")
-        if self.mode != "shift" and self.shift != 0:
-            raise ValueError(f"ai shift {self.shift} needs mode 'shift', got {self.mode!r}")
-        if (self.mode == "mondrian") != (self.regime_feature is not None):
-            raise ValueError("ai mode 'mondrian' needs a regime_feature (and only it takes one)")
+        check_ai_fusion(self.mode, self.shift, self.regime_feature)
+
+    @classmethod
+    def from_cfg(cls, cfg: ChiefCfg) -> "AiFusion":
+        """The fusion a production Chief runs (`chief.ai_mode`, `ai_shift`, `ai_regime_feature`)."""
+        return cls(cfg.ai_mode, float(cfg.ai_shift), cfg.ai_regime_feature)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -203,11 +221,13 @@ class _Attribution:
     # M4: signature of the episode's latest row that a rule classified (drives `Alert.phase`,
     # so a pump episode that turns into a dump reports "sell"); not part of `label`
     last_sig: int | None = None
+    # M3: NAMING_SOURCE when a naming-only rule supplied technique / signature_id / rev
+    source: str | None = None
 
     @property
-    def label(self) -> tuple[str, int | None, int | None]:
+    def label(self) -> tuple[str, int | None, int | None, str | None]:
         """What an alert shows of this attribution."""
-        return self.technique, self.signature_id, self.rev
+        return self.technique, self.signature_id, self.rev, self.source
 
     def merge(self, later: "_Attribution") -> "_Attribution":
         """Attribution after a later row: highest-`F` classified row, earliest on ties; `last_sig`
@@ -230,13 +250,20 @@ class Chief:
         config_hash: str,
         model_versions: dict[str, str],
         ai: AiFusion | None = None,
+        naming: list[Detector] | None = None,
     ):
         if not detectors:
             raise ValueError("Chief needs at least one detector")
+        naming = list(naming or [])
+        bad = [d.name for d in naming if d.layer != NAMING_LAYER]
+        if bad:
+            raise ValueError(f"naming rules must have layer {NAMING_LAYER!r}: {bad}")
         names = [d.name for d in detectors]
-        if len(set(names)) != len(names):
-            raise ValueError(f"duplicate detector names: {names}")
+        every = names + [d.name for d in naming]
+        if len(set(every)) != len(every):
+            raise ValueError(f"duplicate detector names: {every}")
         self.detectors = list(detectors)
+        self.naming = naming  # M3 naming-only rules in priority order (module docstring)
         self.cfg = cfg
         self.config_hash = config_hash
         self.model_versions = dict(model_versions)
@@ -289,8 +316,26 @@ class Chief:
     # ------------------------------------------------------------ calibration
 
     @property
+    def ai_agreement_p(self) -> float:
+        """The p-value an `ai`-layer detector must beat to count for `agreement` (shifted under
+        `"shift"`); 0.0 under `"exclude"`, where the ai layer never counts."""
+        return 0.0 if self.ai.mode == "exclude" else self._agree_ai_p
+
+    @property
+    def agreement_layers(self) -> int:
+        """How many fusion layers can count for `agreement` (layers with detectors, minus the
+        ai layer under `"exclude"`)."""
+        return sum(1 for cols in self._agree.values() if cols)
+
+    @property
     def fused_detectors(self) -> list[Detector]:
         return [self.detectors[j] for j in self._fused]
+
+    @property
+    def score_detectors(self) -> list[Detector]:
+        """Every detector whose `score__<name>` column this Chief reads: `detectors`, then the
+        naming rules (M3)."""
+        return [*self.detectors, *self.naming]
 
     def calibrate(self, cal: pl.DataFrame) -> None:
         """Store sorted finite `score__<name>` values per detector (rules: fired or not).
@@ -500,6 +545,34 @@ class Chief:
         starts = np.flatnonzero(new)
         return pos, starts, np.append(starts[1:], pos.size)
 
+    def _naming_hits(self, frame: pl.DataFrame) -> np.ndarray:
+        """`(rows, len(naming))` bool: which naming rule fires on each row (NaN never fires)."""
+        cols = [score_column(d.name) for d in self.naming]
+        missing = [c for c in cols if c not in frame.columns]
+        if missing:
+            raise KeyError(f"frame lacks naming-rule score columns {missing}")
+        return self._hits_of(feature_matrix(frame, cols))
+
+    def _hits_of(self, scores: np.ndarray) -> np.ndarray:
+        out = np.zeros(scores.shape, dtype=bool)
+        for k, d in enumerate(self.naming):
+            s = scores[:, k]
+            out[:, k] = np.asarray(d.fired(s), dtype=bool) & ~np.isnan(s)
+        return out
+
+    def _named(self, attribution: _Attribution, hits: np.ndarray | None) -> _Attribution:
+        """`attribution`, or for an MM-T000 one the first naming rule among `hits` (M3)."""
+        if hits is None or attribution.technique != UNCLASSIFIED or not hits.any():
+            return attribution
+        d = self.naming[int(np.argmax(hits))]  # first True = highest priority
+        return replace(
+            attribution,
+            technique=_parent_technique(d.technique_ids[0]),
+            signature_id=d.signature_id,
+            rev=d.rev,
+            source=NAMING_SOURCE,
+        )
+
     def _attribution(self, fu: _Fusion, i: int) -> _Attribution:
         """The technique row `i` of `fu` names on its own."""
         rule_j = int(fu.rule[i])
@@ -565,6 +638,7 @@ class Chief:
             model_versions=dict(self.model_versions),
             provenance=provenance,
             phase=self._sig_phase.get(attribution.last_sig),
+            technique_source=attribution.source,
         )
 
     def episodes(
@@ -584,6 +658,9 @@ class Chief:
             return []
         ex = fused[order[pos].tolist()]
         fu = self._fuse_matrix(self._score_matrix(ex), self._regime(ex))
+        # M3: naming-rule hits of every row in the sorted order; an episode spans the rows
+        # seg[0] .. seg[-1] of one symbol
+        hits = self._naming_hits(fused)[order] if self.naming else None
         out = []
         for a, b in zip(starts, ends, strict=True):
             seg = pos[a:b]
@@ -591,6 +668,8 @@ class Chief:
             attribution = self._attribution(fu, int(a))
             for i in range(int(a) + 1, int(b)):
                 attribution = attribution.merge(self._attribution(fu, i))
+            if hits is not None:
+                attribution = self._named(attribution, hits[seg[0] : seg[-1] + 1].any(axis=0))
             row = fused[int(order[pos[peak]])].to_dicts()[0]
             ep = _Episode(row["symbol"], int(t[seg[0]]), int(t[seg[-1]]))
             out.append(self._alert(ep, fu, peak, row, attribution, "closed", provenance))
@@ -751,6 +830,10 @@ class _Open:
     peak: _Fusion
     peak_row: dict[str, Any]
     attribution: _Attribution
+    # M3 naming rules that fired from the first to the last exceedance (None without naming),
+    # and those that fired after the last one (count only if a later exceedance extends it)
+    named: np.ndarray | None = None
+    pending: np.ndarray | None = None
 
 
 class ChiefStream:
@@ -775,9 +858,8 @@ class ChiefStream:
         self._last_t: dict[str, int] = {}
 
     def _emit(self, o: _Open, status: Literal["open", "updated", "closed"]) -> Alert:
-        return self.chief._alert(
-            o.episode, o.peak, 0, o.peak_row, o.attribution, status, self.provenance
-        )
+        shown = self.chief._named(o.attribution, o.named)
+        return self.chief._alert(o.episode, o.peak, 0, o.peak_row, shown, status, self.provenance)
 
     def step(self, row: dict[str, Any]) -> list[Alert]:
         ch = self.chief
@@ -809,24 +891,37 @@ class ChiefStream:
             regime = np.array([math.nan if v is None else v], dtype=np.float64)
         fu = ch._fuse_matrix(scores, regime)
         F = float(fu.F[0])
-        if not (F >= tau and F > 0):
+        exceeds = F >= tau and F > 0
+        hits = None
+        if ch.naming and (exceeds or o is not None):
+            names = [score_column(d.name) for d in ch.naming]
+            vals = [[math.nan if row[c] is None else row[c] for c in names]]
+            hits = ch._hits_of(np.array(vals, dtype=np.float64))[0]
+        if not exceeds:
+            if o is not None and o.pending is not None and hits is not None:
+                o.pending |= hits
             return out
         attribution = ch._attribution(fu, 0)
         if o is None:
             o = _Open(_Episode(symbol, t, t), F, fu, dict(row), attribution)
+            if hits is not None:
+                o.named, o.pending = hits.copy(), np.zeros_like(hits)
             self._open[symbol] = o
             out.append(self._emit(o, "open"))
             return out
         o.episode.last_us = t
-        before = o.attribution.label
+        before = ch._named(o.attribution, o.named).label
         phase_before = ch._sig_phase.get(o.attribution.last_sig)
+        if o.named is not None and o.pending is not None and hits is not None:
+            o.named |= o.pending | hits
+            o.pending[:] = False
         o.attribution = o.attribution.merge(attribution)
         rose = F > o.peak_F
         if rose:
             o.peak_F, o.peak, o.peak_row = F, fu, dict(row)
         # a phase change (M4, only with sell rules) is news too; `_sig_phase` is empty otherwise
         phased = ch._sig_phase.get(o.attribution.last_sig) != phase_before
-        if rose or o.attribution.label != before or phased:
+        if rose or ch._named(o.attribution, o.named).label != before or phased:
             out.append(self._emit(o, "updated"))
         return out
 

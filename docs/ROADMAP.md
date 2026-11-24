@@ -184,9 +184,26 @@
   - ลองใช้ iforest เป็นชั้น AI แทน หรือใช้ร่วมกับ AE
 - **เป้า:** AE ไม่แพ้ iforest อย่างมีนัย (paired bootstrap)
 
+**ผล M2 (22 พ.ย. 2026, `m2_ai`, 5 seed, budget 2)**
+- ลอง 16 แบบ: ae / ae_wide / ae_narrow / iforest / ae+iforest × fuse / shift1 / shift2 + no_ai
+- **กฎเลือกบน accept เลือก iforest:shift1** (recall +0.051 มีนัย, FA hard เท่ากับ no_ai)
+- **test:** recall_any 0.785 เทียบ no_ai 0.745 (+0.040 [0.018, 0.068] มีนัย), FA hard 5.55 เท่าเดิม, FA 1.660 เทียบ 1.516
+- AE เดี่ยวยังแพ้ iforest เดี่ยว −0.158 อย่างมีนัย กริด AE เล็ก ๆ ไม่ช่วย → เป้า "AE ไม่แพ้ iforest" ยังไม่ผ่าน แต่ใช้ iforest เป็นชั้น AI แทนได้
+- ยังไม่ได้เปลี่ยนชั้น AI ของ live (รอตัดสินใจ: no_ai หรือ iforest:shift1)
+
 **M3 ระบุเทคนิคให้แม่นขึ้น**
 - **ปัญหา:** recall_correct ต่ำกว่า recall_any มาก (0.399 เทียบกับ 0.739) และ wash_pingpong ระบุเทคนิคถูกแค่ 0.001
 - **สิ่งที่จะทำ:** ใช้ per_event จาก M0 ดูว่าระบบระบุผิดเป็นเทคนิคอะไร แล้วปรับกฎและ signature ใน `configs/signatures.yaml`
+
+**ผล M3 (24 พ.ย. 2026, `m3_attr`, 5 seed, budget 2)**
+- ลอง 4 แบบ: base, attr (กฎระบุเทคนิค `configs/signatures_attr.yaml` ใช้ตั้งชื่อ episode ที่เป็น MM-T000 เท่านั้น ไม่เข้า F/p/τ), wash2 (กฎ wash 100501 rev 2 ที่เข้า F), attr+wash2
+- **กฎเลือกบน accept เลือก attr** (recall_correct 0.349 → 0.777, +0.428 [0.330, 0.532]; FA และ recall_any เท่าเดิมโดยโครงสร้าง)
+- **test (ดูอย่างเดียว ไม่ได้ใช้เลือก):** recall_correct 0.453 → 0.779 (+0.326 [0.260, 0.390] มีนัย), recall_any 0.785, FA 1.660, FA hard 5.55 เท่าเดิม; pump จริงที่ระบุไม่ได้ (MM-T000) 0.327 → 0.001 → **ผ่าน** (recall_correct เพิ่มอย่างมีนัยโดย FA และ recall_any ไม่เปลี่ยน)
+- **SEMI-SYN (ดูอย่างเดียว):** recall_correct 0.357 → 0.537; wash ระบุถูก 0.001 → 0.494; pump ไม่ถูกเรียกเป็น wash เลย; pump_stealth ยังระบุไม่ได้ (ไม่ได้ใส่กฎ stealth โดยตั้งใจ)
+- **ต้นทุน:** สัดส่วน FA ที่มีชื่อเทคนิคบน test 0.504 → 0.540 หน้าเว็บและ Telegram บอกว่าชื่อมาจากกฎระบุเทคนิค
+- **wash2 ไม่ถูกเลือก:** บน SEMI-SYN ตรวจ wash ได้ 1.000 (เดิม 0.553) โดย FA test +0.8 % แต่ตัวจำลอง wash เป็นของเราเอง ผลจึงวนกลับบางส่วน ต้องมีป้าย wash จริงหรือการตรวจอิสระก่อน ยังไม่เปิดใน live
+- **เปิด `chief.attr_rules: true` ใน `configs/default.yaml` แล้ว** คู่กับ `features.sell_side: true` จาก M4 (config_hash ของ default 9aff5e3482f2 ชุดโมเดล live ต้องฝึกใหม่เพราะ config_hash เปลี่ยน) รายละเอียดใน `docs/REPORT.md` หัวข้อ 12
+- งานต่อ: เกณฑ์กฎ 100101, เพดานคะแนน cusum เทียบ `attribution_min`, wash2 กับการตรวจอิสระ, การระบุ pump แบบ stealth
 
 **M4 จับขาลง (dump และ sell-side)**
 - **ปัญหา:** feature ตอนนี้ดูฝั่งซื้อเป็นหลัก (buy_imb, rush ฝั่ง taker-buy) จึงมองไม่เห็นช่วงเทขาย
@@ -201,8 +218,8 @@
 
 **ผล M4 (21 พ.ย. 2026, `m4_sell`, 5 seed, budget 2)**
 - ระบุช่วงเทขายของ pump จริงได้ถูก 0.544 (เดิม 0) โดย recall ช่วงพุ่งและ FA ไม่แย่ลง
-- **ยังไม่ผ่าน:** bear raid (SEMI-SYN) recall 0.17 และระบุถูก 0.006 ต้องดูว่าการฉีดแรงขายอ่อนเกินไป หรือเกณฑ์ `z_sell_rush_60` / `ret_60` เข้มเกิน (ปรับได้จากข้อมูล train เท่านั้น)
-- ยังไม่เปิด `features.sell_side` ใน live
+- รอบแรก bear raid (SEMI-SYN) recall 0.17 ระบุถูก 0.006 → ลดเกณฑ์ `z_quote_vol_60` 3 → 2 จากข้อมูล train (02ad915) **รันใหม่ 22 พ.ย.: recall 0.544, ระบุถูก 0.465** โดย recall ช่วงพุ่งไม่ลด, FA 1.556 เทียบ 1.650 → M4 ผ่าน
+- **เปิด `features.sell_side: true` ใน `configs/default.yaml` แล้ว** (feat/live-ai, 3af3c13) ค่าตั้ง live ตอนนี้เปิดทั้ง `features.sell_side` และ `chief.attr_rules` (M3)
 
 ## ลำดับที่แนะนำ
 
@@ -211,7 +228,7 @@
 3. **M4:** จับขาลง
 4. **1.1 Telegram + 1.3 การ์ดใหม่:** เปลี่ยนภาพจาก "จอให้ดู" เป็น "ยามที่เฝ้าตลาด"
 5. **2.2 เช็กก่อนซื้อ + 2.1 ประวัติเหรียญ**
-6. **M3 และเฟส 3**
+6. **M3 (ผ่านแล้ว เปิดกฎระบุเทคนิคใน live) และเฟส 3**
 
 ## ความเสี่ยง
 

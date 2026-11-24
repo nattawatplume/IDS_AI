@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from idsai.ai.auditor import NO_DATA_TH, Auditor, Check, HealthReport
+from idsai.ai.chief import FUSION_LAYERS
 from idsai.bus import Bus
 from idsai.config import Settings
 from idsai.data.replay import Replayer
@@ -86,11 +87,26 @@ def _no_data(name: str, what: str) -> Check:
     return Check(name=name, status="warn", value=None, detail_th=f"{NO_DATA_TH}: {what}")
 
 
+def _agreement(state: AppState) -> tuple[float, int]:
+    """`(agreement_p_ai, agreement_layers)` of the running Chief, else from the config."""
+    chief = getattr(state.pipeline, "chief", None)
+    p, layers = getattr(chief, "ai_agreement_p", None), getattr(chief, "agreement_layers", None)
+    if p is not None and layers is not None:
+        return float(p), int(layers)
+    c = state.cfg.chief
+    if c.ai_mode == "exclude":
+        return 0.0, len(FUSION_LAYERS) - 1
+    return c.agreement_p * 10.0 ** (-c.ai_shift), len(FUSION_LAYERS)  # ai_shift 0 unless shift
+
+
 def health(state: AppState) -> dict[str, Any]:
     """Auditor checks over what the app really has; a check without data is `warn`, never `ok`.
 
     For the dashboard's top bar it also carries `event_us` (the replayer's cursor; None without
-    one, where the bars carry the clock) and `budget_per_symbol_day`.
+    one, where the bars carry the clock) and `budget_per_symbol_day`; for the alert detail the
+    `agreement` thresholds: `agreement_p` (rule and stat layers), `agreement_p_ai` (the `ai`
+    layer: lower under `chief.ai_mode: shift`, 0.0 under `exclude`) and `agreement_layers` (how
+    many layers can agree), from the running Chief, else from the config.
     """
     pipe = state.pipeline
     inputs: dict[str, dict[str, Any]] = {}
@@ -106,6 +122,7 @@ def health(state: AppState) -> dict[str, Any]:
     else:
         missing.append(_no_data("warmup", "ยังไม่มี baseline"))
     report = state.auditor.report(**inputs)
+    agree_ai, agree_layers = _agreement(state)
     full = HealthReport(checks=[*report.checks, *missing], ts_us=report.ts_us)
     return clean(
         {
@@ -116,6 +133,9 @@ def health(state: AppState) -> dict[str, Any]:
             "late_trades": None if pipe is None else pipe.late_trades(),
             "dropped": {} if state.bus is None else dict(state.bus.dropped),
             "event_us": None if state.replayer is None else state.replayer.cursor_us,
+            "agreement_p": state.cfg.chief.agreement_p,
+            "agreement_p_ai": agree_ai,
+            "agreement_layers": agree_layers,
             "budget_per_symbol_day": (
                 state.cfg.chief.budget_per_symbol_day
                 if state.budget_per_symbol_day is None

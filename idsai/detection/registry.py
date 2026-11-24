@@ -9,12 +9,18 @@ and `idsai.ai.autoencoder` never has to import this module.
 
 from collections.abc import Callable
 
-from idsai.ai.baselines import IsolationForestDetector, PCADetector, RandomDetector
+from idsai.ai.baselines import (
+    AiIsolationForestDetector,
+    IsolationForestDetector,
+    PCADetector,
+    RandomDetector,
+)
 from idsai.config import Settings
 from idsai.contracts.detector import Detector
 from idsai.detection.features.registry import model_features
 from idsai.detection.rules import (
     KK_SID,
+    NAMING_SIGNATURES_PATH,
     SELL_SIGNATURES_PATH,
     SignatureDetector,
     load_signatures,
@@ -64,6 +70,18 @@ def sell_rule_detectors() -> list[Detector]:
     ]
 
 
+def naming_detectors(cfg: Settings) -> list[Detector]:
+    """M3 naming-only rules in priority order (`signatures_attr.yaml`), only with
+    `chief.attr_rules`; empty otherwise. They go to `Chief(naming=...)`, never into F."""
+    if not cfg.chief.attr_rules:
+        return []
+    sigs = load_signatures(NAMING_SIGNATURES_PATH)
+    bad = [s.sid for s in sigs if s.layer != "attr"]
+    if bad:
+        raise ValueError(f"naming signatures must have layer 'attr': {bad}")
+    return [SignatureDetector(s) for s in sigs]
+
+
 def _rules(cfg: Settings, seed: int) -> list[Detector]:
     return [SignatureDetector(s) for s in rule_signatures(cfg)]
 
@@ -81,6 +99,10 @@ def _iforest(cfg: Settings, seed: int) -> Detector:
     return IsolationForestDetector(model_features(cfg.features), seed)
 
 
+def _ai_iforest(cfg: Settings, seed: int) -> Detector:
+    return AiIsolationForestDetector(model_features(cfg.features), seed)
+
+
 def _pca(cfg: Settings, seed: int) -> Detector:
     return PCADetector(model_features(cfg.features))
 
@@ -96,6 +118,7 @@ register("baseline.kk", _kk)
 register("stat.robust_z", _robust_z)
 register("stat.cusum", lambda cfg, seed: CusumDetector())
 register("baseline.iforest", _iforest)
+register("ai.iforest", _ai_iforest)
 register("baseline.pca", _pca)
 register("baseline.random", lambda cfg, seed: RandomDetector(seed))
 register("ai.autoencoder_trade", _autoencoder)
