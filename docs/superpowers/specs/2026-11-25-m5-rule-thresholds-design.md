@@ -60,3 +60,30 @@ Raise recall_any (REAL and SEMI-SYN) at budget 2 with FA and FA-hard at most +2 
 - `attribution_min` and the cusum cap: dropped (naming is saturated).
 - wash rev 2: needs independent validation.
 - stealth naming.
+
+## Real run / deviations
+
+### Train-only threshold check (2026-11-25, before any eval)
+Data: train range 2018-01-01..2019-06-30 only, feature cache read only (rule columns are the same with and without `sell_side`); test, accept and `data/research.duckdb` untouched. Script: scratchpad `m5/m5_train_fire.py`.
+- Train-normal rows: 3,075,840 rows on 356 train-range symbol-days at least `min_gap_days` (2) from every label of the symbol. "Fire episodes" = runs of firing rows split by gaps > 300 s.
+- Train REAL pumps: 183 of 188 train labels (Sapienza + Hu) with cached rows, rows in [t_start − 120 s, t_start + 300 s].
+
+| rule, threshold | rows fired | row fire rate | fire episodes / symbol-day | train REAL pumps fired |
+|---|---|---|---|---|
+| 100101 z_quote_vol_60 ≥ 6 (rev 1) | 0 | 0 | 0 | 0/183 |
+| 100101 ≥ 3 | 58 | 1.89e-5 | 0.034 | 105/183 |
+| 100101 ≥ 2.5 | 202 | 6.57e-5 | 0.149 | 122/183 |
+| 100102 cusum_imb ≥ 8 (rev 1) | 5,862 | 1.91e-3 | 0.848 | 42/183 |
+| 100102 ≥ 6 | 7,013 | 2.28e-3 | 0.963 | 59/183 |
+| 100102 ≥ 5 | 7,670 | 2.49e-3 | 1.048 | 72/183 |
+
+### Frozen choices
+- **100101 rev 2: z_quote_vol_60 ≥ 3** (`configs/signatures_r2.yaml`, variant `r101`), plus the alternative **2.5** (`configs/signatures_r2_alt.yaml`, eval only, variant `r101_25`). Both are far below the 1e-3 row-rate preference.
+- **100102 rev 2: cusum_imb ≥ 6** (variant `r102`; with 100101 at 3: `r101+r102`). Deviation: no 100102 candidate meets the ≤ 1e-3 preference, because rev 1 itself already fires on 1.91e-3 of train-normal rows. 6 adds fewer rows (+1,151, +3.7e-4) than 5 (+1,808); 5 is not evaluated.
+- Tie order for the selection: base < r101 < r101_25 < r102 < r101+r102.
+
+### Implementation notes
+- Flag: `chief.rule_rev2: list[int]` (e.g. `[100101, 100102]`). Each listed sid's rev 2 replaces its rev 1 under the same detector name `rule.<sid>`. Empty (default) is absent from dumps: default hash 9aff5e3482f2 and `eval_prev_live.yaml` 53e3b662ab96 unchanged, golden digests unchanged. A non-empty flag changes `config_hash`, so bundles must be retrained.
+- `m5_rules` base = today's live stack: `features.sell_side` on (sell rules 100104/100601 in F), naming rules on in every variant, `ai.iforest` shift 1, all rules at rev 1. The eval config keeps its `config_hash`.
+- One `ai.iforest` fit per seed and one scoring pass per set (the three candidates are extra rule columns). Variants only re-fuse, with their own calibration and τ (5 variants × 3 splits = 15 Chief fits per seed).
+- Expected run cost: like `m3_attr` per seed. The first seed also computes the sell-side feature cache for the accept days (456 symbol-days not yet cached under that feature hash; train-normal, cal and test already are). Seeds 1–4 reuse it.
