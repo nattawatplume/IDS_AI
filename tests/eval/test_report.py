@@ -1328,3 +1328,55 @@ def test_m3_select_nothing_significant_or_no_base():
     assert m3_select([_m3_row("attr", gain=0.3, sig=True)])["chosen"] is None
     sel = m3_select([M3_BASE, _m3_row("attr", error="boom")])
     assert sel["chosen"] == "base" and "attr" in sel["excluded"]
+
+
+# ---------------------------------------------------------------- M5 selection
+def _m5_row(variant, fa=2.0, fa_hard=5.0, gain=None, sig=False, **kw):
+    return {"variant": variant, "fa": fa, "fa_hard": fa_hard, "gain_any": gain,
+            "gain_any_significant": sig, **kw}  # fmt: skip
+
+
+M5_BASE = _m5_row("base")
+
+
+def test_m5_select_largest_significant_recall_any_gain_wins():
+    from idsai.eval.report import m5_select
+
+    rows = [
+        M5_BASE,
+        _m5_row("r101", gain=0.05, sig=True),
+        _m5_row("r101_25", gain=0.08, sig=True),
+        _m5_row("r102", gain=0.03, sig=True),
+        _m5_row("r101+r102", gain=0.20, sig=False),  # largest, but not significant
+    ]
+    sel = m5_select(rows)
+    assert sel["chosen"] == "r101_25" and sel["top"] == "r101+r102"
+    assert sel["eligible"] == ["base", "r101", "r101_25", "r102", "r101+r102"]
+
+
+def test_m5_select_fa_and_fa_hard_caps_and_ties_to_the_simpler():
+    from idsai.eval.report import m5_select
+
+    rows = [
+        M5_BASE,
+        _m5_row("r101", gain=0.05, sig=True),
+        _m5_row("r101_25", fa=2.05, gain=0.30, sig=True),  # FA 2.05 > 1.02 x 2.0
+        _m5_row("r102", fa_hard=5.11, gain=0.30, sig=True),  # FA-hard > 1.02 x 5.0
+        _m5_row("r101+r102", fa=2.04, fa_hard=5.1, gain=0.05, sig=True),  # at the cap: eligible
+    ]
+    sel = m5_select(rows)
+    assert sel["chosen"] == "r101"  # tie with r101+r102 goes to the simpler
+    assert set(sel["excluded"]) == {"r101_25", "r102"}
+    assert "FA-hard" in sel["excluded"]["r102"] and "FA " in sel["excluded"]["r101_25"]
+    # the recall_correct fields M3 selects on play no part
+    rows[1] = {**rows[1], "gain_correct": 0.9, "gain_correct_significant": True, "below_ref": True}
+    assert m5_select(rows)["chosen"] == "r101"
+
+
+def test_m5_select_nothing_significant_or_no_base():
+    from idsai.eval.report import m5_select
+
+    assert m5_select([M5_BASE, _m5_row("r101", gain=0.3)])["chosen"] == "base"
+    assert m5_select([_m5_row("r101", gain=0.3, sig=True)])["chosen"] is None
+    sel = m5_select([M5_BASE, _m5_row("r102", error="boom"), _m5_row("r101", gain=0.1, sig=True)])
+    assert sel["chosen"] == "r101" and "r102" in sel["excluded"]
