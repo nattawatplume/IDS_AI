@@ -67,6 +67,20 @@ differences `sell - base` of pump-phase, sell-phase and sell-phase-correct recal
 ablation's paired bootstrap (`_ablation_pair`); the sell rules must not lower pump recall.
 Sell-phase CIs use only the events with a sell window (one cluster per REAL event).
 
+M3 (`m3_attr`, budget 2): one table per split (accept, test, semisyn) of `base`, `attr`, `wash2`
+and `attr+wash2`: recall_any and recall_correct with their CI, FA and FA-hard with their CI, the
+share of FA episodes (unmatched normal-day episodes) that carry a technique name and the share named
+by a naming rule (naming a false alarm is a cost), the "every detected episode is MM-T001"
+strawman's recall_correct (on REAL it equals recall_any, so REAL alone cannot tell good naming from
+blanket naming), and the paired differences `X - base` of recall_correct and recall_any. A
+confusion table per variant (family x parent technique) follows for test and semisyn. The variant
+is chosen on accept only, by a rule fixed in advance (`m3_select`): eligible are the variants whose
+accept FA and accept-hard FA are each at most `M3_FA_FACTOR` (1.02) times `base`'s and whose
+recall_any is not significantly below `base` (paired); among them, of the variants whose paired
+recall_correct gain over `base` is significant, the largest gain wins (ties: `base` < `attr` <
+`wash2` < `attr+wash2`); with none, `base`. Wash naming is judged on SEMI-SYN test only (accept
+has REAL pumps only), report-only.
+
 Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
 label family, the share of events whose matched episodes carry each parent technique (or none),
 averaged over seeds; an event with several techniques counts once in each column. Needs
@@ -95,6 +109,7 @@ from idsai.eval.experiments import (
     M2_FUSIONS,
     M2_MODELS,
     M2_REF,
+    M3_VARIANTS,
 )
 from idsai.eval.metrics import (
     MIN_EVENTS,
@@ -347,67 +362,76 @@ def _confusion(runs: list[dict]) -> dict[str, Any]:
             if r["experiment"] == exp
             and (variant is None or r["variant"] == variant)
             and float(r["budget"]) == PAIRED_BUDGET
-            and r.get("metrics") is not None
-            and r.get("per_event")
         ]
-        usable = [r for r in recs if all("techniques" in pe for pe in r["per_event"].values())]
-        block: dict[str, Any] = {"budget": PAIRED_BUDGET, "columns": [], "rows": [], "notes": []}
-        if usable and len(usable) < len(recs):
-            block["notes"].append(f"ไม่นับ {len(recs) - len(usable)} run ที่ไม่มีข้อมูล techniques")
-        # per seed and label family: events, and events per predicted column
-        n: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-        cnt: dict[int, dict[str, dict[str, int]]] = defaultdict(
-            lambda: defaultdict(lambda: defaultdict(int))
-        )
-        cols: set[str] = set()
-        for r in usable:
-            for pe in r["per_event"].values():
-                fam = pe.get("family") or "?"
-                n[r["seed"]][fam] += 1
-                parents = sorted({_parent(t) for t in pe["techniques"]}) or [NONE_COL]
-                for c in parents:
-                    cnt[r["seed"]][fam][c] += 1
-                cols.update(parents)
-        cols.discard(NONE_COL)
-        columns = [*sorted(cols), NONE_COL]
-        for fam in sorted({f for by_fam in n.values() for f in by_fam}):
-            seeds = sorted(s for s in n if n[s].get(fam))
-            block["rows"].append(
-                {
-                    "family": fam,
-                    "n_seeds": len(seeds),
-                    "n_events": max(n[s][fam] for s in seeds),
-                    "share": {
-                        c: float(np.mean([cnt[s][fam].get(c, 0) / n[s][fam] for s in seeds]))
-                        for c in columns
-                    },
-                }
-            )
-        if block["rows"]:
-            block["columns"] = columns
-        out[name] = block
+        out[name] = _confusion_block(recs)
     return out
+
+
+def _confusion_block(recs: list[dict]) -> dict[str, Any]:
+    """One confusion table (family x parent technique, shares averaged over seeds) of `recs`."""
+    recs = [r for r in recs if r.get("metrics") is not None and r.get("per_event")]
+    usable = [r for r in recs if all("techniques" in pe for pe in r["per_event"].values())]
+    block: dict[str, Any] = {"budget": PAIRED_BUDGET, "columns": [], "rows": [], "notes": []}
+    if usable and len(usable) < len(recs):
+        block["notes"].append(f"ไม่นับ {len(recs) - len(usable)} run ที่ไม่มีข้อมูล techniques")
+    # per seed and label family: events, and events per predicted column
+    n: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    cnt: dict[int, dict[str, dict[str, int]]] = defaultdict(
+        lambda: defaultdict(lambda: defaultdict(int))
+    )
+    cols: set[str] = set()
+    for r in usable:
+        for pe in r["per_event"].values():
+            fam = pe.get("family") or "?"
+            n[r["seed"]][fam] += 1
+            parents = sorted({_parent(t) for t in pe["techniques"]}) or [NONE_COL]
+            for c in parents:
+                cnt[r["seed"]][fam][c] += 1
+            cols.update(parents)
+    cols.discard(NONE_COL)
+    columns = [*sorted(cols), NONE_COL]
+    for fam in sorted({f for by_fam in n.values() for f in by_fam}):
+        seeds = sorted(s for s in n if n[s].get(fam))
+        block["rows"].append(
+            {
+                "family": fam,
+                "n_seeds": len(seeds),
+                "n_events": max(n[s][fam] for s in seeds),
+                "share": {
+                    c: float(np.mean([cnt[s][fam].get(c, 0) / n[s][fam] for s in seeds]))
+                    for c in columns
+                },
+            }
+        )
+    if block["rows"]:
+        block["columns"] = columns
+    return block
 
 
 def _confusion_md(conf: dict[str, Any]) -> list[str]:
     lines = ["", f"## confusion: family ของป้ายกำกับ × เทคนิคที่ระบุ (budget {PAIRED_BUDGET:g})"]
     for name, block in conf.items():
-        lines += ["", f"### {name}", ""]
-        if not block["rows"]:
-            lines.append(f"- {NO_TECHNIQUES_TH}")
-            continue
-        cols = block["columns"]
-        lines += [
-            "| family | seeds | events | " + " | ".join(cols) + " |",
-            "|" + "---|" * (3 + len(cols)),
-        ]
-        lines += [
-            f"| {row['family']} | {row['n_seeds']} | {row['n_events']} | "
-            + " | ".join(_fmt(row["share"][c]) for c in cols)
-            + " |"
-            for row in block["rows"]
-        ]
-        lines += ["", f"- {CONFUSION_NOTE_TH}", *[f"- {n}" for n in block["notes"]]]
+        lines += _confusion_block_md(f"### {name}", block)
+    return lines
+
+
+def _confusion_block_md(title: str, block: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    lines += ["", title, ""]
+    if not block["rows"]:
+        return [*lines, f"- {NO_TECHNIQUES_TH}"]
+    cols = block["columns"]
+    lines += [
+        "| family | seeds | events | " + " | ".join(cols) + " |",
+        "|" + "---|" * (3 + len(cols)),
+    ]
+    lines += [
+        f"| {row['family']} | {row['n_seeds']} | {row['n_events']} | "
+        + " | ".join(_fmt(row["share"][c]) for c in cols)
+        + " |"
+        for row in block["rows"]
+    ]
+    lines += ["", f"- {CONFUSION_NOTE_TH}", *[f"- {n}" for n in block["notes"]]]
     return lines
 
 
@@ -1169,6 +1193,313 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
+M3 = "m3_attr"
+M3_REF = "base"
+M3_FA_FACTOR = 1.02
+M3_TOL = 1e-12
+M3_SPLITS = (("accept", "REAL"), ("test", "REAL"), ("semisyn", "SEMI-SYN"))
+M3_CONFUSION_SPLITS = ("test", "semisyn")
+M3_RULE_TH = (
+    "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัวอ้างอิงคือ base (ชุดตรวจจับของระบบจริง: "
+    "กฎ + สถิติ + ai.iforest แบบ shift 1); ตัวแปรที่มีสิทธิ์ต้องมี FA ของ accept และ FA ของวันผันผวนสูง "
+    f"(accept-hard) แต่ละค่า ≤ {M3_FA_FACTOR:.2f} เท่าของ base และ recall_any ไม่ต่ำกว่า base อย่างมีนัย "
+    "(paired bootstrap ข้ามเหตุการณ์) ที่งบ 2; ในกลุ่มนี้ เฉพาะตัวที่ recall_correct เพิ่มจาก base อย่างมีนัย "
+    "(CI ล่างของ (X − base) > 0 และผลต่าง ≥ min_effect) เลือกตัวที่เพิ่มมากที่สุด ถ้าไม่มีเลยเลือก base; "
+    "ถ้าผลเพิ่มเท่ากันเลือกตัวที่ง่ายกว่า: base < attr < wash2 < attr+wash2"
+)
+M3_NOTES_TH = [
+    "ผล test และ semisyn รายงานไว้ดูเท่านั้น ไม่ได้ใช้เลือกตัวแปร; accept มีแต่ pump จริง "
+    "การระบุ wash จึงดูได้จาก SEMI-SYN ของ test เท่านั้น",
+    "attr: กฎระบุเทคนิค (configs/signatures_attr.yaml) ใช้ตั้งชื่อ episode ที่ยังเป็น MM-T000 เท่านั้น "
+    "ไม่เข้า F, p-value, agreement หรือ τ ชุดแถวที่เกิน τ จึงเท่ากับ base ทุกแถว "
+    "(FA และ recall_any เท่ากันโดยโครงสร้าง)",
+    "wash2: กฎ 100501 rev 2 (ตัดเงื่อนไข z_quote_vol_300) แทน rev 1 กฎนี้อยู่ใน F จึงอาจทำให้ FA ขยับ; "
+    "ตัวจำลอง wash เป็นของเราเอง การปรับกฎตามมันจึงวนกลับบางส่วน ตัวกันคือ FA บนข้อมูลจริง",
+    "สัดส่วน FA ที่มีชื่อ = episode ที่ไม่ตรงกับเหตุการณ์ใดในวันปกติ ที่ระบุเทคนิคอื่นที่ไม่ใช่ MM-T000 "
+    "(รวมข้ามทุก seed); การตั้งชื่อให้การแจ้งเตือนผิดพลาดเป็นต้นทุน",
+    "strawman = ตั้งชื่อทุก episode ที่ตรวจพบว่า MM-T001: บน REAL ค่า recall_correct ของมันเท่ากับ recall_any "
+    "ดังนั้น REAL อย่างเดียวแยกการตั้งชื่อที่ดีออกจากการตั้งชื่อแบบเหมารวมไม่ได้ ตาราง confusion ของ SEMI-SYN "
+    "(wash ต้องไม่ถูกเรียก pump และ pump ต้องไม่ถูกเรียก wash) คือการตรวจจริง",
+    "F คือ −log10 ของ anomaly p-value ซึ่งบอกระดับความผิดปกติทางสถิติเทียบตลาดปกติ "
+    "ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา และไม่ใช่ข้อกล่าวหาผู้ใด",
+    "การเปิดกฎระบุเทคนิคในระบบจริง (chief.attr_rules ใน configs/default.yaml) เป็นขั้นตอนแยกหลังดูผลนี้",
+]
+NO_M3_TH = "ยังไม่มีผล m3_attr"
+
+
+def _m3_rank(variant: str) -> tuple[int, str]:
+    order = list(M3_VARIANTS)
+    return (order.index(variant) if variant in order else len(order), variant)
+
+
+def m3_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The M3 selection rule on accept rows (`variant`, `fa`, `fa_hard`, `gain_correct` = paired
+    recall_correct of X minus `base` or None, `gain_correct_significant`, `below_ref` = recall_any
+    significantly below `base`, optional `seeds` and `error`); see the module docstring.
+
+    Returns `chosen` (`base` when nothing wins; None without a usable `base` row), `top`,
+    `eligible` (base included) and `excluded` (Thai reason per variant)."""
+    ref = next((r for r in rows if r["variant"] == M3_REF), None)
+    if ref is None or ref.get("error") or ref["fa"] is None or ref["fa_hard"] is None:
+        return {"chosen": None, "top": None, "eligible": [], "excluded": {}}
+    fa_cap = M3_FA_FACTOR * ref["fa"] + M3_TOL
+    hard_cap = M3_FA_FACTOR * ref["fa_hard"] + M3_TOL
+    excluded: dict[str, str] = {}
+    eligible = []
+    for r in rows:
+        v = r["variant"]
+        if v == M3_REF:
+            continue
+        if r.get("error"):
+            excluded[v] = f"ประเมินไม่ได้ (error: {_error_th(r['error'], 200)})"
+        elif (
+            r.get("seeds") is not None
+            and ref.get("seeds") is not None
+            and list(r["seeds"]) != list(ref["seeds"])
+        ):
+            excluded[v] = f"seed ไม่ครบชุดเดียวกับ base ({list(r['seeds'])} เทียบ {list(ref['seeds'])})"
+        elif r["fa"] is None or r["fa_hard"] is None:
+            excluded[v] = "ไม่มีค่า FA หรือ FA-hard"
+        elif r["fa"] > fa_cap:
+            excluded[v] = f"FA {r['fa']:.3g} เกิน {M3_FA_FACTOR:.2f} เท่าของ base ({ref['fa']:.3g})"
+        elif r["fa_hard"] > hard_cap:
+            excluded[v] = (
+                f"FA-hard {r['fa_hard']:.3g} เกิน {M3_FA_FACTOR:.2f} เท่าของ base "
+                f"({ref['fa_hard']:.3g})"
+            )
+        elif r.get("below_ref"):
+            excluded[v] = "recall_any ต่ำกว่า base อย่างมีนัย"
+        elif r["gain_correct"] is None:
+            excluded[v] = "ไม่มีผลเทียบแบบจับคู่กับ base จึงจัดอันดับผลเพิ่มไม่ได้"
+        else:
+            eligible.append(r)
+    out = {
+        "chosen": M3_REF,
+        "top": None,
+        "eligible": sorted([M3_REF, *(r["variant"] for r in eligible)], key=_m3_rank),
+        "excluded": excluded,
+    }
+
+    def best_of(cands: list[dict[str, Any]]) -> str | None:
+        if not cands:
+            return None
+        best = max(r["gain_correct"] for r in cands)
+        tied = [r for r in cands if r["gain_correct"] >= best - M3_TOL]
+        return min(tied, key=lambda r: _m3_rank(r["variant"]))["variant"]
+
+    out["top"] = best_of(eligible)
+    # the largest gain among the significant ones (spec: "largest significant paired gain")
+    out["chosen"] = best_of([r for r in eligible if r["gain_correct_significant"]]) or M3_REF
+    return out
+
+
+def _strawman(records: list[dict]) -> float | None:
+    """recall_correct if every detected episode were named MM-T001 (cluster ratio over seeds)."""
+    hits = n = 0
+    for r in records:
+        for pe in r["per_event"].values():
+            n += 1
+            hits += bool(pe["detected_any"]) and not str(pe.get("family") or "").startswith("wash")
+    return hits / n if n else None
+
+
+def _fa_named(records: list[dict]) -> tuple[float | None, float | None, int]:
+    """`(share named, share named by a naming rule, n FA episodes)` summed over the records."""
+    keys = ("n_fa_episodes", "n_fa_named", "n_fa_named_by_rule")
+    if not all(k in r["metrics"] for r in records for k in keys):
+        return None, None, 0
+    n = sum(int(r["metrics"]["n_fa_episodes"]) for r in records)
+    named = sum(int(r["metrics"]["n_fa_named"]) for r in records)
+    by_rule = sum(int(r["metrics"]["n_fa_named_by_rule"]) for r in records)
+    return (named / n if n else None), (by_rule / n if n else None), n
+
+
+def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """M3 tables per split, paired recall_correct / recall_any vs `base`, the accept-only
+    selection and the confusion table per variant (budget 2)."""
+    recs, config_note = _latest_config(
+        [r for r in runs if r["experiment"] == M3 and float(r["budget"]) == PAIRED_BUDGET]
+    )
+    if not recs:
+        return None
+    notes = [config_note] if config_note else []
+    splits: dict[str, Any] = {}
+    for split, provenance in M3_SPLITS:
+        arms = _m1_arms(recs, split)
+        failed: dict[str, str] = {}
+        for r in recs:
+            sp, _, v = r["variant"].partition(":")
+            if sp == split and v not in arms and r.get("error"):
+                failed.setdefault(v, r["error"])
+        if not arms and not failed:
+            continue
+        rows = []
+        for v in sorted({*arms, *failed}, key=_m3_rank):
+            row: dict[str, Any] = {
+                "variant": v,
+                "n_seeds": 0,
+                "n_events": None,
+                "seeds": [],
+                "error": failed.get(v),
+                **dict.fromkeys(
+                    (
+                        "recall_any",
+                        "recall_any_ci",
+                        "recall_correct",
+                        "recall_correct_ci",
+                        "fa",
+                        "fa_ci",
+                        "fa_hard",
+                        "fa_hard_ci",
+                        "fa_named",
+                        "fa_named_by_rule",
+                        "strawman",
+                        "vs_ref_correct",
+                        "vs_ref_any",
+                        "gain_correct",
+                        "reason_th",
+                    ),
+                ),  # fmt: skip
+                "n_fa_episodes": 0,
+                "gain_correct_significant": False,
+                "below_ref": False,
+            }
+            if v in failed:
+                rows.append(row)
+                continue
+            records = list(arms[v].values())
+            c = _cell(records, n_boot)
+            m, ci, fa_ci = c["mean"] or {}, c["ci"] or {}, c["fa_ci"] or {}
+            named, by_rule, n_fa = _fa_named(records)
+            row.update(
+                n_seeds=c["n_seeds"],
+                n_events=c["n_events"],
+                seeds=sorted(arms[v]),
+                recall_any=m.get("recall_any"),
+                recall_any_ci=ci.get("recall_any"),
+                recall_correct=m.get("recall_correct"),
+                recall_correct_ci=ci.get("recall_correct"),
+                fa=m.get("fa_per_symbol_day"),
+                fa_ci=fa_ci.get("fa_per_symbol_day"),
+                fa_hard=m.get("fa_per_symbol_day_hard"),
+                fa_hard_ci=fa_ci.get("fa_per_symbol_day_hard"),
+                fa_named=named,
+                fa_named_by_rule=by_rule,
+                n_fa_episodes=n_fa,
+                strawman=_strawman(records),
+            )
+            if v != M3_REF and M3_REF in arms:
+                pc, why = _ablation_pair(
+                    arms[v], arms[M3_REF], n_boot, min_effect, key="detected_correct"
+                )
+                pa, why_a = _ablation_pair(arms[v], arms[M3_REF], n_boot, min_effect)
+                if pc is None:
+                    row["reason_th"] = why
+                else:
+                    row["vs_ref_correct"] = {k: pc[k] for k in ("diff_mean", "ci", "ci_unit")}
+                    row["gain_correct"] = pc["diff_mean"]
+                    row["gain_correct_significant"] = bool(pc["significant"])
+                    row["reason_th"] = pc["reason_th"]
+                if pa is not None:
+                    row["vs_ref_any"] = {k: pa[k] for k in ("diff_mean", "ci", "ci_unit")}
+                    row["below_ref"] = bool(pa["significant_reverse"])
+                elif row["reason_th"] is None:
+                    row["reason_th"] = why_a
+            rows.append(row)
+        splits[split] = {"provenance": provenance, "rows": rows}
+    selection = None
+    if "accept" in splits:
+        if M3_REF not in _m1_arms(recs, "accept"):
+            notes.append("เลือกตัวแปรไม่ได้: ไม่มีผล accept:base ที่งบ 2")
+        else:
+            selection = m3_select(splits["accept"]["rows"])
+    confusion = {
+        split: {
+            v: _confusion_block([r for r in recs if r["variant"] == f"{split}:{v}"])
+            for v in M3_VARIANTS
+            if any(r["variant"] == f"{split}:{v}" for r in recs)
+        }
+        for split in M3_CONFUSION_SPLITS
+    }
+    return {
+        "budget": PAIRED_BUDGET,
+        "splits": splits,
+        "selection": selection,
+        "confusion": confusion,
+        "rule_th": M3_RULE_TH,
+        "notes": notes,
+    }
+
+
+def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = ["", f"### m3_attr: การระบุเทคนิคของเหตุการณ์ที่ตรวจพบ เทียบ base (budget {PAIRED_BUDGET:g})"]
+    if m3 is None:
+        return [*lines, "", f"- {NO_M3_TH}"]
+    for split, block in m3["splits"].items():
+        lines += [
+            "",
+            f"#### {split} ({block['provenance']})",
+            "",
+            "| ตัวแปร | seeds | events | recall_any [95% CI] | recall_correct [95% CI] | "
+            "FA/symbol-day [95% CI] | FA hard [95% CI] | FA ที่มีชื่อ (จากกฎระบุเทคนิค) | "
+            "strawman ทุก episode = MM-T001 | ผลต่าง recall_correct (X − base) [95% CI] | "
+            "ผลต่าง recall_any (X − base) [95% CI] | อ่านว่า |",
+            "|" + "---|" * 12,
+        ]
+        for r in block["rows"]:
+            if r.get("error"):
+                d_c = d_a = "–"
+                verdict = f"ประเมินไม่ได้: {_error_th(r['error'])}"
+            elif r["variant"] == M3_REF:
+                d_c = d_a = "–"
+                verdict = "ตัวอ้างอิง"
+            else:
+                vc, va = r["vs_ref_correct"], r["vs_ref_any"]
+                d_c = "–" if vc is None else _fmt_ci(vc["diff_mean"], vc["ci"])
+                d_a = "–" if va is None else _fmt_ci(va["diff_mean"], va["ci"])
+                if r["reason_th"]:
+                    verdict = r["reason_th"]
+                elif r["below_ref"]:
+                    verdict = "recall_any ต่ำกว่า base อย่างมีนัย"
+                elif r["gain_correct_significant"]:
+                    verdict = "recall_correct สูงกว่า base อย่างมีนัย"
+                else:
+                    verdict = "recall_correct ไม่ต่างจาก base อย่างมีนัย"
+            named = (
+                "–"
+                if r["fa_named"] is None
+                else f"{_fmt(r['fa_named'])} ({_fmt(r['fa_named_by_rule'])}) "
+                f"จาก {r['n_fa_episodes']} episode"
+            )
+            lines.append(
+                f"| {r['variant']} | {r['n_seeds']} | "
+                f"{'–' if r['n_events'] is None else r['n_events']} | "
+                f"{_fmt_ci(r['recall_any'], r['recall_any_ci'])} | "
+                f"{_fmt_ci(r['recall_correct'], r['recall_correct_ci'])} | "
+                f"{_fmt_ci(r['fa'], r['fa_ci'])} | {_fmt_ci(r['fa_hard'], r['fa_hard_ci'])} | "
+                f"{named} | {_fmt(r['strawman'])} | {d_c} | {d_a} | {verdict} |"
+            )
+    lines += ["", f"- {m3['rule_th']} (min_effect = {min_effect:g})"]
+    sel = m3["selection"]
+    if sel is not None:
+        for v, why in sorted(sel["excluded"].items(), key=lambda kv: _m3_rank(kv[0])):
+            lines.append(f"- ตัดออก {v}: {why}")
+        if sel["chosen"] is None:
+            lines.append("- **ผลการเลือก (accept):** เลือกไม่ได้ (ไม่มีค่า FA ของ base)")
+        else:
+            if sel["top"] is not None and sel["chosen"] == M3_REF:
+                lines.append(
+                    f"- ตัวที่ recall_correct เพิ่มมากที่สุดในกลุ่มที่มีสิทธิ์คือ {sel['top']} "
+                    "แต่ไม่มีตัวใดที่ผลเพิ่มมีนัย จึงคง base"
+                )
+            lines.append(f"- **ผลการเลือก (accept):** {sel['chosen']}")
+    for split, blocks in m3["confusion"].items():
+        for v, block in blocks.items():
+            lines += _confusion_block_md(f"#### confusion {split}:{v}", block)
+    lines += [f"- {n}" for n in [*M3_NOTES_TH, *m3["notes"]]]
+    return lines
+
+
 M4 = "m4_sell"
 M4_VARIANTS = ("base", "sell")
 M4_LABEL = {"base": "base (ไม่มีกฎฝั่งขาย)", "sell": "sell (มีกฎฝั่งขาย)"}
@@ -1699,6 +2030,7 @@ def build_report(
     retrain = _retrain_decision(runs, n_boot, cfg.eval.min_effect)
     m1 = _m1(runs, n_boot, cfg.eval.min_effect)
     m2 = _m2(runs, n_boot, cfg.eval.min_effect)
+    m3 = _m3(runs, n_boot, cfg.eval.min_effect)
     m4 = _m4(runs, n_boot, cfg.eval.min_effect)
     confusion = _confusion(runs)
     data = {
@@ -1713,6 +2045,7 @@ def build_report(
         "retrain_decision": retrain,
         "m1_fusion": m1,
         "m2_ai": m2,
+        "m3_attr": m3,
         "m4_sell": m4,
         "confusion": confusion,
         "labels": _labels_summary(runs),
@@ -1760,6 +2093,8 @@ def build_report(
             lines += _m1_md(m1, cfg.eval.min_effect)
         if exp == M2:
             lines += _m2_md(m2, cfg.eval.min_effect)
+        if exp == M3:
+            lines += _m3_md(m3, cfg.eval.min_effect)
         if exp == M4:
             lines += _m4_md(m4, cfg.eval.min_effect)
     lines += [

@@ -460,6 +460,20 @@ def test_message_text_is_thai_plain_and_carries_the_disclaimer(svc, store):
     assert "parse_mode" not in body and body["text"] == tg.message_text(a)
 
 
+def test_message_text_names_the_phase_and_the_bear_raid_neutrally():
+    ts = 1_700_000_000 * 1_000_000
+    raid = make_alert("r1", ts=ts, technique_id="MM-T006", signature_id=100601, phase="sell")
+    text = tg.message_text(raid)
+    assert "MM-T006 ทุบราคา" in text and "ช่วง: กำลังเทขาย" in text
+    assert "p ≈" in text and tg.DISCLAIMER_TH in text.splitlines()
+    assert tg.HISTORY_TH not in text  # measured on the rise of real pumps only
+    for word in ("ควรซื้อ", "ควรขาย", "ความน่าจะเป็น", "probability", *BANNED_TH):
+        assert word not in text, word
+    pump = tg.message_text(make_alert("p1", ts=ts, technique_id="MM-T001.001", phase="pump"))
+    assert "ช่วง: กำลังพุ่ง" in pump and tg.HISTORY_TH in pump.splitlines()
+    assert "ช่วง:" not in tg.message_text(make_alert("n1", ts=ts))  # no phase, no line
+
+
 def test_service_runs_on_the_bus_and_stops_cleanly(store):
     service, fake = make_service(store)
     fake.script["getUpdates"] = [httpx.ConnectError("down")]  # the poller backs off for real

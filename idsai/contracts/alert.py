@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 Phase = Literal["pump", "sell"]
+TechniqueSource = Literal["naming_rule"]
 PUMP_PHASE_TECHNIQUES = frozenset({"MM-T001.001", "MM-T001.002"})
 SELL_PHASE_TECHNIQUES = frozenset({"MM-T001.003"})
 SELL_PHASE_PARENTS = frozenset({"MM-T006"})
@@ -56,10 +57,17 @@ class Alert(BaseModel):
     # rules run. None (the default, and every alert written before M4) is left out of dumps, so
     # alerts made without the sell side serialize exactly as before.
     phase: Phase | None = None
+    # M3: "naming_rule" when `technique_id` / `signature_id` / `rev` come from a naming-only rule
+    # (`chief.attr_rules`; layer "attr", กฎระบุเทคนิค), not from a detection row. Such a rule never
+    # entered F, so `fused_p`, `detectors`, `agreement` and `evidence` are the detection's alone.
+    # None (the default, and every alert before M3) is left out of dumps like `phase`.
+    technique_source: TechniqueSource | None = None
 
     @model_serializer(mode="wrap")
     def _drop_unset_phase(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         out = handler(self)
         if self.phase is None:
             out.pop("phase", None)
+        if self.technique_source is None:
+            out.pop("technique_source", None)
         return out

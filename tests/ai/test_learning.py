@@ -1,6 +1,7 @@
 """Champion/challenger decision: paired event bootstrap and the report's retrain section."""
 
 import json
+import pickle
 import re
 
 import numpy as np
@@ -410,3 +411,167 @@ def test_report_retrain_decides_at_the_minimum_event_count(research, tmp_path):
         research.insert_run(_rec("v1", seed, [0] * MIN_EVENTS))
         research.insert_run(_rec("v2", seed, [1] * MIN_EVENTS))
     assert _build(research, tmp_path)[2]["retrain_decision"]["accept"] is True
+
+
+_BUNDLE_SCRIPT = r"""
+import json, pickle, sys
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+
+from idsai.ai.chief import AiFusion, Chief
+from idsai.ai.learning import load_bundle, save_bundle
+from idsai.config import config_hash, load_settings
+from idsai.detection.features.bars import trades_to_bars
+from idsai.detection.features.windows import compute_windows
+from idsai.detection.registry import build_detectors
+from idsai.pipeline.batch import score_windows
+from tests.synth import day_us, make_trades
+
+mode, root = sys.argv[1], Path(sys.argv[2])
+cfg = load_settings()  # configs/default.yaml: rules, robust_z, cusum, ai.iforest; shift 1
+D = date(2025, 3, 1)
+t0 = day_us(D)
+bars = trades_to_bars(make_trades(D, 2, symbol="TESTBTC", seed=4, rate=0.3), "TESTBTC", t0,
+                      t0 + 2 * 86_400_000_000)
+win = compute_windows(bars, cfg.features, 1e-4).filter(pl.col("t_end_us") >= t0 + 86_400_000_000)
+if mode == "save":
+    dets = build_detectors(cfg.detectors, cfg, 0)
+    for d in dets:
+        if d.layer == "ai":
+            d.fit(win)
+    scored = score_windows(win, dets)
+    cols = ["symbol", "t_end_us", *[f"score__{d.name}" for d in dets]]
+    chief = Chief(dets, cfg.chief, config_hash(cfg), {"ai.iforest": "test-1"},
+                  ai=AiFusion.from_cfg(cfg.chief))
+    chief.calibrate(scored.select(cols))
+    chief.fit_threshold(chief.fuse(scored.select(cols)), 10.0)
+    meta = {"data_hash": "d", "config_hash": config_hash(cfg), "seed": 0, "created_at": "t",
+            "train_range": ["2025-03-02", "2025-03-02"]}
+    save_bundle(root, list(cfg.detectors), dets, chief, meta)
+else:
+    dets, chief, _ = load_bundle(root, cfg)
+    scored = score_windows(win, dets)
+fused = chief.fuse(scored)
+out = {"F": fused["F"].to_list(), "iforest": scored["score__ai.iforest"].to_list(),
+       "tau": chief.tau, "ai": chief.ai.as_dict()}
+(root.parent / f"{mode}.json").write_text(json.dumps(out), encoding="utf-8")
+print("ok")
+"""
+
+
+def test_bundle_saved_in_one_process_loads_in_another(tmp_path):
+    # the Docker build saves the bundle, serve loads it in a fresh interpreter: the sklearn
+    # model's pickle is not byte-stable across processes, so the bundle check must not depend
+    # on re-pickling (it hashes the stored file bytes)
+    import subprocess
+    import sys
+
+    from idsai.config import REPO_ROOT
+
+    root = tmp_path / "bundle"
+    for mode in ("save", "load"):
+        r = subprocess.run(
+            [sys.executable, "-c", _BUNDLE_SCRIPT, mode, str(root)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=REPO_ROOT,
+            timeout=600,
+        )
+        assert r.returncode == 0, r.stderr
+    saved = json.loads((tmp_path / "save.json").read_text(encoding="utf-8"))
+    loaded = json.loads((tmp_path / "load.json").read_text(encoding="utf-8"))
+    assert loaded["ai"] == {"mode": "shift", "shift": 1.0, "regime_feature": None}
+    assert saved == loaded  # same scores, F and tau after the round trip
+    assert max(saved["F"]) > 0
+    # a changed value in the stored model is still refused
+    from idsai.ai.learning import BundleError, load_bundle
+    from idsai.config import load_settings
+
+    (path,) = (root / "registry" / "ai.iforest").glob("v*/state.pkl")
+    state = pickle.loads(path.read_bytes())
+    state["mu"] = state["mu"] + 1e-9
+    path.write_bytes(pickle.dumps(state, protocol=pickle.HIGHEST_PROTOCOL))
+    with pytest.raises(BundleError, match="ไม่ตรงกับที่บันทึกไว้"):
+        load_bundle(root, load_settings())
+
+
+def test_ae_bundle_sha_is_unchanged_by_hashing_the_file():
+    # bundles built before: sha = sha256(pickle.dumps(state_dict)); the registry file holds
+    # exactly those bytes, so hashing the file keeps their shas
+    import hashlib
+    import io
+
+    from idsai.ai.autoencoder import AutoencoderDetector
+    from idsai.ai.learning import _bytes_sha
+    from idsai.config import AECfg
+
+    rng = np.random.default_rng(0)
+
+    def f32(*shape):
+        return rng.standard_normal(shape).astype(np.float32)
+
+    det = AutoencoderDetector(["a", "b"], AECfg(hidden=4, bottleneck=2))
+    det.load_state_dict(
+        {
+            "features": ["a", "b"],
+            "cfg": AECfg(hidden=4, bottleneck=2).model_dump(),
+            "seed": 0,
+            "center": np.zeros(2),
+            "scale": np.ones(2),
+            "net": {
+                "0.weight": f32(4, 2),
+                "0.bias": f32(4),
+                "2.weight": f32(2, 4),
+                "2.bias": f32(2),
+                "3.weight": f32(4, 2),
+                "3.bias": f32(4),
+                "5.weight": f32(2, 4),
+                "5.bias": f32(2),
+            },  # fmt: skip
+        }
+    )
+    old = hashlib.sha256(pickle.dumps(det.state_dict(), protocol=pickle.HIGHEST_PROTOCOL))
+    buf = io.BytesIO()
+    pickle.dump(det.state_dict(), buf, protocol=pickle.HIGHEST_PROTOCOL)  # as the registry does
+    assert _bytes_sha(buf.getvalue()) == old.hexdigest()[:12]
+
+
+def test_bundle_loads_the_naming_rules_only_with_attr_rules(tmp_path):
+    # M3: naming rules hold no state, so a bundle stores nothing of them; load_bundle rebuilds
+    # them from the config (the flag changes config_hash, so an off bundle never loads on)
+    from datetime import date
+
+    import polars as pl
+
+    from idsai.ai.chief import AiFusion, Chief
+    from idsai.ai.learning import load_bundle, save_bundle
+    from idsai.config import config_hash
+    from idsai.detection.features.bars import trades_to_bars
+    from idsai.detection.features.windows import compute_windows
+    from idsai.detection.registry import build_detectors
+    from idsai.pipeline.batch import score_windows
+    from tests.synth import S, day_us, make_trades
+
+    on = load_settings(overrides={"chief": {"attr_rules": True}})
+    d0 = date(2025, 3, 1)
+    t0 = day_us(d0)
+    bars = trades_to_bars(
+        make_trades(d0, 2, symbol="TESTBTC", seed=4, rate=0.3), "TESTBTC", t0, t0 + 2 * 86_400 * S
+    )
+    win = compute_windows(bars, on.features, 1e-4).filter(pl.col("t_end_us") >= t0 + 86_400 * S)
+    names = ["rules", "stat.robust_z", "stat.cusum"]
+    dets = build_detectors(names, on, 0)
+    scored = score_windows(win, dets)
+    chief = Chief(dets, on.chief, config_hash(on), {}, ai=AiFusion.from_cfg(on.chief))
+    chief.calibrate(scored)
+    chief.fit_threshold(chief.fuse(scored), 10.0)
+    meta = {"data_hash": "d", "config_hash": config_hash(on), "seed": 0, "created_at": "t",
+            "train_range": ["2025-03-02", "2025-03-02"]}  # fmt: skip
+    save_bundle(tmp_path / "b", names, dets, chief, meta)
+    _, loaded, _ = load_bundle(tmp_path / "b", on)
+    assert [d.name for d in loaded.naming] == ["attr.100191", "attr.100591"]
+    assert loaded.state_dict()["cal"].keys() == chief.state_dict()["cal"].keys()

@@ -27,7 +27,7 @@ SYM = "TESTBTC"
 D = date(2025, 3, 1)
 T0 = day_us(D)
 UNIT = 1e-4
-OFF = load_settings().features
+OFF = load_settings(overrides={"features": {"sell_side": False}}).features  # default is on
 ON = OFF.model_copy(update={"sell_side": True})
 
 

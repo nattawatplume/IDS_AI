@@ -210,11 +210,14 @@ def fmt_bangkok(ts_us: int) -> str:
 
 
 def message_text(alert: Alert, public_url: str | None = None) -> str:
+    """Plain Thai text of one alert. The explainer line names the technique (e.g. MM-T006 ทุบราคา)
+    and the phase (M4, "ช่วง: กำลังพุ่ง" / "ช่วง: กำลังเทขาย"). `HISTORY_TH` was measured on
+    alerts in the rise of real pumps only, so a sell-phase alert goes without it."""
     lines = [
         f"{HEAD_TH} · {alert.symbol}",
         f"{fmt_bangkok(alert.ts_event_us)} {TIME_TH}",
         explain(alert).text_th,
-        HISTORY_TH,
+        *(() if getattr(alert, "phase", None) == "sell" else (HISTORY_TH,)),
         DISCLAIMER_TH,
     ]
     if public_url:

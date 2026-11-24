@@ -525,3 +525,18 @@ def test_technique_from_another_row_appends_the_exact_clause():
 @pytest.mark.parametrize("peak", [None, "MM-T001"])
 def test_same_or_unset_peak_technique_leaves_the_text_unchanged(peak):
     assert explain(make_alert(peak_technique_id=peak)).text_th == explain(make_alert()).text_th
+
+
+# ---------------------------------------------------------------- M3: name from a naming rule
+
+NAMING_TH = "; ชื่อเทคนิคมาจากกฎระบุเทคนิค ซึ่งไม่ใช่หลักฐานการตรวจจับ ตัวเลขข้างต้นมาจากจุดที่ผิดปกติที่สุด"
+
+
+def test_name_from_a_naming_rule_says_so_instead_of_the_other_row_clause():
+    plain = explain(make_alert()).text_th
+    a = make_alert(peak_technique_id="MM-T000", technique_source="naming_rule")
+    t = explain(a).text_th
+    assert t == plain + NAMING_TH
+    assert numbers_in(NAMING_TH) == []
+    assert validate_numbers(t, allowed_numbers(a))
+    assert explain(make_alert(technique_source="naming_rule")).text_th == plain + NAMING_TH

@@ -151,8 +151,9 @@ def test_no_publication_before_preroll_done(run, alerts):
     assert all(a.ts_event_us >= D_US and a.window[0] >= D_US for a in alerts)
     bars = drain(run["qb"])
     assert bars and min(b["t_us"] for b in bars) >= D_US - S
-    # M4: with sell_side off the published bar keeps its pre-M4 fields
-    assert all("sell_rush_orders" not in b for b in bars)
+    # M4: default.yaml runs the sell side, so the published bar carries sell_rush_orders
+    # (with the flag off it is dropped: test_bars_drop_sell_rush_orders_with_sell_side_off)
+    assert all("sell_rush_orders" in b for b in bars)
     scores = drain(run["qs"])
     assert scores and min(s["t_end_us"] for s in scores) >= D_US
     assert all(f["t_end_us"] >= D_US for f in run["cap"][0].iter_rows(named=True))
@@ -189,6 +190,24 @@ def test_final_alerts_equal_chief_episodes_exactly(run, alerts, world, batch_inj
     for a, b in zip(sorted(closed, key=key), sorted(want, key=key), strict=True):
         assert a.alert_id == b.alert_id and a.window == b.window
         assert a.technique_id == b.technique_id and a.fused_p == b.fused_p
+        assert a.phase == b.phase
+
+
+def test_default_stream_runs_the_sell_side(world, run, batch_inj, alerts):
+    """default.yaml has `features.sell_side: true`: the stream computes the sell features and
+    runs the sell-side rules (dump 100104, bear raid 100601), and alerts carry a phase."""
+    assert world["cfg"].features.sell_side
+    sids = {getattr(d, "signature_id", None) for d in world["dets"]}
+    assert {100104, 100601} <= sids
+    got = pl.concat(run["cap"])
+    for c in ("sell_rush_10", "drop_60", "z_sell_rush_300", "z_drop_1800", "cusum_sell"):
+        assert c in got.columns and c in batch_inj["scored"].columns, c
+    assert got["cusum_sell"].max() > 0  # the state feature moved during the day
+    lab = run["label"]
+    lo, hi = lab["t_start_us"][0], lab["t_end_us"][0]
+    hits = [a for a in alerts if a.technique_id.startswith("MM-T001") and a.window[0] <= hi]
+    hits = [a for a in hits if a.window[1] >= lo and a.status == "closed"]
+    assert hits and all(a.phase in ("pump", "sell") for a in hits), [a.phase for a in hits]
 
 
 def test_series_f_and_lanes_equal_the_batch_fusion(run, world, batch_inj):
@@ -293,6 +312,18 @@ def test_alert_provenance_is_the_mode(small, store):
     al = store.list_alerts()
     assert al and {a.provenance for a in al} == {"sim"}
     assert {a.status for a in al} == {"closed"}
+
+
+def test_bars_drop_sell_rush_orders_with_sell_side_off(small, store):
+    cfg = load_settings(overrides={"features": {"sell_side": False}})
+    bus = Bus(maxsize=100_000)
+    qb = bus.subscribe("bars")
+    p = StreamPipeline(cfg, store, small["dets"], small["chief"], bus, "replay")
+    trades = small["trades"].filter(pl.col("ts_us") < small["t0"] + 1800 * S)
+    asyncio.run(p.run(Replayer(trades, speed=0)))
+    bars = drain(qb)
+    assert bars and all("sell_rush_orders" not in b for b in bars)
+    assert "cusum_sell" not in p._schema
 
 
 def test_preroll_is_features_only(small, store, monkeypatch):
@@ -413,3 +444,40 @@ def test_unknown_event_kind_raises(small, store):
 
     with pytest.raises(ValueError):
         asyncio.run(pipe_for(small, store).run(source()))
+
+
+def test_naming_rules_are_scored_and_change_only_names(world, batch_inj):
+    """M3: a Chief with naming rules gets their scores from the stream path; its final alerts
+    equal its batch episodes, and against the flag-off run only the names may differ."""
+    from idsai.detection.registry import naming_detectors
+
+    on = load_settings(overrides={"chief": {"attr_rules": True}})
+    plain = world["chief"]
+    named = Chief(
+        world["dets"], plain.cfg, plain.config_hash, plain.model_versions,
+        ai=plain.ai, naming=naming_detectors(on),
+    )  # fmt: skip
+    named.load_state_dict(plain.state_dict())
+    bus = Bus(maxsize=100_000)
+    qa = bus.subscribe("alerts")
+    prev = world["trades"].filter(pl.col("ts_us") < D_US)
+    r = Replayer(world["trades"], speed=0, start_us=D_US, preroll_from_us=D_US - 86_400 * S)
+    r.inject(burst(), base_quote_rate(prev), "replay")
+    asyncio.run(
+        StreamPipeline(world["cfg"], world["store"], world["dets"], named, bus, "replay").run(r)
+    )
+    closed = [a for a in drain(qa) if a.status == "closed"]
+    inj = load_day_windows(world["store"], SYM, D, world["cfg"], scenario=burst())
+    scored = score_windows(inj.windows, named.score_detectors)
+    fused = named.fuse(scored)
+    assert fused["F"].to_list() == batch_inj["fused"]["F"].to_list()
+    want = named.episodes(fused, provenance="replay")
+    key = lambda a: (a.symbol, a.ts_event_us)  # noqa: E731
+    assert [a.model_dump_json() for a in sorted(closed, key=key)] == [
+        a.model_dump_json() for a in sorted(want, key=key)
+    ]
+    base = plain.episodes(batch_inj["fused"], provenance="replay")
+    drop = ("technique_id", "signature_id", "rev", "technique_source")
+    assert [{k: v for k, v in a.model_dump().items() if k not in drop} for a in want] == [
+        {k: v for k, v in a.model_dump().items() if k not in drop} for a in base
+    ]

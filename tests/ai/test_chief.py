@@ -1148,3 +1148,14 @@ def test_iforest_as_ai_layer_goes_through_the_conformal_path():
         assert sorted(a.model_dump_json() for a in closed) == sorted(
             a.model_dump_json() for a in batch
         )
+
+
+def test_ai_agreement_p_and_agreement_layers_follow_the_mode():
+    # the default ai_chief has a stat and an ai detector: 2 layers, 1 under "exclude"
+    got = {
+        m: (ai_chief(ai).ai_agreement_p, ai_chief(ai).agreement_layers) for m, ai in MODES.items()
+    }
+    p = CFG.agreement_p
+    assert got["fuse"] == (p, 2) and got["mondrian"] == (p, 2)
+    assert got["shift"][0] == pytest.approx(p / 10) and got["shift"][1] == 2
+    assert got["exclude"] == (0.0, 1)  # the ai layer never counts for agreement
