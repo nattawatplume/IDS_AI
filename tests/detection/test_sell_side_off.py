@@ -4,6 +4,9 @@ The golden digests below were computed from the code before M4 (commit fdf7eb4) 
 synthetic stream; any change to the flag-off feature frame, rule scores, alerts, Chief state,
 config hashes or the signatures sha breaks this test.
 
+The float-derived digests (windows, scores, Chief state, alerts) depend on the platform's libm/BLAS,
+so they are pinned per `sys.platform` (Windows: local run; Linux: GitHub CI on the same commit).
+
 `configs/default.yaml` has since moved to the live AI layer (`ai.iforest`, `chief.ai_mode: shift`);
 `PRE_LIVE_AI` puts the old values back, so the digests (default config hash included) also prove
 that `ChiefCfg.ai_*` at their defaults leave the dump byte-identical.
@@ -11,6 +14,7 @@ that `ChiefCfg.ai_*` at their defaults leave the dump byte-identical.
 
 import hashlib
 import json
+import sys
 from datetime import date
 
 import numpy as np
@@ -46,14 +50,24 @@ PRE_LIVE_AI = {
 
 GOLDEN = {
     "model_features": "6b99d52943321bce",
-    "windows": "5912df6351ffc711",
     "bars": "9da72588247ad466",
-    "scores": "67eae2b9b0864784",
-    "alerts": "4932795f4d9dd39d",
-    "chief_state": "51bc97774c37b285",
     "config_default": "6da45ffe7efd",
     "config_prev_live": "53e3b662ab96",
     "signatures": "0fe49a5924d7",
+}
+GOLDEN_FLOAT = {  # keyed by sys.platform
+    "win32": {
+        "windows": "5912df6351ffc711",
+        "scores": "67eae2b9b0864784",
+        "alerts": "4932795f4d9dd39d",
+        "chief_state": "51bc97774c37b285",
+    },
+    "linux": {
+        "windows": "0bb20f1faacae56a",
+        "scores": "b73c81dc15b9e634",
+        "alerts": "de492db83f63a5ea",
+        "chief_state": "72a4cb0909e8bac6",
+    },
 }
 
 
@@ -139,8 +153,13 @@ def _digests() -> dict[str, str]:
 
 
 def test_flag_off_outputs_are_bit_identical_to_before_m4():
+    if sys.platform not in GOLDEN_FLOAT:
+        raise AssertionError(
+            f"no golden float digests for platform {sys.platform!r}; run this file as a script "
+            "on the pre-M4 commit (fdf7eb4) there and add them to GOLDEN_FLOAT"
+        )
     got = _digests()
-    assert got == GOLDEN
+    assert got == {**GOLDEN, **GOLDEN_FLOAT[sys.platform]}
 
 
 if __name__ == "__main__":  # prints the digests (used once to freeze GOLDEN)
