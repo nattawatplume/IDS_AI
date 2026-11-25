@@ -17,6 +17,7 @@ score of the system: nothing here is advice to buy or sell.
 import asyncio
 import logging
 import statistics
+from datetime import UTC, datetime
 from typing import Any
 
 from idsai.contracts.alert import Alert
@@ -48,9 +49,9 @@ NOTE_TH = [
 ]
 # NOTE_TH[0] when the store keeps its live alerts in a database (idsai.data.history)
 PERSISTENT_NOTE_TH = (
-    "นับเฉพาะการแจ้งเตือนที่บริการนี้เก็บไว้ การแจ้งเตือนสด (live) ถูกเก็บในฐานข้อมูลของบริการ "
-    "จึงไม่หายเมื่อเซิร์ฟเวอร์เริ่มใหม่ ทุกครั้งที่เริ่มใหม่จะโหลดกลับมาเฉพาะ {days} วันล่าสุด "
-    "(ครั้งนี้ตั้งแต่ {since} UTC)"
+    "นับเฉพาะการแจ้งเตือนที่บริการนี้เก็บไว้ การแจ้งเตือนสด (live) ถูกบันทึกลงฐานข้อมูลของบริการ "
+    "ราวทุก 30 วินาที เมื่อเซิร์ฟเวอร์เริ่มใหม่ ข้อมูลไม่กี่วินาทีถึงราวหนึ่งนาทีล่าสุดอาจหายได้ "
+    "ทุกครั้งที่เริ่มใหม่จะโหลดกลับมาเฉพาะ {days} วันล่าสุด (ครั้งนี้ตั้งแต่ {since} UTC)"
 )
 
 
@@ -60,8 +61,13 @@ def note_th(store: Store) -> list[str]:
     since = store.history_since_us if store.history_attached else None
     if since is None:
         return list(NOTE_TH)
-    day = _day_of(since).isoformat()
-    return [PERSISTENT_NOTE_TH.format(days=HISTORY_DAYS, since=day), *NOTE_TH[1:]]
+    return [PERSISTENT_NOTE_TH.format(days=HISTORY_DAYS, since=_utc_minute(since)), *NOTE_TH[1:]]
+
+
+def _utc_minute(t_us: int) -> str:
+    """`YYYY-MM-DD HH:MM` (UTC) of `t_us` rounded up to the minute: never earlier than it."""
+    up = -(-t_us // MIN_US) * MIN_US
+    return datetime.fromtimestamp(up / S_US, UTC).strftime("%Y-%m-%d %H:%M")
 
 
 # ---- price lookups: the ring first, then the trade archive ----

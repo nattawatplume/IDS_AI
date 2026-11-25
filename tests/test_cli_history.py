@@ -73,11 +73,16 @@ def test_attach_failure_warns_in_thai_and_returns(store, monkeypatch, capsys):
     assert not store.history_attached
 
 
-def test_serve_prepares_after_a_failed_history_attach(tmp_path, monkeypatch, capsys):
-    cfg_path = write_cfg(tmp_path)
+def _serve_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", URL)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.setattr(cli, "attach_accounts_from_env", lambda s: None)
     monkeypatch.setattr(cli, "ATTACH_WAIT_S", 0)
+    return write_cfg(tmp_path)
+
+
+def test_serve_live_prepares_after_a_failed_history_attach(tmp_path, monkeypatch, capsys):
+    cfg_path = _serve_env(tmp_path, monkeypatch)
 
     def broken(url):
         raise HistoryStoreError("down " + url)
@@ -89,18 +94,19 @@ def test_serve_prepares_after_a_failed_history_attach(tmp_path, monkeypatch, cap
         order.append(("prepare", st.history_attached))
         raise cli.CliError("stop here")
 
-    monkeypatch.setattr(cli, "prepare_replay", fake_prepare)
-    assert cli.main(["--config", str(cfg_path), "serve"]) == 1
+    monkeypatch.setattr(cli, "prepare_live", fake_prepare)
+    assert cli.main(["--config", str(cfg_path), "serve", "--mode", "live"]) == 1
     assert order == [("prepare", False)]
     err = capsys.readouterr().err
     assert cli.HISTORY_WARN_TH in err and "s3cret" not in err
 
 
-def test_serve_attaches_history_before_it_prepares(tmp_path, monkeypatch):
-    cfg_path = write_cfg(tmp_path)
-    monkeypatch.setenv("DATABASE_URL", URL)
-    monkeypatch.setattr(cli, "attach_accounts_from_env", lambda s: None)
-    monkeypatch.setattr("idsai.data.history.build_backend", lambda url: MemoryHistory())
+def test_serve_replay_never_attaches_history(tmp_path, monkeypatch):
+    cfg_path = _serve_env(tmp_path, monkeypatch)
+    built = []
+    monkeypatch.setattr(
+        "idsai.data.history.build_backend", lambda url: built.append(url) or MemoryHistory()
+    )
     seen = []
 
     def fake_prepare(args, cfg, st):
@@ -109,9 +115,59 @@ def test_serve_attaches_history_before_it_prepares(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "prepare_replay", fake_prepare)
     assert cli.main(["--config", str(cfg_path), "serve"]) == 1
-    assert seen == [True]
-    src = open(cli.__file__, encoding="utf-8").read()
-    assert "with_history_sync(\n                store," in src
+    assert seen == [False] and built == []
+
+
+def test_serve_live_restores_before_it_prepares_and_syncs_what_it_stores(tmp_path, monkeypatch):
+    """The pipeline sees the restored rows; a live alert stored while serving reaches the
+    database (here through the shutdown sync, as run_server cancels the background)."""
+    from idsai.product.api.state import AppState
+
+    cfg_path = _serve_env(tmp_path, monkeypatch)
+    mem = MemoryHistory()
+    old = make_alert("old", ts=_now_us() - DAY, prov="live")
+    mem.upsert_alerts(
+        [
+            dict(
+                zip(
+                    ("alert_id", "ts_event_us", "symbol", "json"),
+                    Store._alert_row(old),
+                    strict=True,
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr("idsai.data.history.build_backend", lambda url: mem)
+    seen = {}
+
+    def fake_prepare(args, cfg, st):
+        seen["restored"] = st.get_alert("old") is not None
+        seen["store"] = st
+
+        async def background():
+            st.upsert_alert(make_alert("new", prov="live"))
+            await asyncio.Event().wait()
+
+        return AppState(cfg, st, "live", None, None), background
+
+    def fake_run_server(app, host, port, background):
+        async def main():
+            task = asyncio.create_task(background())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        asyncio.run(main())
+
+    monkeypatch.setattr(cli, "prepare_live", fake_prepare)
+    monkeypatch.setattr(cli, "run_server", fake_run_server)
+    assert cli.main(["--config", str(cfg_path), "serve", "--mode", "live"]) == 0
+    assert seen["restored"] is True
+    assert set(mem.alerts) == {"old", "new"}
+
+
+def _now_us():
+    return cli._now_us()
 
 
 # ---- with_history_sync ----
@@ -238,10 +294,13 @@ def test_note_without_history_keeps_the_restart_text(store):
     assert "ตัวเลขทั้งหมดจะเริ่มนับใหม่" in note[0]
 
 
-def test_note_with_history_names_the_database_and_the_cut(store):
-    store.attach_history(MemoryHistory(), since_us=D_US)
+def test_note_with_history_names_the_database_and_the_exact_cut(store):
+    cut = D_US + 7 * HOUR + 5 * 60 * S + 1  # 07:05 and a microsecond: shown as 07:06, never 07:05
+    store.attach_history(MemoryHistory(), since_us=cut)
     note = oc.track_record(store)["note_th"]
     assert note[1:] == oc.NOTE_TH[1:]
-    assert "ฐานข้อมูล" in note[0] and "เริ่มนับใหม่" not in note[0]
+    assert "ฐานข้อมูล" in note[0] and "ตัวเลขทั้งหมดจะเริ่มนับใหม่" not in note[0]
+    assert "ราวทุก 30 วินาที" in note[0] and "อาจหายได้" in note[0]
     assert f"{HISTORY_DAYS} วันล่าสุด" in note[0]
-    assert oc._day_of(D_US).isoformat() in note[0]
+    assert f"ตั้งแต่ {oc._day_of(D_US).isoformat()} 07:06 UTC" in note[0]
+    assert oc._utc_minute(D_US + 7 * HOUR) == f"{oc._day_of(D_US).isoformat()} 07:00"

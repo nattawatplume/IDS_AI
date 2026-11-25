@@ -1356,7 +1356,8 @@ def with_history_sync(
 ) -> Callable[[], Coroutine[Any, Any, None]]:
     """`background` plus a task that copies the store's queued live history to its database every
     `HISTORY_SYNC_S` (`Store.history_sync`, in a thread), and once more at shutdown for at most
-    `HISTORY_FINAL_SYNC_S`. `background` itself when no history database is attached.
+    `HISTORY_FINAL_SYNC_S` (none if a sync is still running). `background` itself when no history
+    database is attached (`serve --mode live` with DATABASE_URL attaches one).
 
     A failed copy keeps its rows queued for the next one; failures are logged at most once per
     `HISTORY_WARN_EVERY_S`, by error type only (never the URL)."""
@@ -1369,9 +1370,9 @@ def with_history_sync(
     log = logging.getLogger(__name__)
     last_warn = [-math.inf]
 
-    async def sync_once() -> None:
+    async def sync_once(wait: bool = True) -> None:
         try:
-            await asyncio.to_thread(store.history_sync)
+            await asyncio.to_thread(store.history_sync, wait)
         except Exception as e:  # noqa: BLE001 - one failed copy must not end the task
             now = time.monotonic()
             if now - last_warn[0] >= HISTORY_WARN_EVERY_S:
@@ -1392,8 +1393,9 @@ def with_history_sync(
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+            # skipped at once if a sync is still running (its thread outlived a cancel)
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                await asyncio.wait_for(sync_once(), HISTORY_FINAL_SYNC_S)
+                await asyncio.wait_for(sync_once(wait=False), HISTORY_FINAL_SYNC_S)
 
     return run
 
@@ -1437,8 +1439,9 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
                 f"{', '.join(allowed_hosts(host, args.public_host))} "
                 "ถ้าให้เครื่องอื่นเรียก ให้เปิดด้วย --host <IP ของเครื่องนี้> แล้วเรียกผ่าน IP นั้น"
             )
-        # before the pipeline and the outcome tracker are built, so they see the restored rows
-        attach_history_from_env(store)
+        if args.mode == "live":  # only live alerts are kept; a replay stays local
+            # before the pipeline and the outcome tracker are built, so they see the restored rows
+            attach_history_from_env(store)
         if args.mode == "live":
             state, background = prepare_live(args, cfg, store)
         else:
