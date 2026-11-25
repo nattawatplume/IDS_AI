@@ -73,6 +73,8 @@ from idsai.product.auth import (
     token_hash,
     verify_or_dummy,
 )
+from idsai.product.check import check as check_coin
+from idsai.product.check import coin_history, now_us_of
 from idsai.product.explainer import explain
 from idsai.product.notify.telegram import PREF_KEY as TG_PREF_KEY
 
@@ -686,6 +688,26 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
     @app.get("/api/symbols", dependencies=signed)
     async def symbols():
         return _json(state.symbols)
+
+    # ---- phase 2: coin history and check before buying ----
+
+    def known_symbol(symbol: str) -> str:
+        if symbol not in (state.symbols or []):
+            raise HTTPException(404, "ไม่รู้จัก symbol นี้")
+        return symbol
+
+    @app.get("/api/symbols/{symbol}/history", dependencies=signed)
+    async def symbol_history(symbol: str):
+        known_symbol(symbol)
+        return _json(coin_history(state.store, symbol, now_us_of(state.pipeline)))
+
+    @app.get("/api/symbols/{symbol}/check", dependencies=signed)
+    async def symbol_check(symbol: str):
+        known_symbol(symbol)
+        tau = None if state.pipeline is None else state.pipeline.chief.tau
+        return _json(
+            check_coin(state.store, symbol, state.pipeline, tau, state.cfg.features.stride_s)
+        )
 
     @app.get("/api/health")
     async def health_route():

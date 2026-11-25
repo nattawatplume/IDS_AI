@@ -139,6 +139,7 @@ const state = {
   health: null,
   symbols: [],
   symbol: null,
+  checkSymbol: null, // the coin on the check page; null: the home page's coin
   alerts: new Map(), // alert_id -> item
   feedback: new Map(), // alert_id -> verdict rows, oldest first (GET /api/feedback)
   alertFilter: "all", // the chosen ALERT_FILTERS key
@@ -1893,12 +1894,14 @@ function onAlert(data) {
     if (resetRuns(state.injections, data.deleted || [])) renderInjections();
     alertsChanged();
     loadSeries();
+    coinAlertsChanged(null);
     return;
   }
   if (typeof data.alert_id !== "string") return;
   const fresh = !state.alerts.has(data.alert_id); // an update of a known alert is not a new one
   state.alerts.set(data.alert_id, data);
   alertsChanged();
+  coinAlertsChanged(data.symbol);
   if (fresh) {
     showToast(`แจ้งเตือนใหม่ · ${railHeadline(data, state.taxonomy)}`, alertHref(data.alert_id));
     fx("alertBurst", { severity: data.severity }); // after the render, so the newest card is in place
@@ -3352,6 +3355,155 @@ function retrainCard(title, block) {
   return card;
 }
 
+// ------------------------------------------------------------------ coin history and check before buying
+
+// the check page re-reads itself this often while it is shown (alerts also refresh it at once)
+const CHECK_POLL_MS = 15000;
+const CHECK_LEVELS = ["normal", "watch", "high", "warmup"];
+
+function symbolPath(symbol, what) {
+  return `/api/symbols/${encodeURIComponent(symbol)}/${what}`;
+}
+
+// one plain line for the coin view: "ถูกเตือน 5 ครั้งใน 30 วัน (7 วัน: 1)"
+function historyLine(hist) {
+  if (!hist || !isNum(hist.d30)) return "ประวัติการแจ้งเตือน –";
+  if (hist.d30 === 0) return "ยังไม่ถูกเตือนเลยใน 30 วัน";
+  return `ถูกเตือน ${hist.d30} ครั้งใน 30 วัน (7 วัน: ${isNum(hist.d7) ? hist.d7 : "–"})`;
+}
+
+async function loadSymbolHistory() {
+  const symbol = state.symbol;
+  if (!symbol) return;
+  let hist = null;
+  try {
+    hist = await api(symbolPath(symbol, "history"));
+  } catch (e) {
+    hist = null;
+  }
+  if (symbol !== state.symbol) return; // the picker moved on meanwhile
+  $("symbol-history").textContent = historyLine(hist);
+}
+
+// an alert came in or was reset: the counts of that coin (null: any coin) may have changed.
+// A burst of alert messages is read once, COIN_REFRESH_MS after the first of them.
+const COIN_REFRESH_MS = 1000;
+const coinRefresh = { timer: null, history: false, check: false };
+
+function coinAlertsChanged(symbol) {
+  if (symbol === null || symbol === state.symbol) coinRefresh.history = true;
+  if (symbol === null || symbol === checkSymbol()) coinRefresh.check = true;
+  if (coinRefresh.timer !== null || !(coinRefresh.history || coinRefresh.check)) return;
+  coinRefresh.timer = setTimeout(
+    safely(() => {
+      const { history, check } = coinRefresh;
+      coinRefresh.timer = null;
+      coinRefresh.history = false;
+      coinRefresh.check = false;
+      if (history) loadSymbolHistory();
+      if (check && state.route === "check") loadCheck();
+    }),
+    COIN_REFRESH_MS,
+  );
+}
+
+function checkSymbol() {
+  return state.symbols.includes(state.checkSymbol) ? state.checkSymbol : state.symbol;
+}
+
+function showCheck() {
+  const sel = clear($("check-symbol"));
+  for (const sym of state.symbols) sel.appendChild(el("option", { value: sym }, sym));
+  sel.value = checkSymbol() || "";
+  loadCheck();
+}
+
+let checkSeq = 0; // only the newest answer is drawn
+
+// nothing of the previous coin (or of a failed read) stays on the page
+function resetCheck(labelText) {
+  $("check-verdict").dataset.level = "warmup";
+  $("check-label").textContent = labelText;
+  $("check-time").textContent = "";
+  clear($("check-reasons"));
+  for (const id of ["check-score", "check-alerts", "check-liq", "check-hist"]) $(id).textContent = "–";
+  for (const id of ["check-score-sub", "check-alerts-sub", "check-liq-sub", "check-hist-sub"]) {
+    clear($(id)).textContent = "–";
+  }
+}
+
+async function loadCheck() {
+  const symbol = checkSymbol();
+  if (!symbol) return;
+  const seq = ++checkSeq;
+  let chk;
+  try {
+    chk = await api(symbolPath(symbol, "check"));
+  } catch (e) {
+    if (seq !== checkSeq) return;
+    resetCheck("–");
+    // a 404 carries the server's own Thai reason (an unknown coin); anything else gets plain Thai
+    $("check-error").textContent = e && e.status === 404 && e.message ? e.message : plainErrorText(e);
+    $("check-error").hidden = false;
+    return;
+  }
+  if (seq !== checkSeq || state.route !== "check") return;
+  $("check-error").hidden = true;
+  renderCheck(chk);
+}
+
+function fmtQuote(x) {
+  if (!isNum(x)) return "–";
+  return x >= 100 ? Math.round(x).toLocaleString("en-US") : x.toPrecision(3);
+}
+
+function renderCheck(chk) {
+  if (!chk || typeof chk !== "object") return;
+  const level = CHECK_LEVELS.includes(chk.level) ? chk.level : "warmup";
+  $("check-verdict").dataset.level = level;
+  $("check-label").textContent = chk.label || "–";
+  const score = chk.score;
+  $("check-time").textContent = score && isNum(score.t_end_us) ? `ข้อมูลถึง ${fmtThaiTime(score.t_end_us)}` : "";
+  const list = clear($("check-reasons"));
+  for (const why of Array.isArray(chk.reasons_th) ? chk.reasons_th : []) list.appendChild(el("li", {}, why));
+
+  const hasScore = score && isNum(score.F_now);
+  $("check-score").textContent = hasScore ? fmtNum(score.F_now, 2) : "–";
+  $("check-score-sub").textContent = hasScore
+    ? `เกณฑ์แจ้งเตือน ${fmtNum(score.tau, 2)} (ถึงเกณฑ์จึงแจ้งเตือน)`
+    : "ระบบกำลังเก็บข้อมูลพื้นฐาน";
+
+  const day = chk.alerts_24h || {};
+  $("check-alerts").textContent = isNum(day.count) ? String(day.count) : "–";
+  const latest = day.latest;
+  const alertsSub = clear($("check-alerts-sub"));
+  if (latest && typeof latest.alert_id === "string") {
+    const phase = PHASE_TH[latest.phase] ? ` · ช่วง: ${PHASE_TH[latest.phase]}` : "";
+    append(alertsSub, [
+      `ล่าสุด ${fmtThaiTime(latest.ts_event_us)}${phase} · `,
+      el("a", { href: alertHref(latest.alert_id) }, "ดูรายละเอียด"),
+    ]);
+  } else {
+    alertsSub.textContent = "ไม่มีการแจ้งเตือนใน 24 ชม. ล่าสุด";
+  }
+
+  const liq = chk.liquidity || {};
+  $("check-liq").textContent = isNum(liq.ratio) ? `${fmtNum(liq.ratio, 2)} เท่า` : "–";
+  $("check-liq-sub").textContent =
+    isNum(liq.qvol_5m) && isNum(liq.qvol_median_24h)
+      ? `5 นาทีล่าสุด ${fmtQuote(liq.qvol_5m)} ต่อนาที · ปกติ ${fmtQuote(liq.qvol_median_24h)} ต่อนาที`
+      : "ข้อมูลยังไม่พอเทียบกับปกติ";
+
+  const hist = chk.history || {};
+  $("check-hist").textContent = isNum(hist.d30) ? String(hist.d30) : "–";
+  const phases = hist.by_phase_d30 || {};
+  const split =
+    isNum(phases.pump) && isNum(phases.sell) && hist.d30 > 0
+      ? ` · กำลังพุ่ง ${phases.pump} · กำลังเทขาย ${phases.sell}`
+      : "";
+  $("check-hist-sub").textContent = isNum(hist.d7) ? `7 วัน: ${hist.d7}${split}` : "–";
+}
+
 // ------------------------------------------------------------------ router
 
 const PAGES = {
@@ -3363,12 +3515,13 @@ const PAGES = {
   alert: "page-alert",
   simulate: "page-simulate",
   results: "page-results",
+  check: "page-check",
 };
 
 // old links keep working: the 6-tab names map onto the 4 pages; About and Taxonomy live in help
 const ROUTE_REDIRECTS = { "#/monitor": "#/home", "#/redteam": "#/simulate", "#/eval": "#/results" };
 const HELP_ROUTES = ["#/about", "#/taxonomy"];
-const KNOWN_ROUTES = ["#/home", "#/alerts", "#/simulate", "#/results", "#/activity", "#/users"];
+const KNOWN_ROUTES = ["#/home", "#/alerts", "#/check", "#/simulate", "#/results", "#/activity", "#/users"];
 
 // where a hash should land: { route, help }; anything unknown goes home
 function routeFor(hash) {
@@ -3449,6 +3602,8 @@ function route() {
     showAlert(r.id);
   } else if (r.name === "results") {
     showEval();
+  } else if (r.name === "check") {
+    showCheck();
   } else if (r.name === "activity") {
     showActivity();
   } else if (r.name === "users") {
@@ -3944,6 +4099,8 @@ function fillSymbols() {
   }
   $("symbol-name").textContent = state.symbol || "–";
   $("symbol-pick").hidden = state.symbols.length < 2; // one coin: nothing to choose
+  loadSymbolHistory();
+  if (state.route === "check") showCheck(); // the page was opened before the symbols were in
 }
 
 // the part of boot that needs a signed-in user: symbols, health, series, alerts, websocket
@@ -3959,6 +4116,7 @@ async function enterApp() {
     route();
     loadAlerts();
     loadSeries();
+    loadSymbolHistory();
     if (!state.ws) connect(); // the 4401 close left no socket
     return;
   }
@@ -3983,6 +4141,12 @@ async function enterApp() {
   await Promise.all([loadSeries(), loadAlerts()]);
   connect();
   setInterval(safely(tickInjections), 1000);
+  setInterval(
+    safely(() => {
+      if (state.view === "app" && state.route === "check") loadCheck();
+    }),
+    CHECK_POLL_MS,
+  );
   maybeStartTour();
 }
 
@@ -4017,6 +4181,14 @@ async function boot() {
     state.alertCountKnown = false; // a new coin's count is not news
     renderBudget(); // the count and the budget line are per coin
     loadSeries();
+    $("symbol-history").textContent = historyLine(null);
+    loadSymbolHistory();
+  });
+  $("check-symbol").addEventListener("change", (ev) => {
+    state.checkSymbol = ev.target.value;
+    resetCheck("กำลังอ่านข้อมูล");
+    $("check-error").hidden = true;
+    loadCheck();
   });
   if (!LWC) console.warn("dashboard: the chart library did not load");
 

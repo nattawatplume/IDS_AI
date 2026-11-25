@@ -509,3 +509,29 @@ def test_rule_rev2_stream_alerts_equal_batch_episodes(world):
     assert [a.model_dump_json() for a in sorted(closed, key=key)] == [
         a.model_dump_json() for a in sorted(want, key=key)
     ]
+
+
+def test_ring_point_carries_quote_vol_but_series_and_scores_do_not(small, store):
+    """Phase 2.2: each ring point keeps its stride's quote volume for the check page, while
+    `series` (hence `/api/series`) and the `scores` bus message keep their old keys."""
+    bus = Bus(maxsize=200_000)
+    qb, qs = bus.subscribe("bars"), bus.subscribe("scores")
+    p = pipe_for(small, store, bus=bus)
+    trades = small["trades"].filter(pl.col("ts_us") < small["t0"] + 3600 * S)
+    asyncio.run(p.run(Replayer(trades, speed=0)))
+    ring = list(p._ring[SYM])
+    series = p.series(SYM)
+    keys = {"t_end_us", "close", "F", "lane_rule", "lane_stat", "lane_ai"}
+    assert ring and all({*q} == keys | {"quote_vol"} for q in ring)
+    assert all({*q} == keys for q in series)
+    assert series == [{k: v for k, v in q.items() if k != "quote_vol"} for q in ring]
+    assert all({*m} == keys | {"symbol"} for m in drain(qs))
+    assert p.quote_vols(SYM) == [q["quote_vol"] for q in ring] and p.quote_vols("NOSUCH") == []
+    assert p.last_point(SYM) == series[-1] and p.last_point("NOSUCH") is None
+    stride = small["cfg"].features.stride_s
+    vol_at = {b["t_us"] + S: b["quote_vol"] for b in drain(qb)}  # bar close -> its volume
+    for q in ring:
+        want = sum(vol_at[q["t_end_us"] - k * S] for k in range(stride))
+        assert q["quote_vol"] == pytest.approx(want, rel=1e-12)
+    assert sum(p.quote_vols(SYM)) > 0
+    assert p.latest_us is not None and p.latest_us >= ring[-1]["t_end_us"]

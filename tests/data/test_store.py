@@ -395,3 +395,29 @@ def test_alert_deletion_refuses_live_and_unknown_provenance(store, provenance):
     with pytest.raises(ValueError):
         store.delete_alerts(provenance, ["c"])
     assert store.get_alert("c") is not None
+
+
+# ---- coin history (phase 2.1) ----
+
+
+def test_count_alerts_windows_provenance_and_one_row_per_episode(store):
+    day = DAY_US
+    now = D1_US + 40 * day
+    store.upsert_alert(make_alert("old", ts=now - 31 * day))  # outside 30 d
+    store.upsert_alert(make_alert("m20", ts=now - 20 * day, provenance="live"))
+    store.upsert_alert(make_alert("d3", ts=now - 3 * day))
+    store.upsert_alert(make_alert("sim", ts=now - 1 * day, provenance="sim"))  # never counted
+    store.upsert_alert(make_alert("eth", ts=now - 1 * day, symbol="ETHUSDT"))
+    store.upsert_alert(make_alert("edge", ts=now - 7 * day))  # the window's own edge counts
+    store.upsert_alert(make_alert("future", ts=now + 1))  # after "now": not yet
+    # one episode, upserted three times: still one alert
+    for status in ("open", "updated", "closed"):
+        store.upsert_alert(make_alert("ep", ts=now - day, status=status))
+    assert store.count_alerts("BTCUSDT", now - 7 * day, now) == 3  # d3, edge, ep
+    assert store.count_alerts("BTCUSDT", now - 30 * day, now) == 4  # + m20
+    assert store.count_alerts("ETHUSDT", now - 30 * day, now) == 1
+    assert store.count_alerts("BTCUSDT", now - 7 * day, now, ("sim",)) == 1
+    assert store.count_alerts("NOSUCH", 0, now) == 0
+    got = store.alerts_between("BTCUSDT", now - 30 * day, now)
+    assert [a.alert_id for a in got] == ["ep", "d3", "edge", "m20"]  # newest first
+    assert got[0].status == "closed"

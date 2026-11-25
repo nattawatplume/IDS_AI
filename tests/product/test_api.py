@@ -79,9 +79,18 @@ class FakePipe:
         self.samples = 400
         self.samples_by: dict[str, int] = {}
         self.late = 2
+        self.latest_us: int | None = None
+        self.vols: dict[str, list[float]] = {}
 
     def series(self, symbol):
         return list(self.points.get(symbol, ()))
+
+    def last_point(self, symbol):
+        pts = self.points.get(symbol)
+        return dict(pts[-1]) if pts else None
+
+    def quote_vols(self, symbol):
+        return list(self.vols.get(symbol, [0.0] * len(self.points.get(symbol, ()))))
 
     def baseline_samples(self, symbol):
         return self.samples_by.get(symbol, self.samples)
