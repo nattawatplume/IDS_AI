@@ -549,14 +549,19 @@ class Store:
         since_us: int | None = None,
         limit: int | None = None,
         provenances: tuple[str, ...] = COUNTED_PROVENANCE,
+        until_us: int | None = None,
     ) -> list[Alert]:
         """Alerts of every symbol with one of `provenances` (`sim` out by default) and
-        `ts_event_us >= since_us`, newest first, at most `limit`."""
+        `since_us <= ts_event_us <= until_us` (each bound optional), newest first, at most
+        `limit`."""
         where, args = self._prov_filter(provenances)
         sql = f"SELECT json FROM alerts WHERE {where}"
         if since_us is not None:
             sql += " AND ts_event_us >= ?"
             args.append(since_us)
+        if until_us is not None:
+            sql += " AND ts_event_us <= ?"
+            args.append(until_us)
         sql += " ORDER BY ts_event_us DESC, alert_id DESC"
         if limit is not None:
             sql += " LIMIT ?"
@@ -614,6 +619,13 @@ class Store:
         with self._lock:
             self._db().executemany(
                 "DELETE FROM alert_outcomes WHERE alert_id = ?", [(i,) for i in alert_ids]
+            )
+
+    def delete_orphan_outcomes(self) -> None:
+        """Drop the outcome rows whose alert is no longer stored."""
+        with self._lock:
+            self._db().execute(
+                "DELETE FROM alert_outcomes WHERE alert_id NOT IN (SELECT alert_id FROM alerts)"
             )
 
     def done_outcome_prices(

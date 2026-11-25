@@ -33,11 +33,12 @@ UNKNOWN_AFTER_US = 24 * HOUR_US  # still no price this long after the alert: unk
 LOOKBACK_US = 25 * HOUR_US  # the tracker looks at alerts this recent, plus pending rows
 MAX_GAP_US = 15 * MIN_US  # a price further than this from the time it stands for is not used
 TRACK_PERIOD_S = 60
-TRACK_LIMIT = 200
+TRACK_LIMIT = 200  # the track-record page's rows, and the tracker's first pass
+YIELD_EVERY = 50  # the tracker gives the event loop a turn after this many alerts
 
 NOTE_TH = [
     "นับเฉพาะการแจ้งเตือนที่เซิร์ฟเวอร์นี้เก็บไว้ ดิสก์ของเซิร์ฟเวอร์ไม่ถาวร "
-    "เมื่อเซิร์ฟเวอร์ถูกติดตั้งใหม่ ตัวเลขทั้งหมดจะเริ่มนับใหม่",
+    "เมื่อเซิร์ฟเวอร์เริ่มใหม่หรือถูกติดตั้งใหม่ ตัวเลขทั้งหมดจะเริ่มนับใหม่",
     "การแจ้งเตือนคือความผิดปกติทางสถิติของการซื้อขาย ไม่ได้กล่าวหาผู้ใด",
     "ราคา 1 ชม. หลังเตือนเป็นข้อมูลย้อนหลัง ไม่ใช่การพยากรณ์ "
     "และสัดส่วนที่ราคาต่ำกว่าตอนเตือนใน 1 ชม. ไม่ได้วัดว่าระบบถูกหรือผิด",
@@ -60,11 +61,12 @@ def _ring_after(pipeline: Any, symbol: str, t_us: int) -> tuple[int, float] | No
 
 
 def _archive_at(store: Store, symbol: str, t_us: int) -> tuple[int, float] | None:
-    """The last archived trade at or before `t_us`; only read when that UTC day is stored."""
+    """The last archived trade at or before `t_us` (within `MAX_GAP_US`); only read when that UTC
+    day is stored, and only that window: never a walk back over earlier days."""
     if not store.has_day(symbol, _day_of(t_us)):
         return None
-    tr = store.last_trade_before(symbol, t_us + 1)
-    return None if tr is None else (int(tr["ts_us"]), float(tr["price"]))
+    df = store.read_trades(symbol, t_us - MAX_GAP_US, t_us + 1)
+    return None if df.height == 0 else (int(df["ts_us"][-1]), float(df["price"][-1]))
 
 
 def _archive_after(store: Store, symbol: str, t_us: int) -> tuple[int, float] | None:
@@ -102,6 +104,7 @@ def resolve_outcome(
         price_at = None if hit is None else hit[1]
     t1h = ts + OUTCOME_AFTER_US
     price_1h = t_1h = None
+    settled_1h = False  # the archive holds the day of t1h and its window is over
     if now_us >= t1h:
         hit = _near(_ring_after(pipeline, sym, t1h), t1h)
         if hit is not None and hit[0] > now_us:  # the ring cannot be ahead of its clock
@@ -110,11 +113,14 @@ def resolve_outcome(
             hit = _near(_archive_after(store, sym, t1h), t1h)
             if hit is not None and hit[0] > now_us:  # the archive of a replay is: not yet
                 hit = None
+            settled_1h = (
+                hit is None and now_us >= t1h + MAX_GAP_US and store.has_day(sym, _day_of(t1h))
+            )
         if hit is not None:
             t_1h, price_1h = hit
     if price_at is not None and price_1h is not None:
         status = "done"
-    elif now_us > ts + UNKNOWN_AFTER_US:
+    elif now_us > ts + UNKNOWN_AFTER_US or settled_1h:  # no price will ever come
         status = "unknown"
     else:
         status = "pending"
@@ -134,27 +140,21 @@ def _same_row(a: dict | None, b: dict) -> bool:
     return a is not None and all(a.get(k) == v for k, v in b.items() if k != "updated_us")
 
 
-def track_step(
-    store: Store, pipeline: Any, wall_us: int | None = None, backfill: bool = False
-) -> int | None:
-    """Bring the outcomes of recent alerts up to date; returns the rows written, or None when the
-    pipeline has no clock yet (nothing is done before its first tick).
-
-    Looks only at `live` / `replay` alerts of the last `LOOKBACK_US` (by `ts_event_us`, on the
-    pipeline's clock) and at rows still `pending`; a `done` / `unknown` row is final. `backfill`
-    (the tracker's first pass only) looks at every stored alert instead, so alerts stored before
-    the tracker ran get a row once. A pending row whose alert is gone (a replay seek deleted it) is
-    dropped. Running it again changes nothing.
-    """
+def _track_iter(store: Store, pipeline: Any, wall_us: int | None, backfill: bool):
+    """The work of `track_step`, one alert at a time: yields after each alert it looks at and
+    returns the rows written (None when the pipeline has no clock yet)."""
     if pipeline is not None and getattr(pipeline, "latest_us", None) is None:
         return None
     now_us = now_us_of(pipeline)
     updated = now_us if wall_us is None else wall_us
-    since = None if backfill else now_us - LOOKBACK_US
-    alerts = {a.alert_id: a for a in store.counted_alerts(since_us=since)}
-    pending = store.list_outcomes("pending")
+    if backfill:
+        store.delete_orphan_outcomes()
+        found = store.counted_alerts(until_us=now_us, limit=TRACK_LIMIT)
+    else:
+        found = store.counted_alerts(since_us=now_us - LOOKBACK_US, until_us=now_us)
+    alerts = {a.alert_id: a for a in found}
     gone = []
-    for row in pending:
+    for row in store.list_outcomes("pending"):
         if row["alert_id"] in alerts:
             continue
         a = store.get_alert(row["alert_id"])
@@ -178,7 +178,46 @@ def track_step(
         if not _same_row(prev, row):
             store.upsert_outcome(row)
             n += 1
+        yield
     return n
+
+
+def track_step(
+    store: Store, pipeline: Any, wall_us: int | None = None, backfill: bool = False
+) -> int | None:
+    """Bring the outcomes of recent alerts up to date; returns the rows written, or None when the
+    pipeline has no clock yet (nothing is done before its first tick).
+
+    Looks only at `live` / `replay` alerts of the last `LOOKBACK_US` up to the pipeline's clock
+    (never one newer than it) and at rows still `pending`; a `done` / `unknown` row is final.
+    `backfill` (the tracker's first pass only) looks instead at the newest `TRACK_LIMIT` stored
+    alerts, so alerts stored before the tracker ran get a row once, and drops outcome rows whose
+    alert is gone. A pending row whose alert is gone (a replay seek deleted it) is dropped too.
+    Running it again changes nothing.
+    """
+    it = _track_iter(store, pipeline, wall_us, backfill)
+    while True:
+        try:
+            next(it)
+        except StopIteration as done:
+            return done.value
+
+
+async def track_step_async(
+    store: Store, pipeline: Any, wall_us: int | None = None, backfill: bool = False
+) -> int | None:
+    """`track_step` that gives the event loop a turn every `YIELD_EVERY` alerts. It stays on the
+    loop (never a thread): the pipeline's ring is not thread-safe."""
+    it = _track_iter(store, pipeline, wall_us, backfill)
+    k = 0
+    while True:
+        try:
+            next(it)
+        except StopIteration as done:
+            return done.value
+        k += 1
+        if k % YIELD_EVERY == 0:
+            await asyncio.sleep(0)
 
 
 class OutcomeTracker:
@@ -196,11 +235,20 @@ class OutcomeTracker:
             self._backfilled = True
         return n
 
+    async def astep(self) -> int | None:
+        """`step` on the event loop, yielding every `YIELD_EVERY` alerts."""
+        n = await track_step_async(
+            self.state.store, self.state.pipeline, backfill=not self._backfilled
+        )
+        if n is not None:
+            self._backfilled = True
+        return n
+
     async def run(self) -> None:
         while True:
             await asyncio.sleep(self.period_s)
             try:
-                self.step()
+                await self.astep()
             except Exception:  # one bad pass must not end the tracker (or the server)
                 log.exception("outcome tracker pass failed")
 

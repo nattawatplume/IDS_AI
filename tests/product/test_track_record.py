@@ -243,11 +243,104 @@ def test_nothing_runs_before_the_pipeline_has_a_clock(store):
     assert tracker.step() == 1 and tracker._backfilled
 
 
+def test_archive_price_at_reads_only_the_window_before_the_alert(store, monkeypatch):
+    def no_walk(*a, **k):
+        raise AssertionError("last_trade_before walks back over days")
+
+    monkeypatch.setattr(store, "last_trade_before", no_walk)
+    store.write_trades(
+        trades(
+            [
+                (T0 - 40 * MIN, 40.0),  # a walk back would find it; the window never does
+                (T0 - 10 * MIN, 45.0),
+                (T0 - S, 47.0),  # the last trade at or before the alert
+                (T0 + S, 99.0),  # after the alert: never the price at it
+            ]
+        )
+    )
+    assert oc._archive_at(store, SYM, T0) == (T0 - S, 47.0)
+    assert oc._archive_at(store, SYM, T0 - 11 * MIN) is None  # [T0-26m, T0-11m] has no trade
+    assert oc._archive_at(store, SYM, T0 - 40 * MIN + oc.MAX_GAP_US) == (T0 - 40 * MIN, 40.0)
+    assert oc._archive_at(store, SYM, T0 + 2 * 86_400 * S) is None  # that day is not stored
+
+
+def test_unknown_at_once_when_the_archive_day_has_no_trade_near_1h(store):
+    store.write_trades(trades([(T0 - S, 50.0), (T0 + HOUR + oc.MAX_GAP_US + MIN, 51.0)]))
+    store.upsert_alert(make_alert("g", ts=T0))
+    pipe = RingPipe(latest_us=T0 + HOUR + oc.MAX_GAP_US - S)
+    oc.track_step(store, pipe)
+    assert outcome(store, "g")["status"] == "pending"  # the window after 1 h is not over yet
+    pipe.latest_us = T0 + HOUR + oc.MAX_GAP_US
+    oc.track_step(store, pipe)
+    o = outcome(store, "g")
+    assert o["status"] == "unknown" and o["price_at"] == 50.0 and o["price_1h"] is None
+    # without the archive day the row waits for the ring, up to 24 h
+    store.upsert_alert(make_alert("w", ts=T0 + 2 * 86_400 * S))
+    pipe.latest_us = T0 + 2 * 86_400 * S + 2 * HOUR
+    oc.track_step(store, pipe)
+    assert outcome(store, "w")["status"] == "pending"
+
+
+def test_alerts_newer_than_the_clock_are_not_tracked(store):
+    store.upsert_alert(make_alert("now", ts=T0))
+    store.upsert_alert(make_alert("ahead", ts=T0 + MIN))
+    pipe = RingPipe(latest_us=T0)
+    oc.track_step(store, pipe)
+    oc.track_step(store, pipe, backfill=True)
+    assert outcome(store, "now") is not None and outcome(store, "ahead") is None
+
+
+def test_backfill_is_bounded_and_drops_orphan_rows(store, monkeypatch):
+    monkeypatch.setattr(oc, "TRACK_LIMIT", 2)
+    for k in range(4):
+        store.upsert_alert(make_alert(f"b{k}", ts=T0 - (40 + k) * HOUR))
+    store.upsert_outcome(
+        {
+            "alert_id": "orphan",
+            "symbol": SYM,
+            "ts_event_us": T0 - 50 * HOUR,
+            "price_at": 1.0,
+            "price_1h": 2.0,
+            "t_1h_us": T0 - 49 * HOUR,
+            "status": "done",
+            "updated_us": 1,
+        }
+    )
+    oc.track_step(store, RingPipe(latest_us=T0), backfill=True)
+    assert {r["alert_id"] for r in store.list_outcomes()} == {"b0", "b1"}  # the newest two
+    store.upsert_alert(make_alert("orphan", ts=T0 - 50 * HOUR))  # a normal pass keeps rows
+    store.upsert_outcome({**store.get_outcomes(["b0"])["b0"], "alert_id": "orphan"})
+    store.delete_alerts("replay", ["orphan"])
+    oc.track_step(store, RingPipe(latest_us=T0))
+    assert outcome(store, "orphan") is not None
+    oc.track_step(store, RingPipe(latest_us=T0), backfill=True)
+    assert outcome(store, "orphan") is None
+
+
+def test_async_pass_yields_to_the_loop(store, monkeypatch):
+    monkeypatch.setattr(oc, "YIELD_EVERY", 2)
+    for k in range(5):
+        store.upsert_alert(make_alert(f"y{k}", ts=T0 - k * MIN))
+    turns = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(d, *a):
+        if d == 0:
+            turns.append(1)
+        return await real_sleep(d, *a)
+
+    monkeypatch.setattr(oc.asyncio, "sleep", sleep)
+    tracker = oc.OutcomeTracker(SimpleNamespace(store=store, pipeline=RingPipe(latest_us=T0)))
+    assert asyncio.run(tracker.astep()) == 5 and tracker._backfilled
+    assert len(turns) == 2  # after alerts 2 and 4
+    assert asyncio.run(tracker.astep()) == 0  # same rows as the sync pass would write
+
+
 def test_tracker_runs_periodically_and_survives_a_bad_pass(store):
     calls = []
 
     class Flaky(oc.OutcomeTracker):
-        def step(self):
+        async def astep(self):
             calls.append(1)
             if len(calls) == 1:
                 raise RuntimeError("boom")
@@ -266,7 +359,11 @@ def test_tracker_runs_periodically_and_survives_a_bad_pass(store):
 
 def test_serve_runs_the_tracker_beside_the_session_purge(monkeypatch):
     steps = []
-    monkeypatch.setattr(oc.OutcomeTracker, "step", lambda self: steps.append(1))
+
+    async def astep(self):
+        steps.append(1)
+
+    monkeypatch.setattr(oc.OutcomeTracker, "astep", astep)
     monkeypatch.setattr(oc.OutcomeTracker.__init__, "__defaults__", (0.01,))
     ran = []
 
@@ -436,6 +533,42 @@ def test_track_page_markup_and_wording():
     for word in TRACK_FORBIDDEN:
         assert word not in page and word not in block, word
     assert ".track-tiles { grid-template-columns: minmax(0, 1fr); }" in css
+
+
+def test_track_prices_never_use_exponent_notation(tmp_path):
+    from tests.product.test_web_static import _run_dom, text
+
+    js = text("app.js")
+    fn = js[js.index("function fmtPrice(x)") :].split("\n}\n")[0]
+    assert "toPrecision" not in fn and "toExponential" not in fn
+    assert 'maximumSignificantDigits: 4' in fn and "toFixed(8)" in fn
+    _run_dom(tmp_path, "true", FMT_PRICE_BODY)
+
+
+FMT_PRICE_BODY = r"""
+for (const [x, want] of [
+  [5.98e-6, "0.00000598"], [0.0000001, "0.00000010"], [0.000512, "0.000512"],
+  [0.0123456, "0.01235"], [12.3456, "12.35"], [43210.5, "43,210"], [0, "0"], [NaN, "–"],
+]) {
+  const got = m.fmtPrice(x);
+  assert.strictEqual(got, want, `${x}: ${got}`);
+  assert.ok(!/e/i.test(got), got);
+}
+console.log("ok");
+"""
+
+
+def test_restart_note_names_restarts_too():
+    assert "เมื่อเซิร์ฟเวอร์เริ่มใหม่หรือถูกติดตั้งใหม่ ตัวเลขทั้งหมดจะเริ่มนับใหม่" in oc.NOTE_TH[0]
+
+
+def test_track_error_is_drawn_only_on_the_track_page():
+    from tests.product.test_web_static import text
+
+    js = text("app.js")
+    load = js[js.index("async function loadTrack(") :].split("\n}\n")[0]
+    catch = load[load.index("} catch (e) {") :]
+    assert catch.index('state.route !== "track"') < catch.index('$("track-error")')
 
 
 def test_track_page_renders_rows_as_text(tmp_path):
