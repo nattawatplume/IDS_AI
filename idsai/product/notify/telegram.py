@@ -33,7 +33,7 @@ import httpx
 
 from idsai.contracts.alert import Alert
 from idsai.data.store import TELEGRAM_CHAT_PREF
-from idsai.product.explainer import explain
+from idsai.product.explainer import HISTORY_TH, explain, history_line
 
 log = logging.getLogger(__name__)
 
@@ -50,13 +50,6 @@ MAX_SENDS = 8  # sends in flight at once
 BANGKOK = timezone(timedelta(hours=7), "Asia/Bangkok")  # no DST in Thailand
 
 HEAD_TH = "⚠️ ตรวจพบความผิดปกติทางสถิติ"
-# source: docs/ROADMAP.md, "ผลเฟส 0" (REAL real_t001, budget 2, 5 seeds): 88.8 % [83.8, 93.4] of
-# caught real pumps were below the alert price 1 h later, and the median highest price within that
-# hour (max_up_1h) was +15.5 %: the two are always shown together. History, not a forecast.
-HISTORY_TH = (
-    "ข้อมูลในอดีต (pump จริงที่ระบบจับได้ คู่ BTC 2018–2021): 1 ชม. หลังเตือน "
-    "ราคาต่ำกว่าตอนเตือน 89% ของครั้ง แต่ในชั่วโมงนั้นราคายังขึ้นต่อได้ (มัธยฐาน +15%)"
-)
 DISCLAIMER_TH = "เป็นข้อมูลความผิดปกติทางสถิติ ไม่ใช่คำแนะนำการลงทุน และไม่ได้กล่าวหาผู้ใด"
 LINKED_TH = "เชื่อมบัญชี {name} แล้ว พิมพ์ /stop เพื่อยกเลิก"
 EXPIRED_TH = "ลิงก์นี้หมดอายุหรือใช้ไปแล้ว กลับไปกด «เชื่อม Telegram» บนเว็บอีกครั้ง"
@@ -217,7 +210,7 @@ def message_text(alert: Alert, public_url: str | None = None) -> str:
         f"{HEAD_TH} · {alert.symbol}",
         f"{fmt_bangkok(alert.ts_event_us)} {TIME_TH}",
         explain(alert).text_th,
-        *(() if getattr(alert, "phase", None) == "sell" else (HISTORY_TH,)),
+        *(() if history_line(alert) is None else (HISTORY_TH,)),
         DISCLAIMER_TH,
     ]
     if public_url:

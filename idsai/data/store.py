@@ -36,6 +36,18 @@ _VERDICTS = ("tp", "fp", "unsure")
 _DELETABLE_PROVENANCE = ("replay", "sim")
 # a coin's alert history counts these; `sim` (Red-Team injects) is never a coin's own history
 COUNTED_PROVENANCE = ("live", "replay")
+# alert_outcomes.status: not yet 1 h after / both prices known / a price could not be recovered
+OUTCOME_STATUSES = ("pending", "done", "unknown")
+_OUTCOME_COLS = (
+    "alert_id",
+    "symbol",
+    "ts_event_us",
+    "price_at",
+    "price_1h",
+    "t_1h_us",
+    "status",
+    "updated_us",
+)
 
 
 def _now_us() -> int:
@@ -124,6 +136,11 @@ class Store:
             "CREATE TABLE IF NOT EXISTS audit_log("
             "ts_us BIGINT, user_id VARCHAR, username VARCHAR, action VARCHAR, "
             "target VARCHAR, detail VARCHAR)"
+        )
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS alert_outcomes("
+            "alert_id VARCHAR PRIMARY KEY, symbol VARCHAR, ts_event_us BIGINT, price_at DOUBLE, "
+            "price_1h DOUBLE, t_1h_us BIGINT, status VARCHAR, updated_us BIGINT)"
         )
 
     # ---- trades ----
@@ -519,6 +536,161 @@ class Store:
             )
             names = [d[0] for d in cur.description]
             return [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+
+    # ---- alerts across symbols, outcomes (the track record) ----
+
+    @staticmethod
+    def _prov_filter(provenances: tuple[str, ...]) -> tuple[str, list[Any]]:
+        marks = ", ".join("?" for _ in provenances)
+        return f"json_extract_string(json, '$.provenance') IN ({marks})", list(provenances)
+
+    def counted_alerts(
+        self,
+        since_us: int | None = None,
+        limit: int | None = None,
+        provenances: tuple[str, ...] = COUNTED_PROVENANCE,
+        until_us: int | None = None,
+    ) -> list[Alert]:
+        """Alerts of every symbol with one of `provenances` (`sim` out by default) and
+        `since_us <= ts_event_us <= until_us` (each bound optional), newest first, at most
+        `limit`."""
+        where, args = self._prov_filter(provenances)
+        sql = f"SELECT json FROM alerts WHERE {where}"
+        if since_us is not None:
+            sql += " AND ts_event_us >= ?"
+            args.append(since_us)
+        if until_us is not None:
+            sql += " AND ts_event_us <= ?"
+            args.append(until_us)
+        sql += " ORDER BY ts_event_us DESC, alert_id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        with self._lock:
+            rows = self._db().execute(sql, args).fetchall()
+        return [a for r in rows if (a := self._read_alert(r[0])) is not None]
+
+    def counted_alert_stats(
+        self, provenances: tuple[str, ...] = COUNTED_PROVENANCE
+    ) -> tuple[int, int | None]:
+        """`(how many, the earliest ts_event_us or None)` of the alerts `counted_alerts` gives."""
+        where, args = self._prov_filter(provenances)
+        with self._lock:
+            n, first = (
+                self._db()
+                .execute(f"SELECT count(*), min(ts_event_us) FROM alerts WHERE {where}", args)
+                .fetchone()
+            )
+        return int(n), first
+
+    def upsert_outcome(self, row: dict) -> None:
+        """Insert or replace one `alert_outcomes` row (every column of `_OUTCOME_COLS`)."""
+        if row["status"] not in OUTCOME_STATUSES:
+            raise ValueError(f"status must be one of {OUTCOME_STATUSES}, got {row['status']!r}")
+        cols = ", ".join(_OUTCOME_COLS)
+        marks = ", ".join("?" for _ in _OUTCOME_COLS)
+        with self._lock:
+            self._db().execute(
+                f"INSERT OR REPLACE INTO alert_outcomes({cols}) VALUES ({marks})",
+                [row[c] for c in _OUTCOME_COLS],
+            )
+
+    def get_outcomes(self, alert_ids: list[str]) -> dict[str, dict]:
+        """The outcome rows of `alert_ids` that exist, keyed by alert_id."""
+        if not alert_ids:
+            return {}
+        marks = ", ".join("?" for _ in alert_ids)
+        rows = self._rows(
+            f"SELECT {', '.join(_OUTCOME_COLS)} FROM alert_outcomes WHERE alert_id IN ({marks})",
+            list(alert_ids),
+        )
+        return {r["alert_id"]: r for r in rows}
+
+    def list_outcomes(self, status: str | None = None) -> list[dict]:
+        """Outcome rows (of `status` when given), oldest alert first."""
+        where, args = ("WHERE status = ? ", [status]) if status is not None else ("", [])
+        return self._rows(
+            f"SELECT {', '.join(_OUTCOME_COLS)} FROM alert_outcomes {where}"
+            "ORDER BY ts_event_us, alert_id",
+            args,
+        )
+
+    def delete_outcomes(self, alert_ids: list[str]) -> None:
+        with self._lock:
+            self._db().executemany(
+                "DELETE FROM alert_outcomes WHERE alert_id = ?", [(i,) for i in alert_ids]
+            )
+
+    def delete_orphan_outcomes(self) -> None:
+        """Drop the outcome rows whose alert is no longer stored."""
+        with self._lock:
+            self._db().execute(
+                "DELETE FROM alert_outcomes WHERE alert_id NOT IN (SELECT alert_id FROM alerts)"
+            )
+
+    def done_outcome_prices(
+        self, provenances: tuple[str, ...] = COUNTED_PROVENANCE
+    ) -> list[tuple[float, float]]:
+        """`(price_at, price_1h)` of every `done` outcome whose alert is still stored."""
+        where, args = self._prov_filter(provenances)
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT o.price_at, o.price_1h FROM alert_outcomes o "
+                    f"JOIN (SELECT alert_id FROM alerts WHERE {where}) a USING (alert_id) "
+                    "WHERE o.status = 'done'",
+                    args,
+                )
+                .fetchall()
+            )
+        return [(float(p0), float(p1)) for p0, p1 in rows]
+
+    def feedback_counts(self, alert_ids: list[str] | None = None) -> dict[str, dict[str, int]]:
+        """Per alert, `{tp, fp, unsure}`: each analyst's latest verdict counts once (a changed
+        mind replaces the earlier vote). Every alert with feedback when `alert_ids` is None."""
+        sql = (
+            "SELECT alert_id, verdict, count(*) FROM ("
+            "SELECT alert_id, verdict, row_number() OVER ("
+            "PARTITION BY alert_id, analyst ORDER BY ts_us DESC, rowid DESC) AS k FROM feedback"
+        )
+        args: list[Any] = []
+        if alert_ids is not None:
+            if not alert_ids:
+                return {}
+            sql += f" WHERE alert_id IN ({', '.join('?' for _ in alert_ids)})"
+            args = list(alert_ids)
+        sql += ") WHERE k = 1 GROUP BY alert_id, verdict"
+        with self._lock:
+            rows = self._db().execute(sql, args).fetchall()
+        out: dict[str, dict[str, int]] = {}
+        for aid, verdict, n in rows:
+            if verdict in _VERDICTS:
+                out.setdefault(aid, dict.fromkeys(_VERDICTS, 0))[verdict] = int(n)
+        return out
+
+    def feedback_totals(self, provenances: tuple[str, ...] = COUNTED_PROVENANCE) -> dict[str, int]:
+        """`{tp, fp, unsure}` summed over the stored alerts of `provenances`, counted as
+        `feedback_counts` does (each analyst's latest verdict per alert)."""
+        where, args = self._prov_filter(provenances)
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT verdict, count(*) FROM ("
+                    "SELECT f.verdict, row_number() OVER (PARTITION BY f.alert_id, f.analyst "
+                    "ORDER BY f.ts_us DESC, f.rowid DESC) AS k FROM feedback f "
+                    f"JOIN (SELECT alert_id FROM alerts WHERE {where}) a USING (alert_id)"
+                    ") WHERE k = 1 GROUP BY verdict",
+                    args,
+                )
+                .fetchall()
+            )
+        out = dict.fromkeys(_VERDICTS, 0)
+        for verdict, n in rows:
+            if verdict in out:
+                out[verdict] = int(n)
+        return out
 
     # ---- runs ----
 

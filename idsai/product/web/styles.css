@@ -1245,6 +1245,25 @@ td.when { white-space: nowrap; }
   .check-chip { font-size: 20px; }
 }
 
+/* ------------------------------------------------------------------ track record (phase 2.3) */
+.track-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 0 0 4px; }
+.track-tile .card-sub { flex-wrap: wrap; }
+.track-table td.num, .track-table th.num { text-align: right; white-space: nowrap; }
+.track-change.down { color: var(--amber); }
+.track-change.up { color: var(--dim); }
+.track-notes { margin: 12px 0 0; padding-left: 20px; }
+.track-notes li { margin: 4px 0; }
+.history-note { margin: 8px 0 0; font-size: 12px; }
+.history-src { opacity: 0.8; }
+@media (max-width: 1199px) {
+  .track-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 719px) {
+  .track-tiles { grid-template-columns: minmax(0, 1fr); }
+  .track-table { font-size: 13px; }
+  .track-table th, .track-table td { padding: 6px 8px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
   button:active:not(:disabled) { transform: none; }

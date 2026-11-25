@@ -39,6 +39,7 @@ in live mode, and live rows are never touched.
 """
 
 import asyncio
+import bisect
 import math
 import time
 from collections import deque
@@ -133,6 +134,30 @@ class StreamPipeline:
         """The quote volume of each `series` point's stride (the `stride_s` bars ending at its
         `t_end_us`), aligned with `series(symbol)`: the check page's liquidity reads it."""
         return [p["quote_vol"] for p in self._ring.get(symbol, ())]
+
+    def close_at(self, symbol: str, t_us: int) -> tuple[int, float] | None:
+        """`(t_end_us, close)` of the newest ring point with `t_end_us <= t_us` and a close, or
+        None. Read-only: the track record's price at an alert."""
+        ring = self._ring.get(symbol)
+        if not ring:
+            return None
+        i = bisect.bisect_right(ring, t_us, key=lambda p: p["t_end_us"])
+        for k in range(i - 1, -1, -1):
+            if ring[k]["close"] is not None:
+                return ring[k]["t_end_us"], ring[k]["close"]
+        return None
+
+    def close_after(self, symbol: str, t_us: int) -> tuple[int, float] | None:
+        """`(t_end_us, close)` of the oldest ring point with `t_end_us >= t_us` and a close, or
+        None. Read-only: the track record's price 1 h after an alert."""
+        ring = self._ring.get(symbol)
+        if not ring:
+            return None
+        i = bisect.bisect_left(ring, t_us, key=lambda p: p["t_end_us"])
+        for k in range(i, len(ring)):
+            if ring[k]["close"] is not None:
+                return ring[k]["t_end_us"], ring[k]["close"]
+        return None
 
     @property
     def latest_us(self) -> int | None:

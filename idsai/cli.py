@@ -1284,6 +1284,31 @@ def with_session_purge(
     return run
 
 
+def with_outcomes(
+    state: Any, background: Callable[[], Coroutine[Any, Any, None]]
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """`background` plus the track record's `OutcomeTracker` (every 60 s): like the session purge
+    it keeps running after the pipeline ends and stops with the server."""
+    import asyncio
+    import contextlib
+
+    from idsai.product.outcomes import OutcomeTracker
+
+    tracker = OutcomeTracker(state)
+
+    async def run() -> None:
+        task = asyncio.create_task(tracker.run())
+        try:
+            await background()
+            await task
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    return run
+
+
 def with_telegram(
     state: Any, background: Callable[[], Coroutine[Any, Any, None]]
 ) -> Callable[[], Coroutine[Any, Any, None]]:
@@ -1343,7 +1368,12 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
         store.purge_sessions(_now_us())
         app = create_app(state, allowed_hosts=allowed_hosts(host, args.public_host))
         _say(f"เปิดที่ http://{host if ':' not in host else f'[{host}]'}:{port} (กด Ctrl+C เพื่อหยุด)")
-        run_server(app, host, port, with_telegram(state, with_session_purge(store, background)))
+        run_server(
+            app,
+            host,
+            port,
+            with_telegram(state, with_outcomes(state, with_session_purge(store, background))),
+        )
     return 0
 
 
