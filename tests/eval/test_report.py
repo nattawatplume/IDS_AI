@@ -1380,3 +1380,54 @@ def test_m5_select_nothing_significant_or_no_base():
     assert m5_select([_m5_row("r101", gain=0.3, sig=True)])["chosen"] is None
     sel = m5_select([M5_BASE, _m5_row("r102", error="boom"), _m5_row("r101", gain=0.1, sig=True)])
     assert sel["chosen"] == "r101" and "r102" in sel["excluded"]
+
+
+# ---------------------------------------------------------------- reading of non-selected pairs
+def _vs_row(variant, diff=None, ci=None, sig=False, below=False):
+    vs = None if diff is None else {"diff_mean": diff, "ci": list(ci), "ci_unit": "event"}
+    return {
+        "variant": variant, "error": None, "n_seeds": 5, "n_events": 100,
+        "recall_any": 0.7, "recall_any_ci": [0.6, 0.8],
+        "recall_correct": 0.5, "recall_correct_ci": [0.4, 0.6],
+        "fa": 1.5, "fa_ci": [1.2, 1.8], "fa_hard": None, "fa_hard_ci": None,
+        "fa_named": None, "fa_named_by_rule": None, "n_fa_episodes": 0,
+        "vs_ref_any": vs, "vs_ref_correct": vs, "reason_any_th": None,
+        "gain_any_significant": sig, "below_ref": below,
+    }  # fmt: skip
+
+
+def test_nonsig_reading_separates_small_significant_changes_from_no_change():
+    from idsai.eval.report import _nonsig_th
+
+    worse = _nonsig_th({"ci": [-0.021, -0.012]}, 0.02, "base", "recall_any")
+    assert worse.startswith("recall_any ลดลงจาก base อย่างมีนัย") and "min_effect" in worse
+    small = _nonsig_th({"ci": [0.005, 0.010]}, 0.02, "base", "recall_any")
+    assert small.startswith("recall_any เพิ่มจาก base อย่างมีนัย") and "min_effect" in small
+    for ci in ([0.0, 0.032], [-0.01, 0.01], [0.0, 0.0]):  # CI touching 0: no significant change
+        assert _nonsig_th({"ci": ci}, 0.02, "base", "recall_any") == (
+            "recall_any ไม่ต่างจาก base อย่างมีนัย"
+        )
+    assert _nonsig_th(None, 0.02, "no_ai") == "ไม่ต่างจาก no_ai อย่างมีนัย"
+
+
+def test_m5_md_reads_a_ci_wholly_below_zero_as_a_decrease():
+    from idsai.eval.report import _m5_md
+
+    rows = [
+        _vs_row("base"),
+        _vs_row("r101", 0.001, (0.0, 0.002)),
+        _vs_row("r101_25", 0.007, (0.005, 0.010)),
+        _vs_row("r102", -0.016, (-0.021, -0.012)),
+        _vs_row("r101+r102", -0.05, (-0.07, -0.03), below=True),  # beyond min_effect
+    ]
+    m5 = {"splits": {"semisyn": {"provenance": "SEMI-SYN", "rows": rows}}, "selection": None,
+          "confusion": {}, "rule_th": "rule", "notes": []}  # fmt: skip
+    verdict = {
+        line.split("|")[1].strip(): line.split("|")[-2].strip()
+        for line in _m5_md(m5, 0.02)
+        if line.startswith("| r1")
+    }
+    assert verdict["r101"] == "recall_any ไม่ต่างจาก base อย่างมีนัย"
+    assert verdict["r101_25"].startswith("recall_any เพิ่มจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
+    assert verdict["r102"].startswith("recall_any ลดลงจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
+    assert verdict["r101+r102"] == "recall_any ต่ำกว่า base อย่างมีนัย"

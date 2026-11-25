@@ -118,7 +118,9 @@ from idsai.eval.experiments import (
     M2_FUSIONS,
     M2_MODELS,
     M2_REF,
+    M3,
     M3_VARIANTS,
+    M5,
     M5_VARIANTS,
 )
 from idsai.eval.metrics import (
@@ -1123,6 +1125,21 @@ def _m2(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
     }
 
 
+def _nonsig_th(vs: dict[str, Any] | None, min_effect: float, ref: str, metric: str = "") -> str:
+    """Thai reading of a paired X − `ref` row that failed both selection tests (gain and
+    reverse, each `CI excludes 0 and |diff| >= min_effect`): a CI wholly below / above 0 is
+    still a significant change, only smaller than `min_effect`; otherwise no significant change.
+    Display only: selection never reads it."""
+    head = f"{metric} " if metric else ""
+    if vs is not None:
+        lo, hi = vs["ci"]
+        if hi < 0:
+            return f"{head}ลดลงจาก {ref} อย่างมีนัย แต่น้อยกว่า min_effect ({min_effect:g})"
+        if lo > 0:
+            return f"{head}เพิ่มจาก {ref} อย่างมีนัย แต่น้อยกว่า min_effect ({min_effect:g})"
+    return f"{head}ไม่ต่างจาก {ref} อย่างมีนัย"
+
+
 def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
     lines = ["", f"### m2_ai: ชั้น AI และการรวมคะแนน เทียบ no_ai (budget {PAIRED_BUDGET:g})"]
     if m2 is None:
@@ -1163,7 +1180,7 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
                 elif r["below_ref"]:
                     verdict = "ต่ำกว่า no_ai อย่างมีนัย"
                 else:
-                    verdict = "ไม่ต่างจาก no_ai อย่างมีนัย"
+                    verdict = _nonsig_th(r["vs_ref"], min_effect, "no_ai")
             lines.append(
                 f"| {r['variant']} | {r['n_seeds']} | "
                 f"{'–' if r['n_events'] is None else r['n_events']} | "
@@ -1203,7 +1220,6 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
-M3 = "m3_attr"
 M3_REF = "base"
 M3_FA_FACTOR = 1.02
 M3_TOL = 1e-12
@@ -1525,7 +1541,7 @@ def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
                 elif r["gain_correct_significant"]:
                     verdict = "recall_correct สูงกว่า base อย่างมีนัย"
                 else:
-                    verdict = "recall_correct ไม่ต่างจาก base อย่างมีนัย"
+                    verdict = _nonsig_th(vc, min_effect, "base", "recall_correct")
             named = (
                 "–"
                 if r["fa_named"] is None
@@ -1561,14 +1577,13 @@ def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
-M5 = "m5_rules"
 M5_RULE_TH = (
     "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัวอ้างอิงคือ base (ชุดตรวจจับของระบบจริง: "
     "กฎ rev 1 + กฎฝั่งขาย + สถิติ + ai.iforest แบบ shift 1 + กฎระบุเทคนิค); ตัวแปรที่มีสิทธิ์ต้องมี FA ของ accept "
     f"และ FA ของวันผันผวนสูง (accept-hard) แต่ละค่า ≤ {M3_FA_FACTOR:.2f} เท่าของ base ที่งบ 2; "
     "ในกลุ่มนี้ เฉพาะตัวที่ recall_any เพิ่มจาก base อย่างมีนัย (paired bootstrap ข้ามเหตุการณ์: "
     "CI ล่างของ (X − base) > 0 และผลต่าง ≥ min_effect) เลือกตัวที่เพิ่มมากที่สุด ถ้าไม่มีเลยเลือก base; "
-    "ถ้าผลเพิ่มเท่ากันเลือกตัวที่ง่ายกว่า: base < r101 < r101_25 < r102 < r101+r102"
+    "ถ้าผลเพิ่มเท่ากันเลือกตัวที่ง่ายกว่า: " + " < ".join(M5_VARIANTS)
 )
 M5_NOTES_TH = [
     "ผล test และ semisyn รายงานครั้งเดียวไว้ดูเท่านั้น ไม่ได้ใช้เลือกตัวแปร",
@@ -1583,7 +1598,12 @@ M5_NOTES_TH = [
     "เหลือ 0.001) การลดเกณฑ์จะตั้งชื่อให้การแจ้งเตือนผิดพลาดเพิ่มเท่านั้น",
     "F คือ −log10 ของ anomaly p-value ซึ่งบอกระดับความผิดปกติทางสถิติเทียบตลาดปกติ "
     "ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา และไม่ใช่ข้อกล่าวหาผู้ใด",
-    "การเปิดกฎ rev 2 ในระบบจริง (chief.rule_rev2 ใน configs/default.yaml) เป็นขั้นตอนแยกหลังดูผลนี้",
+    "recall_correct และสัดส่วน FA ที่มีชื่อรายงานไว้ดูเท่านั้น ไม่ได้ใช้ในกฎเลือก "
+    "(กฎเลือกดู recall_any และเพดาน FA / FA-hard เท่านั้น)",
+    "การเปิดกฎ rev 2 ในระบบจริง (chief.rule_rev2 ใน configs/default.yaml) เป็นขั้นตอนแยกหลังดูผลนี้ "
+    "และต้องฝึก bundle ใหม่ทุกตัว เพราะกฎอยู่ใน F และ τ สอบเทียบกับกฎชุดเดิม; ตอนนี้ bundle.json "
+    "ไม่ได้เก็บ sha ของ configs/signatures_r2.yaml (เก็บแค่ config_hash) "
+    "จึงต้องเพิ่ม sha นี้ใน meta ของ bundle ก่อนเปิดใช้",
 ]
 NO_M5_TH = "ยังไม่มีผล m5_rules"
 
@@ -1624,7 +1644,7 @@ def _m5_md(m5: dict[str, Any] | None, min_effect: float) -> list[str]:
                 elif r["below_ref"]:
                     verdict = "recall_any ต่ำกว่า base อย่างมีนัย"
                 else:
-                    verdict = "recall_any ไม่ต่างจาก base อย่างมีนัย"
+                    verdict = _nonsig_th(va, min_effect, "base", "recall_any")
             named = (
                 "–"
                 if r["fa_named"] is None
