@@ -1399,15 +1399,30 @@ def _vs_row(variant, diff=None, ci=None, sig=False, below=False):
 def test_nonsig_reading_separates_small_significant_changes_from_no_change():
     from idsai.eval.report import _nonsig_th
 
-    worse = _nonsig_th({"ci": [-0.021, -0.012]}, 0.02, "base", "recall_any")
-    assert worse.startswith("recall_any ลดลงจาก base อย่างมีนัย") and "min_effect" in worse
-    small = _nonsig_th({"ci": [0.005, 0.010]}, 0.02, "base", "recall_any")
-    assert small.startswith("recall_any เพิ่มจาก base อย่างมีนัย") and "min_effect" in small
+    def th(diff, ci, ref="base", metric="recall_any"):
+        return _nonsig_th({"diff_mean": diff, "ci": ci}, 0.02, ref, metric)
+
+    small = " แต่น้อยกว่า min_effect (0.02)"
+    assert th(-0.016, [-0.021, -0.012]) == "recall_any ลดลงจาก base อย่างมีนัย" + small
+    assert th(0.007, [0.005, 0.010]) == "recall_any เพิ่มจาก base อย่างมีนัย" + small
+    assert th(0.001, [0.00017, 0.002]) == "recall_any เพิ่มจาก base อย่างมีนัย" + small
+    # M3 runs the reverse test on recall_any only: a large recall_correct drop reaches here
+    # and must not be called smaller than min_effect
+    big = th(-0.05, [-0.07, -0.03], metric="recall_correct")
+    assert big == "recall_correct ลดลงจาก base อย่างมีนัย"
+    assert th(0.02, [0.001, 0.04]) == "recall_any เพิ่มจาก base อย่างมีนัย"  # exactly min_effect
     for ci in ([0.0, 0.032], [-0.01, 0.01], [0.0, 0.0]):  # CI touching 0: no significant change
-        assert _nonsig_th({"ci": ci}, 0.02, "base", "recall_any") == (
-            "recall_any ไม่ต่างจาก base อย่างมีนัย"
-        )
+        assert th(0.0, ci) == "recall_any ไม่ต่างจาก base อย่างมีนัย"
     assert _nonsig_th(None, 0.02, "no_ai") == "ไม่ต่างจาก no_ai อย่างมีนัย"
+
+
+def test_diff_ci_never_prints_a_nonzero_bound_as_zero():
+    from idsai.eval.report import _fmt_diff_ci
+
+    assert _fmt_diff_ci(0.001, [0.000169, 0.002]) == "0.001 [0.0002, 0.002]"
+    assert _fmt_diff_ci(-0.001, [-0.002, -0.00004]) == "-0.001 [-0.002, -0.00004]"
+    assert _fmt_diff_ci(0.0, [0.0, 0.0]) == "0.000 [0.000, 0.000]"  # a true 0 stays 0.000
+    assert _fmt_diff_ci(-0.016, [-0.021, -0.012]) == "-0.016 [-0.021, -0.012]"
 
 
 def test_m5_md_reads_a_ci_wholly_below_zero_as_a_decrease():
@@ -1415,7 +1430,8 @@ def test_m5_md_reads_a_ci_wholly_below_zero_as_a_decrease():
 
     rows = [
         _vs_row("base"),
-        _vs_row("r101", 0.001, (0.0, 0.002)),
+        _vs_row("r101", 0.001, (0.00017, 0.002)),  # the real semisyn case
+        _vs_row("r101_x", 0.0, (0.0, 0.0)),
         _vs_row("r101_25", 0.007, (0.005, 0.010)),
         _vs_row("r102", -0.016, (-0.021, -0.012)),
         _vs_row("r101+r102", -0.05, (-0.07, -0.03), below=True),  # beyond min_effect
@@ -1427,7 +1443,9 @@ def test_m5_md_reads_a_ci_wholly_below_zero_as_a_decrease():
         for line in _m5_md(m5, 0.02)
         if line.startswith("| r1")
     }
-    assert verdict["r101"] == "recall_any ไม่ต่างจาก base อย่างมีนัย"
+    assert verdict["r101"].startswith("recall_any เพิ่มจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
+    assert verdict["r101_x"] == "recall_any ไม่ต่างจาก base อย่างมีนัย"
+    assert "0.001 [0.0002, 0.002]" in next(x for x in _m5_md(m5, 0.02) if x.startswith("| r101 "))
     assert verdict["r101_25"].startswith("recall_any เพิ่มจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
     assert verdict["r102"].startswith("recall_any ลดลงจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
     assert verdict["r101+r102"] == "recall_any ต่ำกว่า base อย่างมีนัย"

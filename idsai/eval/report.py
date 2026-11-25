@@ -124,6 +124,7 @@ from idsai.eval.experiments import (
     M5_VARIANTS,
 )
 from idsai.eval.metrics import (
+    EFFECT_TOL,
     MIN_EVENTS,
     UNCLASSIFIED,
     _parent,
@@ -1126,17 +1127,20 @@ def _m2(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
 
 
 def _nonsig_th(vs: dict[str, Any] | None, min_effect: float, ref: str, metric: str = "") -> str:
-    """Thai reading of a paired X − `ref` row that failed both selection tests (gain and
-    reverse, each `CI excludes 0 and |diff| >= min_effect`): a CI wholly below / above 0 is
-    still a significant change, only smaller than `min_effect`; otherwise no significant change.
-    Display only: selection never reads it."""
+    """Thai reading of a paired X − `ref` row that failed the selection tests shown before it.
+
+    A CI wholly below / above 0 is still a significant change: "แต่น้อยกว่า min_effect" is added
+    only when |diff| really is below `min_effect` (M3 checks the reverse test on recall_any only,
+    so a recall_correct row can reach here with a large significant decrease); otherwise no
+    significant change. Display only: selection never reads it."""
     head = f"{metric} " if metric else ""
     if vs is not None:
         lo, hi = vs["ci"]
-        if hi < 0:
-            return f"{head}ลดลงจาก {ref} อย่างมีนัย แต่น้อยกว่า min_effect ({min_effect:g})"
-        if lo > 0:
-            return f"{head}เพิ่มจาก {ref} อย่างมีนัย แต่น้อยกว่า min_effect ({min_effect:g})"
+        if hi < 0 or lo > 0:
+            word = "ลดลง" if hi < 0 else "เพิ่ม"
+            small = abs(vs["diff_mean"]) < min_effect - EFFECT_TOL
+            tail = f" แต่น้อยกว่า min_effect ({min_effect:g})" if small else ""
+            return f"{head}{word}จาก {ref} อย่างมีนัย{tail}"
     return f"{head}ไม่ต่างจาก {ref} อย่างมีนัย"
 
 
@@ -1172,7 +1176,7 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
             elif r["vs_ref"] is None:
                 diff, verdict = "–", r["reason_th"] or "–"
             else:
-                diff = _fmt_ci(r["vs_ref"]["diff_mean"], r["vs_ref"]["ci"])
+                diff = _fmt_diff_ci(r["vs_ref"]["diff_mean"], r["vs_ref"]["ci"])
                 if r["reason_th"]:
                     verdict = r["reason_th"]
                 elif r["gain_significant"]:
@@ -1532,8 +1536,8 @@ def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
                 verdict = "ตัวอ้างอิง"
             else:
                 vc, va = r["vs_ref_correct"], r["vs_ref_any"]
-                d_c = "–" if vc is None else _fmt_ci(vc["diff_mean"], vc["ci"])
-                d_a = "–" if va is None else _fmt_ci(va["diff_mean"], va["ci"])
+                d_c = "–" if vc is None else _fmt_diff_ci(vc["diff_mean"], vc["ci"])
+                d_a = "–" if va is None else _fmt_diff_ci(va["diff_mean"], va["ci"])
                 if r["reason_th"]:
                     verdict = r["reason_th"]
                 elif r["below_ref"]:
@@ -1635,8 +1639,8 @@ def _m5_md(m5: dict[str, Any] | None, min_effect: float) -> list[str]:
                 verdict = "ตัวอ้างอิง"
             else:
                 vc, va = r["vs_ref_correct"], r["vs_ref_any"]
-                d_c = "–" if vc is None else _fmt_ci(vc["diff_mean"], vc["ci"])
-                d_a = "–" if va is None else _fmt_ci(va["diff_mean"], va["ci"])
+                d_c = "–" if vc is None else _fmt_diff_ci(vc["diff_mean"], vc["ci"])
+                d_a = "–" if va is None else _fmt_diff_ci(va["diff_mean"], va["ci"])
                 if r["reason_any_th"]:
                     verdict = r["reason_any_th"]
                 elif r["gain_any_significant"]:
@@ -2078,6 +2082,20 @@ def _fmt(x: float | None, nd: int = 3) -> str:
 def _fmt_ci(mean: float | None, ci: list[float] | None) -> str:
     s = _fmt(mean)
     return f"{s} [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci else s
+
+
+def _fmt_bound(x: float, nd: int = 3) -> str:
+    """A paired-difference CI bound: `nd` decimals, but a non-zero bound that would print as
+    0.000 gets one significant digit (0.00017 -> 0.0002), so a CI that excludes 0 never looks
+    like it touches 0."""
+    if x != 0 and round(x, nd) == 0:
+        return f"{x:.{-math.floor(math.log10(abs(x)))}f}"
+    return _fmt(x, nd)
+
+
+def _fmt_diff_ci(mean: float | None, ci: list[float] | None) -> str:
+    s = _fmt(mean)
+    return f"{s} [{_fmt_bound(ci[0])}, {_fmt_bound(ci[1])}]" if ci else s
 
 
 def _fmt_fa(mean: float | None, ci: list[float] | None, n_days: int | None) -> str:
