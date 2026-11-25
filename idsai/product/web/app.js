@@ -3385,10 +3385,26 @@ async function loadSymbolHistory() {
   $("symbol-history").textContent = historyLine(hist);
 }
 
-// an alert came in or was reset: the counts of that coin (null: any coin) may have changed
+// an alert came in or was reset: the counts of that coin (null: any coin) may have changed.
+// A burst of alert messages is read once, COIN_REFRESH_MS after the first of them.
+const COIN_REFRESH_MS = 1000;
+const coinRefresh = { timer: null, history: false, check: false };
+
 function coinAlertsChanged(symbol) {
-  if (symbol === null || symbol === state.symbol) loadSymbolHistory();
-  if (state.route === "check" && (symbol === null || symbol === checkSymbol())) loadCheck();
+  if (symbol === null || symbol === state.symbol) coinRefresh.history = true;
+  if (symbol === null || symbol === checkSymbol()) coinRefresh.check = true;
+  if (coinRefresh.timer !== null || !(coinRefresh.history || coinRefresh.check)) return;
+  coinRefresh.timer = setTimeout(
+    safely(() => {
+      const { history, check } = coinRefresh;
+      coinRefresh.timer = null;
+      coinRefresh.history = false;
+      coinRefresh.check = false;
+      if (history) loadSymbolHistory();
+      if (check && state.route === "check") loadCheck();
+    }),
+    COIN_REFRESH_MS,
+  );
 }
 
 function checkSymbol() {
@@ -3404,6 +3420,18 @@ function showCheck() {
 
 let checkSeq = 0; // only the newest answer is drawn
 
+// nothing of the previous coin (or of a failed read) stays on the page
+function resetCheck(labelText) {
+  $("check-verdict").dataset.level = "warmup";
+  $("check-label").textContent = labelText;
+  $("check-time").textContent = "";
+  clear($("check-reasons"));
+  for (const id of ["check-score", "check-alerts", "check-liq", "check-hist"]) $(id).textContent = "–";
+  for (const id of ["check-score-sub", "check-alerts-sub", "check-liq-sub", "check-hist-sub"]) {
+    clear($(id)).textContent = "–";
+  }
+}
+
 async function loadCheck() {
   const symbol = checkSymbol();
   if (!symbol) return;
@@ -3413,7 +3441,9 @@ async function loadCheck() {
     chk = await api(symbolPath(symbol, "check"));
   } catch (e) {
     if (seq !== checkSeq) return;
-    $("check-error").textContent = plainErrorText(e);
+    resetCheck("–");
+    // a 404 carries the server's own Thai reason (an unknown coin); anything else gets plain Thai
+    $("check-error").textContent = e && e.status === 404 && e.message ? e.message : plainErrorText(e);
     $("check-error").hidden = false;
     return;
   }
@@ -4156,6 +4186,8 @@ async function boot() {
   });
   $("check-symbol").addEventListener("change", (ev) => {
     state.checkSymbol = ev.target.value;
+    resetCheck("กำลังอ่านข้อมูล");
+    $("check-error").hidden = true;
     loadCheck();
   });
   if (!LWC) console.warn("dashboard: the chart library did not load");

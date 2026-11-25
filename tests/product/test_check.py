@@ -289,3 +289,24 @@ def test_check_fields_read_by_app_js_exist(client, env):  # noqa: F811
     page = html[html.index('id="page-check"') : html.index("<!-- Simulate")]
     for word in ("ซื้อได้", "ห้ามซื้อ", "สัญญาณซื้อ ", "ความน่าจะเป็น"):
         assert word not in page and word not in js, word
+
+
+def test_check_page_debounces_alert_refresh_and_resets_on_change_or_failure():
+    from tests.product.test_web_static import text
+
+    js = text("app.js")
+    body = js[js.index("function coinAlertsChanged(") :]
+    body = body[: body.index("\n}\n")]
+    assert "setTimeout(" in body and "COIN_REFRESH_MS" in body
+    assert "loadSymbolHistory()" not in body.split("setTimeout(")[0]  # never per message
+    assert "const COIN_REFRESH_MS = 1000;" in js
+    load = js[js.index("async function loadCheck(") :]
+    load = load[: load.index("\n}\n")]
+    assert 'resetCheck("–")' in load and "e.status === 404" in load and "e.message" in load
+    change = js[js.index('$("check-symbol").addEventListener("change"') :]
+    assert change.index("resetCheck(") < change.index("loadCheck()")
+    reset = js[js.index("function resetCheck(") :]
+    reset = reset[: reset.index("\n}\n")]
+    assert 'dataset.level = "warmup"' in reset
+    for tile in ("check-score", "check-alerts", "check-liq", "check-hist"):
+        assert f'"{tile}"' in reset and f'"{tile}-sub"' in reset
