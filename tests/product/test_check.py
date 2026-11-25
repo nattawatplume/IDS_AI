@@ -62,7 +62,23 @@ def liq(ratio):
         (score(0.1), [make_alert(ts=NOW - 10 * MIN, status="updated")], 1.0, ck.LABEL_HIGH),
         # a closed alert, or an open one older than 60 min, is only เฝ้าระวัง
         (score(0.1), [make_alert(ts=NOW - 10 * MIN, status="closed")], 1.0, ck.LABEL_WATCH),
-        (score(0.1), [make_alert(ts=NOW - 61 * MIN, status="open")], 1.0, ck.LABEL_WATCH),
+        (
+            score(0.1),
+            [make_alert(ts=NOW - 62 * MIN, status="open", window=(NOW - 62 * MIN, NOW - 61 * MIN))],
+            1.0,
+            ck.LABEL_WATCH,
+        ),
+        # an episode that started 3 h ago but last exceeded 5 min ago is still live
+        (
+            score(0.1),
+            [
+                make_alert(
+                    ts=NOW - 3 * 60 * MIN, status="updated", window=(NOW - 180 * MIN, NOW - MIN * 5)
+                )
+            ],
+            1.0,
+            ck.LABEL_HIGH,
+        ),
         (score(0.5 * TAU), [], 1.0, ck.LABEL_WATCH),  # F at half of tau
         (score(0.5 * TAU - 1e-9), [], 1.0, ck.LABEL_NORMAL),
         (score(0.1), [], 0.29, ck.LABEL_WATCH),  # thin
@@ -96,9 +112,11 @@ def test_labels_are_only_the_allowed_ones():
 
 
 def test_liquidity_needs_60_points():
-    assert ck.liquidity([1.0] * 59, 10) == NO_LIQ
+    assert ck.liquidity([1.0] * 359, 10) == NO_LIQ  # 59 whole minutes at a 10 s stride
     assert ck.liquidity([], 10) == NO_LIQ
-    assert ck.liquidity([1.0] * 60, 10)["ratio"] == pytest.approx(1.0)
+    assert ck.liquidity([1.0] * 360, 10)["ratio"] == pytest.approx(1.0)
+    assert ck.liquidity([1.0] * 60, 60)["ratio"] == pytest.approx(1.0)  # 60 s stride: 60 points
+    assert ck.liquidity([1.0] * 59, 60) == NO_LIQ
 
 
 def test_liquidity_per_minute_mean_median_and_ratio():
@@ -108,8 +126,16 @@ def test_liquidity_per_minute_mean_median_and_ratio():
     assert out["qvol_5m"] == pytest.approx(18.0)  # 3 per 10 s = 18 per minute
     assert out["qvol_median_24h"] == pytest.approx(6.0)
     assert out["ratio"] == pytest.approx(3.0)
-    zero = ck.liquidity([0.0] * 100, 10)
-    assert zero["qvol_5m"] == 0.0 and zero["qvol_median_24h"] == 0.0 and zero["ratio"] is None
+    zero = ck.liquidity([0.0] * 400 + [1.0] * 30, 10)  # mostly no trading, then a little
+    assert zero["qvol_median_24h"] == 0.0 and zero["ratio"] is None
+    assert zero["qvol_5m"] == pytest.approx(6.0)
+
+
+def test_zero_median_is_a_thin_market():
+    zero = {"qvol_5m": 6.0, "qvol_median_24h": 0.0, "ratio": None}
+    label, reasons = ck.label_for(score(0.1), [], zero, NOW)
+    assert label == ck.LABEL_WATCH and reasons == [ck.THIN_ZERO_TH]
+    assert "สภาพคล่องบาง" in ck.THIN_ZERO_TH
 
 
 # ---- history ----
@@ -184,10 +210,10 @@ def test_check_during_warmup(client):
 
 
 def test_check_shape_with_score_alert_and_liquidity(client, env):  # noqa: F811
-    pts = [point(i, F=0.1) for i in range(100)]
+    pts = [point(i, F=0.1) for i in range(360)]
     pts[-1]["F"] = 3.6  # tau is 3.5 in FakePipe
     env.pipe.points[SYM] = pts
-    env.pipe.vols[SYM] = [1.0] * 100
+    env.pipe.vols[SYM] = [1.0] * 360
     env.pipe.latest_us = pts[-1]["t_end_us"]
     now = env.pipe.latest_us
     env.store.upsert_alert(make_alert("old", now - 2 * DAY))

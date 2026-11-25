@@ -527,6 +527,7 @@ def test_ring_point_carries_quote_vol_but_series_and_scores_do_not(small, store)
     assert series == [{k: v for k, v in q.items() if k != "quote_vol"} for q in ring]
     assert all({*m} == keys | {"symbol"} for m in drain(qs))
     assert p.quote_vols(SYM) == [q["quote_vol"] for q in ring] and p.quote_vols("NOSUCH") == []
+    assert p.last_point(SYM) == series[-1] and p.last_point("NOSUCH") is None
     stride = small["cfg"].features.stride_s
     vol_at = {b["t_us"] + S: b["quote_vol"] for b in drain(qb)}  # bar close -> its volume
     for q in ring:

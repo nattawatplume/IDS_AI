@@ -124,6 +124,11 @@ class StreamPipeline:
         first; non-finite values are None, so the result is strict JSON."""
         return [_public(p) for p in self._ring.get(symbol, ())]
 
+    def last_point(self, symbol: str) -> dict[str, Any] | None:
+        """The newest `series(symbol)` point without copying the ring; None when there is none."""
+        ring = self._ring.get(symbol)
+        return _public(ring[-1]) if ring else None
+
     def quote_vols(self, symbol: str) -> list[float]:
         """The quote volume of each `series` point's stride (the `stride_s` bars ending at its
         `t_end_us`), aligned with `series(symbol)`: the check page's liquidity reads it."""

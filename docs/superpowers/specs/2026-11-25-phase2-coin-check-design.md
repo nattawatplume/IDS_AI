@@ -32,12 +32,13 @@ Plus one status label. The labels are **ปกติ / เฝ้าระวั�
     - `qvol_5m`: the mean quote volume per minute over the last 5 min.
     - `qvol_median_24h`: the median per-minute quote volume over the ring (up to 24 h).
     - `ratio`.
-    - Any of these is null when there is not enough data (fewer than 60 points).
+    - Any of these is null when there is not enough data (fewer than 60 whole one-minute buckets in the ring, `LIQ_MIN_MINUTES`).
+    - A median of 0 (with enough data) keeps `ratio` null and adds the thin-market reason "สภาพคล่องบาง: ช่วงที่ผ่านมาส่วนใหญ่แทบไม่มีการซื้อขาย" (→ เฝ้าระวัง).
     - To get the data, add `quote_vol` to the ring point in `StreamPipeline._point`. Keep it out of the existing `/api/series` output unless a test shows the extra key is harmless; prefer leaving `/api/series` byte-identical.
   - `history`: the 2.1 object.
   - `label` and `reasons_th`: a list of short Thai reasons.
 - **Label rule (fixed; test each branch):**
-  - **ผิดปกติมาก** if F_now ≥ τ, or there is an alert with status open/updated in the last 60 min.
+  - **ผิดปกติมาก** if F_now ≥ τ, or there is an alert with status open/updated whose last exceedance (`window[1]`) is in the last 60 min.
   - Else **เฝ้าระวัง** if any of these hold:
     - alerts_24h ≥ 1;
     - F_now ≥ 0.5·τ;

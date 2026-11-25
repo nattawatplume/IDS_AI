@@ -85,6 +85,10 @@ class FakePipe:
     def series(self, symbol):
         return list(self.points.get(symbol, ()))
 
+    def last_point(self, symbol):
+        pts = self.points.get(symbol)
+        return dict(pts[-1]) if pts else None
+
     def quote_vols(self, symbol):
         return list(self.vols.get(symbol, [0.0] * len(self.points.get(symbol, ()))))
 
