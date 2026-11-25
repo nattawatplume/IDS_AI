@@ -1,12 +1,20 @@
 """The web alert history line (1.3) and the track record (2.3): outcomes, API and the page."""
 
+import asyncio
+from types import SimpleNamespace
+
+import polars as pl
 import pytest
 from starlette.testclient import TestClient
 
+from idsai import cli
+from idsai.contracts.frames import TRADES, conform
+from idsai.data.store import Store
+from idsai.product import outcomes as oc
 from idsai.product.api import create_app
 from idsai.product.explainer import HISTORY_TH, history_line
 from idsai.product.notify import telegram as tg
-from tests.product.test_api import D_US, SYM, env, make_alert  # noqa: F401
+from tests.product.test_api import D_US, SYM, env, make_alert, point  # noqa: F401
 from tests.product.test_api_auth import aenv, auth_client  # noqa: F401
 
 S = 1_000_000
@@ -55,3 +63,340 @@ def test_web_alert_detail_shows_the_history_line_muted_with_its_source():
     assert 'const HISTORY_SOURCE = "ที่มา: ผลเฟส 0 ใน docs/ROADMAP.md";' in js
     show = js[js.index("async function showAlert(id)") :]
     assert "historyNote(a)" in show[: show.index("\n}\n")]
+
+
+# ---- 2.3: outcomes ----
+
+T0 = D_US + 3 * HOUR  # the alert time in these tests
+
+
+class RingPipe:
+    """The ring reads the tracker uses: a list of (t_end_us, close), oldest first."""
+
+    def __init__(self, points=(), latest_us=None):
+        self.points = list(points)
+        self.latest_us = latest_us
+
+    def close_at(self, symbol, t_us):
+        hits = [p for p in self.points if p[0] <= t_us and symbol == SYM]
+        return hits[-1] if hits else None
+
+    def close_after(self, symbol, t_us):
+        hits = [p for p in self.points if p[0] >= t_us and symbol == SYM]
+        return hits[0] if hits else None
+
+
+@pytest.fixture
+def store(tmp_path):
+    with Store(tmp_path / "d", tmp_path / "o.duckdb") as st:
+        yield st
+
+
+def trades(rows):
+    n = len(rows)
+    df = pl.DataFrame(
+        {
+            "ts_us": [t for t, _ in rows],
+            "recv_us": [t for t, _ in rows],
+            "symbol": [SYM] * n,
+            "price": [p for _, p in rows],
+            "qty": [1.0] * n,
+            "quote_qty": [p for _, p in rows],
+            "taker_side": ["buy"] * n,
+            "trade_id": list(range(1, n + 1)),
+            "n_fills": [1] * n,
+            "source": ["test"] * n,
+        }
+    )
+    return conform(df, TRADES)
+
+
+def outcome(store, aid):
+    return store.get_outcomes([aid]).get(aid)
+
+
+def test_ring_hit_gives_a_done_outcome(store):
+    store.upsert_alert(make_alert("r", ts=T0))
+    pipe = RingPipe([(T0 - 5 * S, 100.0), (T0 + HOUR + 5 * S, 90.0)], latest_us=T0 + HOUR + MIN)
+    assert oc.track_step(store, pipe) == 1
+    o = outcome(store, "r")
+    assert o["status"] == "done" and o["price_at"] == 100.0 and o["price_1h"] == 90.0
+    assert o["t_1h_us"] == T0 + HOUR + 5 * S and o["symbol"] == SYM and o["ts_event_us"] == T0
+
+
+def test_archive_fallback_when_the_ring_has_nothing(store):
+    store.write_trades(trades([(T0 - 30 * S, 50.0), (T0 + HOUR + 2 * S, 55.0)]))
+    store.upsert_alert(make_alert("a", ts=T0))
+    oc.track_step(store, RingPipe(latest_us=T0 + 2 * HOUR))
+    o = outcome(store, "a")
+    assert (o["status"], o["price_at"], o["price_1h"]) == ("done", 50.0, 55.0)
+    assert o["t_1h_us"] == T0 + HOUR + 2 * S
+
+
+def test_pending_before_one_hour_even_with_the_archive_ahead(store):
+    # a replay's archive holds the "future": it is not read before the clock passes 1 h
+    store.write_trades(trades([(T0 - 30 * S, 50.0), (T0 + HOUR + 2 * S, 55.0)]))
+    store.upsert_alert(make_alert("p", ts=T0))
+    pipe = RingPipe([(T0, 50.0), (T0 + HOUR + 5 * S, 60.0)], latest_us=T0 + HOUR - S)
+    oc.track_step(store, pipe)
+    o = outcome(store, "p")
+    assert (o["status"], o["price_at"], o["price_1h"], o["t_1h_us"]) == (
+        "pending",
+        50.0,
+        None,
+        None,
+    )
+    # past 1 h: the ring's next point is beyond the clock, the archive trade at +1 h 2 s is not
+    pipe.latest_us = T0 + HOUR + 3 * S
+    oc.track_step(store, pipe)
+    o = outcome(store, "p")
+    assert o["status"] == "done" and o["price_1h"] == 55.0
+
+
+def test_unknown_after_24_hours_without_a_price(store):
+    store.upsert_alert(make_alert("u", ts=T0))
+    pipe = RingPipe(latest_us=T0 + 2 * HOUR)
+    oc.track_step(store, pipe)
+    assert outcome(store, "u")["status"] == "pending"
+    pipe.latest_us = T0 + 24 * HOUR + S
+    oc.track_step(store, pipe)
+    o = outcome(store, "u")
+    assert o["status"] == "unknown" and o["price_at"] is None and o["price_1h"] is None
+    pipe.points = [(T0, 1.0), (T0 + HOUR, 2.0)]  # final: a late price changes nothing
+    assert oc.track_step(store, pipe) == 0 and outcome(store, "u")["status"] == "unknown"
+
+
+def test_a_far_price_is_not_used(store):
+    store.upsert_alert(make_alert("f", ts=T0))
+    gap = oc.MAX_GAP_US + S
+    oc.track_step(store, RingPipe([(T0 - gap, 1.0), (T0 + HOUR + gap, 2.0)], T0 + 3 * HOUR))
+    o = outcome(store, "f")
+    assert o["status"] == "pending" and o["price_at"] is None and o["price_1h"] is None
+
+
+def test_sim_alerts_are_never_tracked(store):
+    store.upsert_alert(make_alert("s", ts=T0, prov="sim"))
+    store.upsert_alert(make_alert("l", ts=T0, prov="live"))
+    pipe = RingPipe([(T0, 1.0), (T0 + HOUR, 2.0)], latest_us=T0 + 2 * HOUR)
+    oc.track_step(store, pipe)
+    assert outcome(store, "s") is None and outcome(store, "l")["status"] == "done"
+    assert [i["alert_id"] for i in oc.track_record(store)["items"]] == ["l"]
+
+
+def test_re_runs_are_idempotent(store):
+    store.upsert_alert(make_alert("i", ts=T0))
+    store.upsert_alert(make_alert("j", ts=T0 + 10 * MIN))
+    pipe = RingPipe([(T0, 10.0), (T0 + HOUR, 11.0)], latest_us=T0 + HOUR + MIN)
+    assert oc.track_step(store, pipe, wall_us=1) == 2  # i done, j pending
+    first = store.list_outcomes()
+    assert {r["alert_id"]: r["status"] for r in first} == {"i": "done", "j": "pending"}
+    assert oc.track_step(store, pipe, wall_us=2) == 0
+    assert oc.track_step(store, pipe, wall_us=3) == 0
+    assert store.list_outcomes() == first  # not even updated_us moved
+
+
+def test_only_recent_alerts_and_pending_rows_are_looked_at(store, monkeypatch):
+    store.upsert_alert(make_alert("old", ts=T0 - 30 * HOUR))
+    store.upsert_alert(make_alert("new", ts=T0))
+    pipe = RingPipe(latest_us=T0 + MIN)
+    seen = []
+    real = oc.resolve_outcome
+
+    def spy(a, *rest):
+        seen.append(a.alert_id)
+        return real(a, *rest)
+
+    monkeypatch.setattr(oc, "resolve_outcome", spy)
+    oc.track_step(store, pipe)
+    assert seen == ["new"]  # 30 h old and without a row: not scanned each minute
+    seen.clear()
+    oc.track_step(store, pipe, backfill=True)  # the tracker's first pass only
+    assert sorted(seen) == ["new", "old"]
+    assert outcome(store, "old")["status"] == "unknown"
+    # a pending row is followed past the lookback until it is final
+    store.upsert_alert(make_alert("p", ts=T0 - 20 * HOUR))
+    pipe.latest_us = T0 - 20 * HOUR + MIN
+    oc.track_step(store, pipe)
+    assert outcome(store, "p")["status"] == "pending"
+    pipe.latest_us = T0 + 6 * HOUR  # 26 h after p
+    seen.clear()
+    oc.track_step(store, pipe)
+    assert "p" in seen and outcome(store, "p")["status"] == "unknown"
+
+
+def test_pending_row_of_a_deleted_alert_is_dropped(store):
+    store.upsert_alert(make_alert("d", ts=T0))
+    oc.track_step(store, RingPipe(latest_us=T0 + MIN))
+    assert outcome(store, "d")["status"] == "pending"
+    store.delete_alerts("replay", ["d"])
+    oc.track_step(store, RingPipe(latest_us=T0 + 2 * MIN))
+    assert outcome(store, "d") is None
+
+
+def test_nothing_runs_before_the_pipeline_has_a_clock(store):
+    store.upsert_alert(make_alert("c", ts=T0))
+    assert oc.track_step(store, RingPipe(latest_us=None)) is None
+    assert outcome(store, "c") is None
+    tracker = oc.OutcomeTracker(SimpleNamespace(store=store, pipeline=RingPipe()))
+    assert tracker.step() is None and not tracker._backfilled
+    tracker.state.pipeline.latest_us = T0 + MIN
+    assert tracker.step() == 1 and tracker._backfilled
+
+
+def test_tracker_runs_periodically_and_survives_a_bad_pass(store):
+    calls = []
+
+    class Flaky(oc.OutcomeTracker):
+        def step(self):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return 0
+
+    async def main():
+        task = asyncio.create_task(Flaky(SimpleNamespace(store=store, pipeline=None), 0.01).run())
+        await asyncio.sleep(0.1)
+        assert not task.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(main())
+    assert len(calls) >= 2
+
+
+def test_serve_runs_the_tracker_beside_the_session_purge(monkeypatch):
+    steps = []
+    monkeypatch.setattr(oc.OutcomeTracker, "step", lambda self: steps.append(1))
+    monkeypatch.setattr(oc.OutcomeTracker.__init__, "__defaults__", (0.01,))
+    ran = []
+
+    async def pipeline():
+        ran.append(1)  # ends at once, as a finished replay does
+
+    async def main():
+        state = SimpleNamespace(store=None, pipeline=None)
+        task = asyncio.create_task(cli.with_outcomes(state, pipeline)())
+        await asyncio.sleep(0.1)
+        assert not task.done()  # it outlives the pipeline, as the purge does
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(main())
+    assert ran == [1] and len(steps) >= 2
+    src = open(cli.__file__, encoding="utf-8").read()
+    assert "with_outcomes(state, with_session_purge(store, background))" in src
+
+
+# ---- 2.3: the track-record API ----
+
+
+def seed_record(st):
+    """Five counted alerts (and a sim one) with known outcomes and votes."""
+    rows = [  # alert id, ts, price_at, price_1h, status
+        ("a", T0, 100.0, 90.0, "done"),  # -10 %
+        ("b", T0 + HOUR, 100.0, 104.0, "done"),  # +4 %
+        ("c", T0 + 2 * HOUR, 200.0, 190.0, "done"),  # -5 %
+        ("d", T0 + 3 * HOUR, 10.0, None, "pending"),
+    ]
+    for aid, ts, p0, p1, status in rows:
+        st.upsert_alert(make_alert(aid, ts=ts, phase="sell" if aid == "b" else "pump"))
+        st.upsert_outcome(
+            {
+                "alert_id": aid,
+                "symbol": SYM,
+                "ts_event_us": ts,
+                "price_at": p0,
+                "price_1h": p1,
+                "t_1h_us": None if p1 is None else ts + HOUR,
+                "status": status,
+                "updated_us": 1,
+            }
+        )
+    st.upsert_alert(make_alert("e", ts=T0 + 4 * HOUR, prov="live"))  # no outcome row yet
+    st.upsert_alert(make_alert("sim", ts=T0 + 5 * HOUR, prov="sim"))
+    st.insert_feedback("a", "fp", "ann")
+    st.insert_feedback("a", "tp", "bob")
+    st.insert_feedback("a", "fp", "bob")  # bob changed his mind: his latest vote counts once
+    st.insert_feedback("b", "unsure", "ann")
+    st.insert_feedback("sim", "tp", "ann")  # never counted
+
+
+ITEM_KEYS = {
+    "alert_id",
+    "symbol",
+    "ts_event_us",
+    "technique_id",
+    "phase",
+    "severity",
+    "price_at",
+    "price_1h",
+    "change_1h_pct",
+    "status",
+    "feedback",
+}
+TRACK_FORBIDDEN = ("ความน่าจะเป็น", "probability", "accuracy", "แม่นยำ", "ควรซื้อ", "ควรขาย")
+
+
+def test_track_record_shape_maths_and_feedback(client, env):  # noqa: F811
+    seed_record(env.store)
+    r = client.get("/api/track-record")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"items", "summary", "note_th", "disclaimer_th"}
+    items = body["items"]
+    assert [i["alert_id"] for i in items] == ["e", "d", "c", "b", "a"]  # newest first, no sim
+    assert all(set(i) == ITEM_KEYS for i in items)
+    by = {i["alert_id"]: i for i in items}
+    assert by["a"]["change_1h_pct"] == pytest.approx(-10.0)
+    assert by["b"]["change_1h_pct"] == pytest.approx(4.0) and by["b"]["phase"] == "sell"
+    assert by["d"]["status"] == "pending" and by["d"]["change_1h_pct"] is None
+    assert by["e"]["status"] == "pending" and by["e"]["price_at"] is None
+    assert by["a"]["feedback"] == {"tp": 0, "fp": 2, "unsure": 0}
+    assert by["b"]["feedback"] == {"tp": 0, "fp": 0, "unsure": 1}
+    assert by["c"]["feedback"] == {"tp": 0, "fp": 0, "unsure": 0}
+    s = body["summary"]
+    assert s["n_alerts"] == 5 and s["n_done"] == 3
+    assert s["share_lower_1h"] == pytest.approx(2 / 3)
+    assert s["median_change_1h_pct"] == pytest.approx(-5.0)
+    assert s["feedback_totals"] == {"tp": 0, "fp": 2, "unsure": 1}
+    assert s["since_us"] == T0
+    assert body["disclaimer_th"] == "ข้อมูลนี้ไม่ใช่คำแนะนำการลงทุน"
+    note = " ".join(body["note_th"])
+    for want in ("เซิร์ฟเวอร์", "ไม่ถาวร", "เริ่มนับใหม่", "ไม่ใช่การพยากรณ์", "เตือนผิด"):
+        assert want in note, want
+    assert "ความผิดปกติทางสถิติ" in note
+    text = r.content.decode("utf-8")
+    for word in TRACK_FORBIDDEN:
+        assert word not in text, word
+    small = client.get("/api/track-record?limit=2").json()
+    assert [i["alert_id"] for i in small["items"]] == ["e", "d"]
+    assert small["summary"] == s  # the summary is over every stored alert, not the page
+    for bad in (0, 201):
+        assert client.get(f"/api/track-record?limit={bad}").status_code == 422
+
+
+def test_track_record_when_empty(client):
+    body = client.get("/api/track-record").json()
+    assert body["items"] == []
+    assert body["summary"] == {
+        "n_alerts": 0,
+        "n_done": 0,
+        "share_lower_1h": None,
+        "median_change_1h_pct": None,
+        "feedback_totals": {"tp": 0, "fp": 0, "unsure": 0},
+        "since_us": None,
+    }
+
+
+def test_track_record_needs_sign_in(auth_client):  # noqa: F811
+    assert auth_client().get("/api/track-record").status_code == 401
+    assert auth_client("viewer").get("/api/track-record").status_code == 200
+
+
+def test_series_output_is_unchanged_by_the_track_record(client, env):  # noqa: F811
+    env.pipe.points[SYM] = [point(i) for i in range(3)]
+    before = client.get(f"/api/series?symbol={SYM}").content
+    seed_record(env.store)
+    oc.track_step(env.store, env.pipe)
+    client.get("/api/track-record")
+    assert client.get(f"/api/series?symbol={SYM}").content == before

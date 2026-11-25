@@ -535,3 +535,24 @@ def test_ring_point_carries_quote_vol_but_series_and_scores_do_not(small, store)
         assert q["quote_vol"] == pytest.approx(want, rel=1e-12)
     assert sum(p.quote_vols(SYM)) > 0
     assert p.latest_us is not None and p.latest_us >= ring[-1]["t_end_us"]
+
+
+def test_close_at_and_close_after_read_the_ring(small, store):
+    """Phase 2.3: the track record reads a ring close at / after a time; read-only."""
+    p = pipe_for(small, store)
+    trades = small["trades"].filter(pl.col("ts_us") < small["t0"] + 3600 * S)
+    asyncio.run(p.run(Replayer(trades, speed=0)))
+    ring = list(p._ring[SYM])
+    before = p.series(SYM)
+    for q in (ring[0], ring[len(ring) // 2], ring[-1]):
+        t = q["t_end_us"]
+        assert p.close_at(SYM, t) == (t, q["close"]) == p.close_after(SYM, t)
+        assert p.close_at(SYM, t + 1) == (t, q["close"])
+    assert p.close_at(SYM, ring[0]["t_end_us"] - 1) is None
+    assert p.close_after(SYM, ring[-1]["t_end_us"] + 1) is None
+    assert p.close_at("NOSUCH", ring[-1]["t_end_us"]) is None
+    assert p.series(SYM) == before  # nothing changed
+    # a point without a close (non-finite) is passed over
+    p._ring[SYM][-1] = {**p._ring[SYM][-1], "close": None}
+    assert p.close_at(SYM, ring[-1]["t_end_us"]) == (ring[-2]["t_end_us"], ring[-2]["close"])
+    assert p.close_after(SYM, ring[-1]["t_end_us"]) is None

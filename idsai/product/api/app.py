@@ -77,6 +77,7 @@ from idsai.product.check import check as check_coin
 from idsai.product.check import coin_history, now_us_of
 from idsai.product.explainer import explain, history_line
 from idsai.product.notify.telegram import PREF_KEY as TG_PREF_KEY
+from idsai.product.outcomes import TRACK_LIMIT, track_record
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 S_US = 1_000_000
@@ -710,6 +711,14 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
         return _json(
             check_coin(state.store, symbol, state.pipeline, tau, state.cfg.features.stride_s)
         )
+
+    # ---- phase 2.3: the track record ----
+
+    @app.get("/api/track-record", dependencies=signed)
+    async def track_record_route(
+        limit: Annotated[int, Query(ge=1, le=TRACK_LIMIT)] = TRACK_LIMIT,
+    ):
+        return _json(track_record(state.store, limit))
 
     @app.get("/api/health")
     async def health_route():
