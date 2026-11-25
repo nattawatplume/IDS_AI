@@ -3529,9 +3529,11 @@ function fmtThaiDateTime(us) {
   return `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)} ${iso.slice(11, 16)} น.`;
 }
 
+// a price in plain digits, never in exponent form (a BTC pair trades near 0.000005)
 function fmtPrice(x) {
   if (!isNum(x)) return "–";
-  return x >= 1000 ? x.toLocaleString("en-US", { maximumFractionDigits: 2 }) : x.toPrecision(4);
+  if (x !== 0 && Math.abs(x) < 1e-4) return x.toFixed(8);
+  return x.toLocaleString("en-US", { maximumSignificantDigits: 4 });
 }
 
 function fmtPct(x) {
@@ -3558,7 +3560,7 @@ async function loadTrack() {
   try {
     [rec, tax] = await Promise.all([api("/api/track-record"), loadTaxonomy()]);
   } catch (e) {
-    if (seq !== trackSeq) return;
+    if (seq !== trackSeq || state.route !== "track") return;
     $("track-error").textContent = plainErrorText(e);
     $("track-error").hidden = false;
     return;
@@ -4454,6 +4456,7 @@ if (typeof document !== "undefined") {
     },
     loadTrack,
     fmtThaiDateTime,
+    fmtPrice,
     getAlertIds: () => [...state.alerts.keys()],
     getAlertsWithFeedback: () => [...state.alerts.values()].map(withFeedback),
     fmtThaiTime,
