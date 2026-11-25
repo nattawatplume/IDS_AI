@@ -20,6 +20,7 @@ import statistics
 from typing import Any
 
 from idsai.contracts.alert import Alert
+from idsai.data.history import HISTORY_DAYS
 from idsai.data.store import COUNTED_PROVENANCE, Store, _day_of
 from idsai.product.check import DISCLAIMER_TH, now_us_of
 
@@ -45,6 +46,22 @@ NOTE_TH = [
     "«เตือนผิด» คือผู้ใช้ตัดสินว่าการแจ้งเตือนนั้นเป็นการเตือนผิด "
     "«ผิดปกติจริง» คือผู้ใช้ตัดสินว่าผิดปกติจริง",
 ]
+# NOTE_TH[0] when the store keeps its live alerts in a database (idsai.data.history)
+PERSISTENT_NOTE_TH = (
+    "นับเฉพาะการแจ้งเตือนที่บริการนี้เก็บไว้ การแจ้งเตือนสด (live) ถูกเก็บในฐานข้อมูลของบริการ "
+    "จึงไม่หายเมื่อเซิร์ฟเวอร์เริ่มใหม่ ทุกครั้งที่เริ่มใหม่จะโหลดกลับมาเฉพาะ {days} วันล่าสุด "
+    "(ครั้งนี้ตั้งแต่ {since} UTC)"
+)
+
+
+def note_th(store: Store) -> list[str]:
+    """`NOTE_TH`, its first line saying how long the counts are kept: with a history database
+    since its start-up cut, without one only until the next restart."""
+    since = store.history_since_us if store.history_attached else None
+    if since is None:
+        return list(NOTE_TH)
+    day = _day_of(since).isoformat()
+    return [PERSISTENT_NOTE_TH.format(days=HISTORY_DAYS, since=day), *NOTE_TH[1:]]
 
 
 # ---- price lookups: the ring first, then the trade archive ----
@@ -308,6 +325,6 @@ def track_record(store: Store, limit: int = TRACK_LIMIT) -> dict[str, Any]:
             "feedback_totals": store.feedback_totals(),
             "since_us": since_us,
         },
-        "note_th": NOTE_TH,
+        "note_th": note_th(store),
         "disclaimer_th": DISCLAIMER_TH,
     }
