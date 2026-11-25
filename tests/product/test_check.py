@@ -234,3 +234,32 @@ def test_series_output_is_unchanged_by_the_check(client, env):  # noqa: F811
 def test_history_and_check_need_sign_in(auth_client, what):  # noqa: F811
     assert auth_client().get(f"/api/symbols/{SYM}/{what}").status_code == 401
     assert auth_client("viewer").get(f"/api/symbols/{SYM}/{what}").status_code == 200
+
+
+# ---- web: what app.js reads exists in what the server sends; the page's wording ----
+
+
+def test_check_fields_read_by_app_js_exist(client, env):  # noqa: F811
+    from tests.product.test_web_static import reads, text
+
+    env.pipe.points[SYM] = [point(i) for i in range(70)]
+    env.pipe.latest_us = env.pipe.points[SYM][-1]["t_end_us"]
+    env.store.upsert_alert(make_alert("n", env.pipe.latest_us - MIN))
+    b = client.get(f"/api/symbols/{SYM}/check").json()
+    assert reads("chk") and reads("chk") <= set(b)
+    assert reads("score") <= set(b["score"])
+    assert reads("day") <= set(b["alerts_24h"])
+    assert reads("latest") <= set(b["alerts_24h"]["latest"])
+    assert reads("liq") <= set(b["liquidity"])
+    hist = client.get(f"/api/symbols/{SYM}/history").json()
+    assert hist == b["history"]
+    assert reads("hist") and reads("hist") <= set(hist)
+    assert reads("phases") <= set(hist["by_phase_d30"])
+    js, html = text("app.js"), text("index.html")
+    assert "ข้อมูลนี้ไม่ใช่คำแนะนำการลงทุน" in html
+    assert "/api/symbols/${encodeURIComponent(symbol)}/${what}" in js
+    for level in ("normal", "watch", "high", "warmup"):
+        assert f'"{level}"' in js
+    page = html[html.index('id="page-check"') : html.index("<!-- Simulate")]
+    for word in ("ซื้อได้", "ห้ามซื้อ", "สัญญาณซื้อ ", "ความน่าจะเป็น"):
+        assert word not in page and word not in js, word
