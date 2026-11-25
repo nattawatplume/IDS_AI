@@ -310,3 +310,13 @@ def test_chief_rule_rev2_on_is_dumped_and_changes_the_hash():
     b = load_settings(overrides={"chief": {"rule_rev2": [100101, 100102]}})
     assert a.model_dump(mode="json")["chief"]["rule_rev2"] == [100101]
     assert len({config_hash(a), config_hash(b), "9aff5e3482f2"}) == 3
+
+
+def test_chief_rule_rev2_is_order_independent():
+    a = load_settings(overrides={"chief": {"rule_rev2": [100102, 100101]}})
+    b = load_settings(overrides={"chief": {"rule_rev2": [100101, 100102]}})
+    assert a.chief.rule_rev2 == b.chief.rule_rev2 == [100101, 100102]
+    assert a.model_dump(mode="json")["chief"]["rule_rev2"] == [100101, 100102]
+    assert config_hash(a) == config_hash(b)
+    with pytest.raises(ValueError, match="twice"):  # repeats are still an error, not merged
+        load_settings(overrides={"chief": {"rule_rev2": [100102, 100101, 100102]}})

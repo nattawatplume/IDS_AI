@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     field_serializer,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -119,6 +120,13 @@ class ChiefCfg(_Cfg):
     # layer (e.g. [100101, 100102]); rev 2 keeps the detector name `rule.<sid>`. Empty (default)
     # leaves every output bit-identical and is absent from every dump (like `attr_rules`).
     rule_rev2: list[int] = []
+
+    @field_validator("rule_rev2", mode="after")
+    @classmethod
+    def _sort_rule_rev2(cls, v: list[int]) -> list[int]:
+        # a set of rules, not a sequence: sorted so the dump and config_hash do not depend on the
+        # order it was written in (repeats are kept here and rejected in `_check_ai`)
+        return sorted(v)
 
     @model_validator(mode="after")
     def _check_ai(self) -> "ChiefCfg":
