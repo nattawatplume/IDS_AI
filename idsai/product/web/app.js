@@ -2131,6 +2131,15 @@ function kv(pairs) {
   );
 }
 
+// the measured history line (the same as in Telegram), small and muted; the server leaves it null on
+// a sell-phase alert, because it was measured on the rise of real pumps only. History, not a forecast.
+// the source of the line; not a *_TH copy table: it names a file (docs/ROADMAP.md)
+const HISTORY_SOURCE = "ที่มา: ผลเฟส 0 ใน docs/ROADMAP.md";
+function historyNote(a) {
+  if (!a || typeof a.history_th !== "string" || !a.history_th) return null;
+  return el("p", { class: "small muted history-note" }, a.history_th, el("span", { class: "history-src" }, ` ${HISTORY_SOURCE}`));
+}
+
 async function showAlert(id) {
   const box = clear($("alert-detail"));
   destroyDetailChart();
@@ -2188,6 +2197,7 @@ async function showAlert(id) {
             ? [el("h3", {}, "สิ่งที่ต่างจากปกติ"), el("ul", { class: "facts" }, facts.map((t) => el("li", {}, t)))]
             : null,
           el("p", { class: "small muted" }, "เป็นความผิดปกติทางสถิติเมื่อเทียบกับตลาดปกติ ให้คนตรวจต่อ ไม่ได้บอกว่าใครทำอะไร"),
+          historyNote(a),
         ),
         el("div", { class: "detail-main" }, el("h3", {}, "ราคาช่วงนั้น แถบสีคือช่วงที่ระบบเตือน"), mini),
       ),

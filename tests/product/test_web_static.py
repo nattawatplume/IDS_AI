@@ -155,7 +155,7 @@ def reads(var: str) -> set[str]:
 
 def test_alert_fields_read_by_app_js_exist():
     alert = set(Alert.model_fields) | {"explanation_th"}  # list item (app.alert_item)
-    detail = {"explanation", "feedback"}  # GET /api/alerts/{id}
+    detail = {"explanation", "feedback", "history_th"}  # GET /api/alerts/{id}
     dom = {"dataset", "setAttribute", "removeAttribute", "time"}  # `a` is also a tab link / marker
     assert reads("a") - alert - detail - dom == set()
     detected = {"alert_id", "eventS", "wallS"}  # run.detected
@@ -2126,6 +2126,12 @@ DETAIL_BODY = r"""
     assert.strictEqual(row("ai.iforest").children[3].textContent, "");
     // outside the details: plain Thai, no ids, p-values, layers, provenance or UTC
     tech.parentNode.removeChild(tech);
+    // the measured history line names its source (docs/ROADMAP.md) and the pairs (BTC): the one
+    // plain-view line that may carry Latin letters
+    const notes = walk(box, (n) => n.classList.contains("history-note"));
+    assert.strictEqual(notes.length, 1);
+    assert.ok(notes[0].textContent.includes("ที่มา: ผลเฟส 0 ใน docs/ROADMAP.md"));
+    notes[0].parentNode.removeChild(notes[0]);
     const plain = box.textContent;
     for (const bad of ["MM-T", "UTC", "4.0e-4", "rule.x", "replay", "p ≈", "robust", "z_"]) {
       assert.ok(!plain.includes(bad), `${bad} in: ${plain}`);

@@ -75,7 +75,7 @@ from idsai.product.auth import (
 )
 from idsai.product.check import check as check_coin
 from idsai.product.check import coin_history, now_us_of
-from idsai.product.explainer import explain
+from idsai.product.explainer import explain, history_line
 from idsai.product.notify.telegram import PREF_KEY as TG_PREF_KEY
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
@@ -639,6 +639,8 @@ def create_app(state: AppState, allowed_hosts: list[str] | None = None) -> FastA
                     "facts": [{"label": k, "value": v} for k, v in e.facts],
                 },
                 "feedback": state.store.list_feedback(alert_id),
+                # the measured history line (as in Telegram); None on a sell-phase alert
+                "history_th": history_line(a),
             }
         )
 
