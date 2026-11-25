@@ -87,3 +87,27 @@ Data: train range 2018-01-01..2019-06-30 only, feature cache read only (rule col
 - `m5_rules` base = today's live stack: `features.sell_side` on (sell rules 100104/100601 in F), naming rules on in every variant, `ai.iforest` shift 1, all rules at rev 1. The eval config keeps its `config_hash`.
 - One `ai.iforest` fit per seed and one scoring pass per set (the three candidates are extra rule columns). Variants only re-fuse, with their own calibration and τ (5 variants × 3 splits = 15 Chief fits per seed).
 - Expected run cost: like `m3_attr` per seed. The first seed also computes the sell-side feature cache for the accept days (456 symbol-days not yet cached under that feature hash; train-normal, cal and test already are). Seeds 1–4 reuse it.
+
+### Real run / results (2026-11-25, `m5_rules`, 5 seeds, budget 2)
+Command as in "Run". Full tables with CIs: `data/report.md` section `m5_rules` (REPORT §13 and its appendix).
+
+| split | variant | recall_any | Δ recall_any vs base [95% CI] | FA/symbol-day | FA hard |
+|---|---|---|---|---|---|
+| accept (94 events) | base | 0.806 | – | 2.517 | 7.700 |
+| | r101 | 0.806 | +0.000 [0.000, 0.000] | 2.534 | 7.750 |
+| | r101_25 | 0.817 | +0.011 [0.000, 0.032] | 2.592 | 7.800 |
+| | r102 | 0.817 | +0.011 [0.000, 0.032] | 2.529 | 8.050 |
+| | r101+r102 | 0.817 | +0.011 [0.000, 0.032] | 2.546 | 8.100 |
+| test (200 events, report only) | base | 0.789 | – | 1.806 | 5.850 |
+| | r101 | 0.798 | +0.009 [0.000, 0.023] | 1.818 | 5.850 |
+| semisyn (report only) | base | 0.730 | – | 1.581 | – |
+| | r101_25 | 0.737 | +0.007 [0.005, 0.010] | 1.661 | – |
+| | r102 | 0.714 | −0.016 [−0.021, −0.012] | 1.582 | – |
+| | r101+r102 | 0.715 | −0.015 [−0.020, −0.011] | 1.594 | – |
+
+- **Selection (accept): base.** Excluded: r101_25 (FA 2.59 > 1.02 × 2.52), r102 (FA-hard 8.05 > 1.02 × 7.7), r101+r102 (FA-hard 8.1). r101 is eligible but its gain is +0.000, so no significant gain → base. The live config is unchanged (no `chief.rule_rev2` in `configs/default.yaml`; default hash 9aff5e3482f2, `eval_prev_live.yaml` 53e3b662ab96).
+- Test: r101 +0.009 [0.000, 0.023] at FA 1.818 vs 1.806, not significant. SEMI-SYN: r102 and r101+r102 are significantly worse (pump_burst missed 0.348 → 0.397); r101_25 is significantly better by +0.007, below min_effect, at FA +5 %.
+- Reading: the unreachable thresholds were not the binding constraint once the live stack (stat + iforest + attr) is in place; the pumps rev 2 catches are already caught by other detectors. Remaining misses (~20 % of Telegram pumps) are not reached by loosening these two rules within the FA budget.
+- `attribution_min` was not changed (naming is saturated; noted in the report).
+- **Promotion would need retraining.** A non-empty `chief.rule_rev2` changes `config_hash`, so every bundle must be retrained, and τ is calibrated with the rule set in F. `bundle.json` holds `config_hash` but not the sha of `configs/signatures_r2.yaml`, so that sha should be added to the bundle meta before any promotion (an edit to the rev 2 file would otherwise go undetected). Not done, since base was kept.
+- Review follow-ups: `chief.rule_rev2` is sorted on load so the dump and hash do not depend on the written order (repeats are still rejected); the report reads a paired CI wholly below / above 0 that misses `min_effect` as a significant decrease / increase smaller than `min_effect`, not as "no difference" (display only; selection unchanged).
