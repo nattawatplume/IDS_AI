@@ -1328,3 +1328,124 @@ def test_m3_select_nothing_significant_or_no_base():
     assert m3_select([_m3_row("attr", gain=0.3, sig=True)])["chosen"] is None
     sel = m3_select([M3_BASE, _m3_row("attr", error="boom")])
     assert sel["chosen"] == "base" and "attr" in sel["excluded"]
+
+
+# ---------------------------------------------------------------- M5 selection
+def _m5_row(variant, fa=2.0, fa_hard=5.0, gain=None, sig=False, **kw):
+    return {"variant": variant, "fa": fa, "fa_hard": fa_hard, "gain_any": gain,
+            "gain_any_significant": sig, **kw}  # fmt: skip
+
+
+M5_BASE = _m5_row("base")
+
+
+def test_m5_select_largest_significant_recall_any_gain_wins():
+    from idsai.eval.report import m5_select
+
+    rows = [
+        M5_BASE,
+        _m5_row("r101", gain=0.05, sig=True),
+        _m5_row("r101_25", gain=0.08, sig=True),
+        _m5_row("r102", gain=0.03, sig=True),
+        _m5_row("r101+r102", gain=0.20, sig=False),  # largest, but not significant
+    ]
+    sel = m5_select(rows)
+    assert sel["chosen"] == "r101_25" and sel["top"] == "r101+r102"
+    assert sel["eligible"] == ["base", "r101", "r101_25", "r102", "r101+r102"]
+
+
+def test_m5_select_fa_and_fa_hard_caps_and_ties_to_the_simpler():
+    from idsai.eval.report import m5_select
+
+    rows = [
+        M5_BASE,
+        _m5_row("r101", gain=0.05, sig=True),
+        _m5_row("r101_25", fa=2.05, gain=0.30, sig=True),  # FA 2.05 > 1.02 x 2.0
+        _m5_row("r102", fa_hard=5.11, gain=0.30, sig=True),  # FA-hard > 1.02 x 5.0
+        _m5_row("r101+r102", fa=2.04, fa_hard=5.1, gain=0.05, sig=True),  # at the cap: eligible
+    ]
+    sel = m5_select(rows)
+    assert sel["chosen"] == "r101"  # tie with r101+r102 goes to the simpler
+    assert set(sel["excluded"]) == {"r101_25", "r102"}
+    assert "FA-hard" in sel["excluded"]["r102"] and "FA " in sel["excluded"]["r101_25"]
+    # the recall_correct fields M3 selects on play no part
+    rows[1] = {**rows[1], "gain_correct": 0.9, "gain_correct_significant": True, "below_ref": True}
+    assert m5_select(rows)["chosen"] == "r101"
+
+
+def test_m5_select_nothing_significant_or_no_base():
+    from idsai.eval.report import m5_select
+
+    assert m5_select([M5_BASE, _m5_row("r101", gain=0.3)])["chosen"] == "base"
+    assert m5_select([_m5_row("r101", gain=0.3, sig=True)])["chosen"] is None
+    sel = m5_select([M5_BASE, _m5_row("r102", error="boom"), _m5_row("r101", gain=0.1, sig=True)])
+    assert sel["chosen"] == "r101" and "r102" in sel["excluded"]
+
+
+# ---------------------------------------------------------------- reading of non-selected pairs
+def _vs_row(variant, diff=None, ci=None, sig=False, below=False):
+    vs = None if diff is None else {"diff_mean": diff, "ci": list(ci), "ci_unit": "event"}
+    return {
+        "variant": variant, "error": None, "n_seeds": 5, "n_events": 100,
+        "recall_any": 0.7, "recall_any_ci": [0.6, 0.8],
+        "recall_correct": 0.5, "recall_correct_ci": [0.4, 0.6],
+        "fa": 1.5, "fa_ci": [1.2, 1.8], "fa_hard": None, "fa_hard_ci": None,
+        "fa_named": None, "fa_named_by_rule": None, "n_fa_episodes": 0,
+        "vs_ref_any": vs, "vs_ref_correct": vs, "reason_any_th": None,
+        "gain_any_significant": sig, "below_ref": below,
+    }  # fmt: skip
+
+
+def test_nonsig_reading_separates_small_significant_changes_from_no_change():
+    from idsai.eval.report import _nonsig_th
+
+    def th(diff, ci, ref="base", metric="recall_any"):
+        return _nonsig_th({"diff_mean": diff, "ci": ci}, 0.02, ref, metric)
+
+    small = " แต่น้อยกว่า min_effect (0.02)"
+    assert th(-0.016, [-0.021, -0.012]) == "recall_any ลดลงจาก base อย่างมีนัย" + small
+    assert th(0.007, [0.005, 0.010]) == "recall_any เพิ่มจาก base อย่างมีนัย" + small
+    assert th(0.001, [0.00017, 0.002]) == "recall_any เพิ่มจาก base อย่างมีนัย" + small
+    # M3 runs the reverse test on recall_any only: a large recall_correct drop reaches here
+    # and must not be called smaller than min_effect
+    big = th(-0.05, [-0.07, -0.03], metric="recall_correct")
+    assert big == "recall_correct ลดลงจาก base อย่างมีนัย"
+    assert th(0.02, [0.001, 0.04]) == "recall_any เพิ่มจาก base อย่างมีนัย"  # exactly min_effect
+    for ci in ([0.0, 0.032], [-0.01, 0.01], [0.0, 0.0]):  # CI touching 0: no significant change
+        assert th(0.0, ci) == "recall_any ไม่ต่างจาก base อย่างมีนัย"
+    assert _nonsig_th(None, 0.02, "no_ai") == "ไม่ต่างจาก no_ai อย่างมีนัย"
+
+
+def test_diff_ci_never_prints_a_nonzero_bound_as_zero():
+    from idsai.eval.report import _fmt_diff_ci
+
+    assert _fmt_diff_ci(0.001, [0.000169, 0.002]) == "0.001 [0.0002, 0.002]"
+    assert _fmt_diff_ci(-0.001, [-0.002, -0.00004]) == "-0.001 [-0.002, -0.00004]"
+    assert _fmt_diff_ci(0.0, [0.0, 0.0]) == "0.000 [0.000, 0.000]"  # a true 0 stays 0.000
+    assert _fmt_diff_ci(-0.016, [-0.021, -0.012]) == "-0.016 [-0.021, -0.012]"
+
+
+def test_m5_md_reads_a_ci_wholly_below_zero_as_a_decrease():
+    from idsai.eval.report import _m5_md
+
+    rows = [
+        _vs_row("base"),
+        _vs_row("r101", 0.001, (0.00017, 0.002)),  # the real semisyn case
+        _vs_row("r101_x", 0.0, (0.0, 0.0)),
+        _vs_row("r101_25", 0.007, (0.005, 0.010)),
+        _vs_row("r102", -0.016, (-0.021, -0.012)),
+        _vs_row("r101+r102", -0.05, (-0.07, -0.03), below=True),  # beyond min_effect
+    ]
+    m5 = {"splits": {"semisyn": {"provenance": "SEMI-SYN", "rows": rows}}, "selection": None,
+          "confusion": {}, "rule_th": "rule", "notes": []}  # fmt: skip
+    verdict = {
+        line.split("|")[1].strip(): line.split("|")[-2].strip()
+        for line in _m5_md(m5, 0.02)
+        if line.startswith("| r1")
+    }
+    assert verdict["r101"].startswith("recall_any เพิ่มจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
+    assert verdict["r101_x"] == "recall_any ไม่ต่างจาก base อย่างมีนัย"
+    assert "0.001 [0.0002, 0.002]" in next(x for x in _m5_md(m5, 0.02) if x.startswith("| r101 "))
+    assert verdict["r101_25"].startswith("recall_any เพิ่มจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
+    assert verdict["r102"].startswith("recall_any ลดลงจาก base อย่างมีนัย แต่น้อยกว่า min_effect")
+    assert verdict["r101+r102"] == "recall_any ต่ำกว่า base อย่างมีนัย"

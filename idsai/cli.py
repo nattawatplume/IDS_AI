@@ -78,6 +78,7 @@ EXPERIMENT_NAMES = (
     "m2_ai",
     "m3_attr",
     "m4_sell",
+    "m5_rules",
 )
 LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1", "[::1]")
 WILDCARD_BINDS = ("0.0.0.0", "::", "[::]")

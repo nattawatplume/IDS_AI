@@ -575,3 +575,46 @@ def test_bundle_loads_the_naming_rules_only_with_attr_rules(tmp_path):
     _, loaded, _ = load_bundle(tmp_path / "b", on)
     assert [d.name for d in loaded.naming] == ["attr.100191", "attr.100591"]
     assert loaded.state_dict()["cal"].keys() == chief.state_dict()["cal"].keys()
+
+
+def test_bundle_round_trip_with_rule_rev2(tmp_path):
+    # M5: rules hold no state, so load_bundle rebuilds rev 2 from the config (`chief.rule_rev2`);
+    # the Chief's calibration of `rule.<sid>` round-trips, and the flag changes config_hash, so a
+    # flag-off bundle never loads under rev 2 (and the other way round)
+    from datetime import date
+
+    import polars as pl
+
+    from idsai.ai.chief import AiFusion, Chief
+    from idsai.ai.learning import BundleError, load_bundle, save_bundle
+    from idsai.config import config_hash
+    from idsai.detection.features.bars import trades_to_bars
+    from idsai.detection.features.windows import compute_windows
+    from idsai.detection.registry import build_detectors
+    from idsai.pipeline.batch import score_windows
+    from tests.synth import S, day_us, make_trades
+
+    on = load_settings(overrides={"chief": {"rule_rev2": [100101, 100102]}})
+    d0 = date(2025, 3, 1)
+    t0 = day_us(d0)
+    bars = trades_to_bars(
+        make_trades(d0, 2, symbol="TESTBTC", seed=4, rate=0.3), "TESTBTC", t0, t0 + 2 * 86_400 * S
+    )
+    win = compute_windows(bars, on.features, 1e-4).filter(pl.col("t_end_us") >= t0 + 86_400 * S)
+    names = ["rules", "stat.robust_z", "stat.cusum"]
+    dets = build_detectors(names, on, 0)
+    scored = score_windows(win, dets)
+    chief = Chief(dets, on.chief, config_hash(on), {}, ai=AiFusion.from_cfg(on.chief))
+    chief.calibrate(scored)
+    chief.fit_threshold(chief.fuse(scored), 10.0)
+    meta = {"data_hash": "d", "config_hash": config_hash(on), "seed": 0, "created_at": "t",
+            "train_range": ["2025-03-02", "2025-03-02"]}  # fmt: skip
+    save_bundle(tmp_path / "b", names, dets, chief, meta)
+    got, loaded, _ = load_bundle(tmp_path / "b", on)
+    revs = {d.signature_id: d.rev for d in got if d.layer == "rule"}
+    assert revs[100101] == 2 and revs[100102] == 2 and revs[100501] == 1
+    assert pickle.dumps(loaded.state_dict()) == pickle.dumps(chief.state_dict())
+    fused = loaded.fuse(score_windows(win, got))
+    assert fused["F"].to_list() == chief.fuse(scored)["F"].to_list()
+    with pytest.raises(BundleError):
+        load_bundle(tmp_path / "b", load_settings())

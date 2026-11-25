@@ -1,0 +1,40 @@
+# M5 candidates: rev 2 of the pump rules 100101 and 100102 (configs/signatures.yaml keeps rev 1
+# and its sha). Read only with `chief.rule_rev2: [<sid>, ...]` (live/replay, each listed sid's
+# rev 2 replaces its rev 1 under the same detector name `rule.<sid>`) and by the `m5_rules` eval
+# variants (scored as `rule.<sid>.rev2`). Turning a rule on in live is a separate step after the
+# eval (docs/superpowers/specs/2026-11-25-m5-rule-thresholds-design.md).
+# Train check (M5, train range 2018-01-01..2019-06-30 only, feature cache read only): row fire
+# rate on 3,075,840 rows of 356 train-normal symbol-days (cached train-range days at least
+# min_gap_days = 2 from every label of the symbol), and per-event fire on 183 train REAL pumps
+# (Sapienza + Hu, rows in [t_start - 120 s, t_start + 300 s]); other conditions unchanged.
+# Rev history of 100101 (burst):
+#   rev 1: z_quote_vol_60 >= 6, ret_60 >= 0.02, z_rush_60 >= 4. Train: 0 rows (0.0), 0/183 pumps;
+#          on sparse pairs the 60 s log-volume z tops out near 3-4, so 6 is out of reach.
+#   rev 2: z_quote_vol_60 >= 3. Train: 58 rows (1.89e-5; 12 fire episodes = 0.034 per
+#          symbol-day), 105/183 pumps. (Alternative 2.5: signatures_r2_alt.yaml.)
+# Rev history of 100102 (stealth):
+#   rev 1: cusum_imb >= 8, ret_1800 >= 0.03, buy_imb_1800 >= 0.2. Train: 5,862 rows (1.91e-3;
+#          302 fire episodes = 0.848 per symbol-day), 42/183 pumps.
+#   rev 2: cusum_imb >= 6. Train: 7,013 rows (2.28e-3; 343 episodes = 0.963 per symbol-day),
+#          59/183 pumps. Rev 1 is already above the 1e-3 row-rate preference; 6 adds the fewer
+#          rows (+1,151, +3.7e-4) of the two candidates (5: 7,670 rows, 2.49e-3, 72/183 pumps).
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100101
+    technique: MM-T001.001
+    layer: rule
+    rev: 2
+    name: pump-and-dump แบบพุ่งเร็ว (burst)
+    conditions:
+      - {feature: z_quote_vol_60, op: ">=", thr: 3}
+      - {feature: ret_60, op: ">=", thr: 0.02}
+      - {feature: z_rush_60, op: ">=", thr: 4}
+  - sid: 100102
+    technique: MM-T001.002
+    layer: rule
+    rev: 2
+    name: pump-and-dump แบบค่อยเป็นค่อยไป (stealth)
+    conditions:
+      - {feature: cusum_imb, op: ">=", thr: 6}
+      - {feature: ret_1800, op: ">=", thr: 0.03}
+      - {feature: buy_imb_1800, op: ">=", thr: 0.2}

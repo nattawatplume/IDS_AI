@@ -27,6 +27,10 @@ SELL_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_sell.yaml"
 NAMING_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_attr.yaml"
 # M3 candidate rev 2 of the wash rule 100501 (eval variant `wash2` of `m3_attr` only)
 WASH2_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_wash2.yaml"
+# M5 rev 2 of the pump rules 100101 / 100102, read only with `chief.rule_rev2` (each listed sid
+# replaces its rev 1) and by the `m5_rules` eval; the alt file holds the eval-only 100101 at 2.5
+R2_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_r2.yaml"
+R2_ALT_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_r2_alt.yaml"
 THR_FLOOR = 1e-9
 KK_SID = 100103  # Kamps-Kleinberg baseline signature
 

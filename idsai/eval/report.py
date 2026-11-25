@@ -81,6 +81,15 @@ recall_correct gain over `base` is significant, the largest gain wins (ties: `ba
 `wash2` < `attr+wash2`); with none, `base`. Wash naming is judged on SEMI-SYN test only (accept
 has REAL pumps only), report-only.
 
+M5 (`m5_rules`, budget 2): the same tables as M3 for `base`, `r101` (100101 rev 2 at
+z_quote_vol_60 >= 3), `r101_25` (at 2.5), `r102` (100102 rev 2 at cusum_imb >= 6) and
+`r101+r102`, without the strawman, plus the confusion per variant on test and semisyn. Chosen on
+accept only, by a rule fixed in advance (`m5_select`): eligible are the variants whose accept FA
+and accept-hard FA are each at most `M3_FA_FACTOR` (1.02) times `base`'s; among them, of the
+variants whose paired recall_any gain over `base` is significant (CI low > 0 and >= min_effect),
+the largest gain wins (ties: `base` < `r101` < `r101_25` < `r102` < `r101+r102`); with none,
+`base`. Test and SEMI-SYN are reported once, never used to choose.
+
 Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
 label family, the share of events whose matched episodes carry each parent technique (or none),
 averaged over seeds; an event with several techniques counts once in each column. Needs
@@ -109,9 +118,13 @@ from idsai.eval.experiments import (
     M2_FUSIONS,
     M2_MODELS,
     M2_REF,
+    M3,
     M3_VARIANTS,
+    M5,
+    M5_VARIANTS,
 )
 from idsai.eval.metrics import (
+    EFFECT_TOL,
     MIN_EVENTS,
     UNCLASSIFIED,
     _parent,
@@ -1113,6 +1126,24 @@ def _m2(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
     }
 
 
+def _nonsig_th(vs: dict[str, Any] | None, min_effect: float, ref: str, metric: str = "") -> str:
+    """Thai reading of a paired X − `ref` row that failed the selection tests shown before it.
+
+    A CI wholly below / above 0 is still a significant change: "แต่น้อยกว่า min_effect" is added
+    only when |diff| really is below `min_effect` (M3 checks the reverse test on recall_any only,
+    so a recall_correct row can reach here with a large significant decrease); otherwise no
+    significant change. Display only: selection never reads it."""
+    head = f"{metric} " if metric else ""
+    if vs is not None:
+        lo, hi = vs["ci"]
+        if hi < 0 or lo > 0:
+            word = "ลดลง" if hi < 0 else "เพิ่ม"
+            small = abs(vs["diff_mean"]) < min_effect - EFFECT_TOL
+            tail = f" แต่น้อยกว่า min_effect ({min_effect:g})" if small else ""
+            return f"{head}{word}จาก {ref} อย่างมีนัย{tail}"
+    return f"{head}ไม่ต่างจาก {ref} อย่างมีนัย"
+
+
 def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
     lines = ["", f"### m2_ai: ชั้น AI และการรวมคะแนน เทียบ no_ai (budget {PAIRED_BUDGET:g})"]
     if m2 is None:
@@ -1145,7 +1176,7 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
             elif r["vs_ref"] is None:
                 diff, verdict = "–", r["reason_th"] or "–"
             else:
-                diff = _fmt_ci(r["vs_ref"]["diff_mean"], r["vs_ref"]["ci"])
+                diff = _fmt_diff_ci(r["vs_ref"]["diff_mean"], r["vs_ref"]["ci"])
                 if r["reason_th"]:
                     verdict = r["reason_th"]
                 elif r["gain_significant"]:
@@ -1153,7 +1184,7 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
                 elif r["below_ref"]:
                     verdict = "ต่ำกว่า no_ai อย่างมีนัย"
                 else:
-                    verdict = "ไม่ต่างจาก no_ai อย่างมีนัย"
+                    verdict = _nonsig_th(r["vs_ref"], min_effect, "no_ai")
             lines.append(
                 f"| {r['variant']} | {r['n_seeds']} | "
                 f"{'–' if r['n_events'] is None else r['n_events']} | "
@@ -1193,7 +1224,6 @@ def _m2_md(m2: dict[str, Any] | None, min_effect: float) -> list[str]:
     return lines
 
 
-M3 = "m3_attr"
 M3_REF = "base"
 M3_FA_FACTOR = 1.02
 M3_TOL = 1e-12
@@ -1227,9 +1257,16 @@ M3_NOTES_TH = [
 NO_M3_TH = "ยังไม่มีผล m3_attr"
 
 
-def _m3_rank(variant: str) -> tuple[int, str]:
-    order = list(M3_VARIANTS)
+def _rank(order: list[str], variant: str) -> tuple[int, str]:
     return (order.index(variant) if variant in order else len(order), variant)
+
+
+def _m3_rank(variant: str) -> tuple[int, str]:
+    return _rank(list(M3_VARIANTS), variant)
+
+
+def _m5_rank(variant: str) -> tuple[int, str]:
+    return _rank(list(M5_VARIANTS), variant)
 
 
 def m3_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1239,6 +1276,23 @@ def m3_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     Returns `chosen` (`base` when nothing wins; None without a usable `base` row), `top`,
     `eligible` (base included) and `excluded` (Thai reason per variant)."""
+    return _select_fa_capped(rows, _m3_rank, "gain_correct", below_gate=True)
+
+
+def m5_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The M5 selection rule on accept rows (`variant`, `fa`, `fa_hard`, `gain_any` = paired
+    recall_any of X minus `base` or None, `gain_any_significant`, optional `seeds` and `error`):
+    FA and FA-hard each at most `M3_FA_FACTOR` x base, then the largest significant recall_any
+    gain, ties to the simpler (`M5_VARIANTS` order), none: `base`. Same output as `m3_select`."""
+    return _select_fa_capped(rows, _m5_rank, "gain_any", below_gate=False)
+
+
+def _select_fa_capped(
+    rows: list[dict[str, Any]], rank: Any, gain: str, below_gate: bool
+) -> dict[str, Any]:
+    """Shared body of `m3_select` / `m5_select`: `gain` names the paired-gain key (its
+    significance is `<gain>_significant`); `below_gate` also excludes a variant whose recall_any
+    is significantly below `base` (`below_ref`)."""
     ref = next((r for r in rows if r["variant"] == M3_REF), None)
     if ref is None or ref.get("error") or ref["fa"] is None or ref["fa_hard"] is None:
         return {"chosen": None, "top": None, "eligible": [], "excluded": {}}
@@ -1267,29 +1321,29 @@ def m3_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 f"FA-hard {r['fa_hard']:.3g} เกิน {M3_FA_FACTOR:.2f} เท่าของ base "
                 f"({ref['fa_hard']:.3g})"
             )
-        elif r.get("below_ref"):
+        elif below_gate and r.get("below_ref"):
             excluded[v] = "recall_any ต่ำกว่า base อย่างมีนัย"
-        elif r["gain_correct"] is None:
+        elif r[gain] is None:
             excluded[v] = "ไม่มีผลเทียบแบบจับคู่กับ base จึงจัดอันดับผลเพิ่มไม่ได้"
         else:
             eligible.append(r)
     out = {
         "chosen": M3_REF,
         "top": None,
-        "eligible": sorted([M3_REF, *(r["variant"] for r in eligible)], key=_m3_rank),
+        "eligible": sorted([M3_REF, *(r["variant"] for r in eligible)], key=rank),
         "excluded": excluded,
     }
 
     def best_of(cands: list[dict[str, Any]]) -> str | None:
         if not cands:
             return None
-        best = max(r["gain_correct"] for r in cands)
-        tied = [r for r in cands if r["gain_correct"] >= best - M3_TOL]
-        return min(tied, key=lambda r: _m3_rank(r["variant"]))["variant"]
+        best = max(r[gain] for r in cands)
+        tied = [r for r in cands if r[gain] >= best - M3_TOL]
+        return min(tied, key=lambda r: rank(r["variant"]))["variant"]
 
     out["top"] = best_of(eligible)
     # the largest gain among the significant ones (spec: "largest significant paired gain")
-    out["chosen"] = best_of([r for r in eligible if r["gain_correct_significant"]]) or M3_REF
+    out["chosen"] = best_of([r for r in eligible if r[f"{gain}_significant"]]) or M3_REF
     return out
 
 
@@ -1317,8 +1371,27 @@ def _fa_named(records: list[dict]) -> tuple[float | None, float | None, int]:
 def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
     """M3 tables per split, paired recall_correct / recall_any vs `base`, the accept-only
     selection and the confusion table per variant (budget 2)."""
+    return _vs_base(runs, n_boot, min_effect, M3, list(M3_VARIANTS), m3_select, M3_RULE_TH)
+
+
+def _m5(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """M5 tables per split (as M3), the accept-only `m5_select` and the confusion per variant."""
+    return _vs_base(runs, n_boot, min_effect, M5, list(M5_VARIANTS), m5_select, M5_RULE_TH)
+
+
+def _vs_base(
+    runs: list[dict],
+    n_boot: int,
+    min_effect: float,
+    experiment: str,
+    order: list[str],
+    select: Any,
+    rule_th: str,
+) -> dict[str, Any] | None:
+    """Shared body of `_m3` / `_m5`: rows per split (variant order `order`), both paired gains
+    vs `base` (recall_correct: `gain_correct`, recall_any: `gain_any`), `select` on accept."""
     recs, config_note = _latest_config(
-        [r for r in runs if r["experiment"] == M3 and float(r["budget"]) == PAIRED_BUDGET]
+        [r for r in runs if r["experiment"] == experiment and float(r["budget"]) == PAIRED_BUDGET]
     )
     if not recs:
         return None
@@ -1334,7 +1407,7 @@ def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
         if not arms and not failed:
             continue
         rows = []
-        for v in sorted({*arms, *failed}, key=_m3_rank):
+        for v in sorted({*arms, *failed}, key=lambda x: _rank(order, x)):
             row: dict[str, Any] = {
                 "variant": v,
                 "n_seeds": 0,
@@ -1357,11 +1430,14 @@ def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
                         "vs_ref_correct",
                         "vs_ref_any",
                         "gain_correct",
+                        "gain_any",
                         "reason_th",
+                        "reason_any_th",
                     ),
                 ),  # fmt: skip
                 "n_fa_episodes": 0,
                 "gain_correct_significant": False,
+                "gain_any_significant": False,
                 "below_ref": False,
             }
             if v in failed:
@@ -1403,8 +1479,13 @@ def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
                 if pa is not None:
                     row["vs_ref_any"] = {k: pa[k] for k in ("diff_mean", "ci", "ci_unit")}
                     row["below_ref"] = bool(pa["significant_reverse"])
-                elif row["reason_th"] is None:
-                    row["reason_th"] = why_a
+                    row["gain_any"] = pa["diff_mean"]
+                    row["gain_any_significant"] = bool(pa["significant"])
+                    row["reason_any_th"] = pa["reason_th"]
+                else:
+                    row["reason_any_th"] = why_a
+                    if row["reason_th"] is None:
+                        row["reason_th"] = why_a
             rows.append(row)
         splits[split] = {"provenance": provenance, "rows": rows}
     selection = None
@@ -1412,11 +1493,11 @@ def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
         if M3_REF not in _m1_arms(recs, "accept"):
             notes.append("เลือกตัวแปรไม่ได้: ไม่มีผล accept:base ที่งบ 2")
         else:
-            selection = m3_select(splits["accept"]["rows"])
+            selection = select(splits["accept"]["rows"])
     confusion = {
         split: {
             v: _confusion_block([r for r in recs if r["variant"] == f"{split}:{v}"])
-            for v in M3_VARIANTS
+            for v in order
             if any(r["variant"] == f"{split}:{v}" for r in recs)
         }
         for split in M3_CONFUSION_SPLITS
@@ -1426,7 +1507,7 @@ def _m3(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
         "splits": splits,
         "selection": selection,
         "confusion": confusion,
-        "rule_th": M3_RULE_TH,
+        "rule_th": rule_th,
         "notes": notes,
     }
 
@@ -1455,8 +1536,8 @@ def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
                 verdict = "ตัวอ้างอิง"
             else:
                 vc, va = r["vs_ref_correct"], r["vs_ref_any"]
-                d_c = "–" if vc is None else _fmt_ci(vc["diff_mean"], vc["ci"])
-                d_a = "–" if va is None else _fmt_ci(va["diff_mean"], va["ci"])
+                d_c = "–" if vc is None else _fmt_diff_ci(vc["diff_mean"], vc["ci"])
+                d_a = "–" if va is None else _fmt_diff_ci(va["diff_mean"], va["ci"])
                 if r["reason_th"]:
                     verdict = r["reason_th"]
                 elif r["below_ref"]:
@@ -1464,7 +1545,7 @@ def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
                 elif r["gain_correct_significant"]:
                     verdict = "recall_correct สูงกว่า base อย่างมีนัย"
                 else:
-                    verdict = "recall_correct ไม่ต่างจาก base อย่างมีนัย"
+                    verdict = _nonsig_th(vc, min_effect, "base", "recall_correct")
             named = (
                 "–"
                 if r["fa_named"] is None
@@ -1497,6 +1578,109 @@ def _m3_md(m3: dict[str, Any] | None, min_effect: float) -> list[str]:
         for v, block in blocks.items():
             lines += _confusion_block_md(f"#### confusion {split}:{v}", block)
     lines += [f"- {n}" for n in [*M3_NOTES_TH, *m3["notes"]]]
+    return lines
+
+
+M5_RULE_TH = (
+    "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัวอ้างอิงคือ base (ชุดตรวจจับของระบบจริง: "
+    "กฎ rev 1 + กฎฝั่งขาย + สถิติ + ai.iforest แบบ shift 1 + กฎระบุเทคนิค); ตัวแปรที่มีสิทธิ์ต้องมี FA ของ accept "
+    f"และ FA ของวันผันผวนสูง (accept-hard) แต่ละค่า ≤ {M3_FA_FACTOR:.2f} เท่าของ base ที่งบ 2; "
+    "ในกลุ่มนี้ เฉพาะตัวที่ recall_any เพิ่มจาก base อย่างมีนัย (paired bootstrap ข้ามเหตุการณ์: "
+    "CI ล่างของ (X − base) > 0 และผลต่าง ≥ min_effect) เลือกตัวที่เพิ่มมากที่สุด ถ้าไม่มีเลยเลือก base; "
+    "ถ้าผลเพิ่มเท่ากันเลือกตัวที่ง่ายกว่า: " + " < ".join(M5_VARIANTS)
+)
+M5_NOTES_TH = [
+    "ผล test และ semisyn รายงานครั้งเดียวไว้ดูเท่านั้น ไม่ได้ใช้เลือกตัวแปร",
+    "r101: กฎ 100101 rev 2 (z_quote_vol_60 ≥ 3 แทน 6); r101_25: rev 2 ทางเลือกที่ 2.5; "
+    "r102: กฎ 100102 rev 2 (cusum_imb ≥ 6 แทน 8); เงื่อนไขอื่นคงเดิม เกณฑ์เลือกจากช่วง train เท่านั้น "
+    "(อัตราการทำงานต่อแถวในวันปกติของ train และจำนวน pump จริงของ train ที่กฎทำงาน อยู่ในหมายเหตุของ "
+    "configs/signatures_r2.yaml)",
+    "กฎอยู่ใน F จึงสอบเทียบและหา τ ใหม่ทุกตัวแปรบนชุด cal: FA ที่งบเดียวกันจึงยังถูกคุม แต่ขยับได้",
+    "สัดส่วน FA ที่มีชื่อ = episode ที่ไม่ตรงกับเหตุการณ์ใดในวันปกติ ที่ระบุเทคนิคอื่นที่ไม่ใช่ MM-T000 "
+    "(รวมข้ามทุก seed); การตั้งชื่อให้การแจ้งเตือนผิดพลาดเป็นต้นทุน",
+    "ไม่ได้ปรับ attribution_min ในรอบนี้: หลัง M3 การระบุเทคนิคเกือบอิ่มตัวแล้ว (MM-T000 ของ pump จริงบน test "
+    "เหลือ 0.001) การลดเกณฑ์จะตั้งชื่อให้การแจ้งเตือนผิดพลาดเพิ่มเท่านั้น",
+    "F คือ −log10 ของ anomaly p-value ซึ่งบอกระดับความผิดปกติทางสถิติเทียบตลาดปกติ "
+    "ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา และไม่ใช่ข้อกล่าวหาผู้ใด",
+    "recall_correct และสัดส่วน FA ที่มีชื่อรายงานไว้ดูเท่านั้น ไม่ได้ใช้ในกฎเลือก "
+    "(กฎเลือกดู recall_any และเพดาน FA / FA-hard เท่านั้น)",
+    "การเปิดกฎ rev 2 ในระบบจริง (chief.rule_rev2 ใน configs/default.yaml) เป็นขั้นตอนแยกหลังดูผลนี้ "
+    "และต้องฝึก bundle ใหม่ทุกตัว เพราะกฎอยู่ใน F และ τ สอบเทียบกับกฎชุดเดิม; ตอนนี้ bundle.json "
+    "ไม่ได้เก็บ sha ของ configs/signatures_r2.yaml (เก็บแค่ config_hash) "
+    "จึงต้องเพิ่ม sha นี้ใน meta ของ bundle ก่อนเปิดใช้",
+]
+NO_M5_TH = "ยังไม่มีผล m5_rules"
+
+
+def _m5_md(m5: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = [
+        "",
+        f"### m5_rules: เกณฑ์กฎ pump ที่ข้อมูลจริงไปถึง (rev 2) เทียบ base (budget {PAIRED_BUDGET:g})",
+    ]
+    if m5 is None:
+        return [*lines, "", f"- {NO_M5_TH}"]
+    for split, block in m5["splits"].items():
+        lines += [
+            "",
+            f"#### {split} ({block['provenance']})",
+            "",
+            "| ตัวแปร | seeds | events | recall_any [95% CI] | recall_correct [95% CI] | "
+            "FA/symbol-day [95% CI] | FA hard [95% CI] | FA ที่มีชื่อ (จากกฎระบุเทคนิค) | "
+            "ผลต่าง recall_any (X − base) [95% CI] | ผลต่าง recall_correct (X − base) [95% CI] | "
+            "อ่านว่า |",
+            "|" + "---|" * 11,
+        ]
+        for r in block["rows"]:
+            if r.get("error"):
+                d_c = d_a = "–"
+                verdict = f"ประเมินไม่ได้: {_error_th(r['error'])}"
+            elif r["variant"] == M3_REF:
+                d_c = d_a = "–"
+                verdict = "ตัวอ้างอิง"
+            else:
+                vc, va = r["vs_ref_correct"], r["vs_ref_any"]
+                d_c = "–" if vc is None else _fmt_diff_ci(vc["diff_mean"], vc["ci"])
+                d_a = "–" if va is None else _fmt_diff_ci(va["diff_mean"], va["ci"])
+                if r["reason_any_th"]:
+                    verdict = r["reason_any_th"]
+                elif r["gain_any_significant"]:
+                    verdict = "recall_any สูงกว่า base อย่างมีนัย"
+                elif r["below_ref"]:
+                    verdict = "recall_any ต่ำกว่า base อย่างมีนัย"
+                else:
+                    verdict = _nonsig_th(va, min_effect, "base", "recall_any")
+            named = (
+                "–"
+                if r["fa_named"] is None
+                else f"{_fmt(r['fa_named'])} ({_fmt(r['fa_named_by_rule'])}) "
+                f"จาก {r['n_fa_episodes']} episode"
+            )
+            lines.append(
+                f"| {r['variant']} | {r['n_seeds']} | "
+                f"{'–' if r['n_events'] is None else r['n_events']} | "
+                f"{_fmt_ci(r['recall_any'], r['recall_any_ci'])} | "
+                f"{_fmt_ci(r['recall_correct'], r['recall_correct_ci'])} | "
+                f"{_fmt_ci(r['fa'], r['fa_ci'])} | {_fmt_ci(r['fa_hard'], r['fa_hard_ci'])} | "
+                f"{named} | {d_a} | {d_c} | {verdict} |"
+            )
+    lines += ["", f"- {m5['rule_th']} (min_effect = {min_effect:g})"]
+    sel = m5["selection"]
+    if sel is not None:
+        for v, why in sorted(sel["excluded"].items(), key=lambda kv: _m5_rank(kv[0])):
+            lines.append(f"- ตัดออก {v}: {why}")
+        if sel["chosen"] is None:
+            lines.append("- **ผลการเลือก (accept):** เลือกไม่ได้ (ไม่มีค่า FA ของ base)")
+        else:
+            if sel["top"] is not None and sel["chosen"] == M3_REF:
+                lines.append(
+                    f"- ตัวที่ recall_any เพิ่มมากที่สุดในกลุ่มที่มีสิทธิ์คือ {sel['top']} "
+                    "แต่ไม่มีตัวใดที่ผลเพิ่มมีนัย จึงคง base"
+                )
+            lines.append(f"- **ผลการเลือก (accept):** {sel['chosen']}")
+    for split, blocks in m5["confusion"].items():
+        for v, block in blocks.items():
+            lines += _confusion_block_md(f"#### confusion {split}:{v}", block)
+    lines += [f"- {n}" for n in [*M5_NOTES_TH, *m5["notes"]]]
     return lines
 
 
@@ -1900,6 +2084,20 @@ def _fmt_ci(mean: float | None, ci: list[float] | None) -> str:
     return f"{s} [{_fmt(ci[0])}, {_fmt(ci[1])}]" if ci else s
 
 
+def _fmt_bound(x: float, nd: int = 3) -> str:
+    """A paired-difference CI bound: `nd` decimals, but a non-zero bound that would print as
+    0.000 gets one significant digit (0.00017 -> 0.0002), so a CI that excludes 0 never looks
+    like it touches 0."""
+    if x != 0 and round(x, nd) == 0:
+        return f"{x:.{-math.floor(math.log10(abs(x)))}f}"
+    return _fmt(x, nd)
+
+
+def _fmt_diff_ci(mean: float | None, ci: list[float] | None) -> str:
+    s = _fmt(mean)
+    return f"{s} [{_fmt_bound(ci[0])}, {_fmt_bound(ci[1])}]" if ci else s
+
+
 def _fmt_fa(mean: float | None, ci: list[float] | None, n_days: int | None) -> str:
     """`x [lo, hi] (n วัน)`; the CI and the day count only when known."""
     s = _fmt_ci(mean, ci)
@@ -2032,6 +2230,7 @@ def build_report(
     m2 = _m2(runs, n_boot, cfg.eval.min_effect)
     m3 = _m3(runs, n_boot, cfg.eval.min_effect)
     m4 = _m4(runs, n_boot, cfg.eval.min_effect)
+    m5 = _m5(runs, n_boot, cfg.eval.min_effect)
     confusion = _confusion(runs)
     data = {
         "header": header,
@@ -2047,6 +2246,7 @@ def build_report(
         "m2_ai": m2,
         "m3_attr": m3,
         "m4_sell": m4,
+        "m5_rules": m5,
         "confusion": confusion,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
@@ -2097,6 +2297,8 @@ def build_report(
             lines += _m3_md(m3, cfg.eval.min_effect)
         if exp == M4:
             lines += _m4_md(m4, cfg.eval.min_effect)
+        if exp == M5:
+            lines += _m5_md(m5, cfg.eval.min_effect)
     lines += [
         "",
         f"## AE vs baselines (paired bootstrap, budget {PAIRED_BUDGET:g}, real_t001 events)",

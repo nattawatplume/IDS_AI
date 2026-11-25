@@ -481,3 +481,31 @@ def test_naming_rules_are_scored_and_change_only_names(world, batch_inj):
     assert [{k: v for k, v in a.model_dump().items() if k not in drop} for a in want] == [
         {k: v for k, v in a.model_dump().items() if k not in drop} for a in base
     ]
+
+
+def test_rule_rev2_stream_alerts_equal_batch_episodes(world):
+    """M5: with `chief.rule_rev2` the rev 2 pump rules (same detector names) run in the stream
+    path exactly as in the batch path: same fused F, same alerts."""
+    on = load_settings(overrides={"chief": {"rule_rev2": [100101, 100102]}})
+    rules = {d.name: d for d in build_detectors(["rules"], on)}
+    dets = [rules.get(d.name, d) for d in world["dets"]]
+    assert {d.signature_id: d.rev for d in dets if d.layer == "rule"}[100101] == 2
+    clean = load_day_windows(world["store"], SYM, D, world["cfg"])
+    plain = world["chief"]
+    chief = Chief(dets, plain.cfg, plain.config_hash, plain.model_versions, ai=plain.ai)
+    chief.calibrate(score_windows(clean.windows, dets))
+    chief.fit_threshold(chief.fuse(score_windows(clean.windows, dets)), budget_per_symbol_day=10.0)
+    bus = Bus(maxsize=100_000)
+    qa = bus.subscribe("alerts")
+    prev = world["trades"].filter(pl.col("ts_us") < D_US)
+    r = Replayer(world["trades"], speed=0, start_us=D_US, preroll_from_us=D_US - 86_400 * S)
+    r.inject(burst(), base_quote_rate(prev), "replay")
+    asyncio.run(StreamPipeline(world["cfg"], world["store"], dets, chief, bus, "replay").run(r))
+    closed = [a for a in drain(qa) if a.status == "closed"]
+    inj = load_day_windows(world["store"], SYM, D, world["cfg"], scenario=burst())
+    want = chief.episodes(chief.fuse(score_windows(inj.windows, dets)), provenance="replay")
+    assert want
+    key = lambda a: (a.symbol, a.ts_event_us)  # noqa: E731
+    assert [a.model_dump_json() for a in sorted(closed, key=key)] == [
+        a.model_dump_json() for a in sorted(want, key=key)
+    ]
