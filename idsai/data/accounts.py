@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from idsai.data.pg import PgClient
+
 
 class AccountStoreError(RuntimeError):
     """The account backend could not complete the operation."""
@@ -88,52 +90,15 @@ class PostgresAccounts:
     """Postgres backend. psycopg is imported lazily; error messages never include the URL."""
 
     def __init__(self, url: str) -> None:
-        self._url = url
-        self._con: Any = None
+        self._pg = PgClient(
+            url, AccountStoreError, "account", unique_error="username already taken"
+        )
 
     def _connect(self) -> Any:
-        import psycopg
-
-        try:
-            con = psycopg.connect(
-                self._url,
-                connect_timeout=5,
-                autocommit=True,
-                keepalives=1,
-                keepalives_idle=30,
-                keepalives_interval=10,
-                keepalives_count=3,
-            )
-            # a SET, not the `options` parameter, so `options` already in the URL survive
-            con.execute("SET statement_timeout = 5000")
-            return con
-        except psycopg.Error:
-            raise AccountStoreError("cannot connect to account database") from None
+        return self._pg.connect()
 
     def _run(self, sql: str, args: tuple = (), fetch: bool = False) -> list[tuple]:
-        import psycopg
-
-        for attempt in (1, 2):
-            try:
-                if self._con is None or self._con.closed:
-                    self._con = self._connect()
-                with self._con.cursor() as cur:
-                    cur.execute(sql, args)
-                    return cur.fetchall() if fetch else []
-            except psycopg.errors.UniqueViolation:
-                raise ValueError("username already taken") from None
-            except psycopg.OperationalError:
-                try:
-                    if self._con is not None:
-                        self._con.close()
-                except psycopg.Error:
-                    pass
-                self._con = None
-                if attempt == 2:
-                    raise AccountStoreError("account database unavailable") from None
-            except psycopg.Error:
-                raise AccountStoreError("account database error") from None
-        return []  # pragma: no cover
+        return self._pg.run(sql, args, fetch=fetch)
 
     def ensure_schema(self) -> None:
         for ddl in _DDL:
