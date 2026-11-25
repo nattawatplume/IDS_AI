@@ -34,6 +34,8 @@ _DUCK_TYPES = {pl.Int64: "BIGINT", pl.String: "VARCHAR"}
 Verdict = Literal["tp", "fp", "unsure"]
 _VERDICTS = ("tp", "fp", "unsure")
 _DELETABLE_PROVENANCE = ("replay", "sim")
+# a coin's alert history counts these; `sim` (Red-Team injects) is never a coin's own history
+COUNTED_PROVENANCE = ("live", "replay")
 
 
 def _now_us() -> int:
@@ -453,6 +455,40 @@ class Store:
         with self._lock:
             rows = self._db().execute(sql, args).fetchall()
         return [a for r in rows if (a := self._read_alert(r[0])) is not None]
+
+    def alerts_between(
+        self,
+        symbol: str,
+        since_us: int,
+        until_us: int,
+        provenances: tuple[str, ...] = COUNTED_PROVENANCE,
+    ) -> list[Alert]:
+        """Alerts of `symbol` with `since_us <= ts_event_us <= until_us` and one of `provenances`,
+        newest first. One row per `alert_id` (`upsert_alert`), so an episode appears once."""
+        with self._lock:
+            rows = (
+                self._db()
+                .execute(
+                    "SELECT json FROM alerts WHERE symbol = ? AND ts_event_us >= ? "
+                    "AND ts_event_us <= ? ORDER BY ts_event_us DESC, alert_id DESC",
+                    [symbol, since_us, until_us],
+                )
+                .fetchall()
+            )
+        wanted = set(provenances)
+        return [
+            a for r in rows if (a := self._read_alert(r[0])) is not None and a.provenance in wanted
+        ]
+
+    def count_alerts(
+        self,
+        symbol: str,
+        since_us: int,
+        until_us: int,
+        provenances: tuple[str, ...] = COUNTED_PROVENANCE,
+    ) -> int:
+        """How many alerts `alerts_between` returns: each episode once, `sim` out by default."""
+        return len(self.alerts_between(symbol, since_us, until_us, provenances))
 
     def get_alert(self, alert_id: str) -> Alert | None:
         with self._lock:
