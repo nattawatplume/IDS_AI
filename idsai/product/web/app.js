@@ -3514,6 +3514,101 @@ function renderCheck(chk) {
   $("check-hist-sub").textContent = isNum(hist.d7) ? `7 วัน: ${hist.d7}${split}` : "–";
 }
 
+// ------------------------------------------------------------------ track record (ผลงานย้อนหลัง)
+
+// the page re-reads itself this often, only while it is shown
+const TRACK_POLL_MS = 60000;
+const TRACK_STATUS_TEXT = { pending: "รอครบ 1 ชม.", unknown: "ไม่มีข้อมูลราคา" };
+
+// Thai date and clock (Asia/Bangkok): "18/01/2021 23:30 น."; alerts on this page span many days
+function fmtThaiDateTime(us) {
+  if (!isNum(us)) return "–";
+  const d = new Date(Math.floor((us + TH_OFFSET_US) / 1000));
+  if (Number.isNaN(d.getTime())) return "–";
+  const iso = d.toISOString();
+  return `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)} ${iso.slice(11, 16)} น.`;
+}
+
+function fmtPrice(x) {
+  if (!isNum(x)) return "–";
+  return x >= 1000 ? x.toLocaleString("en-US", { maximumFractionDigits: 2 }) : x.toPrecision(4);
+}
+
+function fmtPct(x) {
+  if (!isNum(x)) return "–";
+  return `${x > 0 ? "+" : ""}${x.toFixed(2)}%`;
+}
+
+// "ผิดปกติจริง 2 · เตือนผิด 1 · ไม่แน่ใจ 0" from {tp, fp, unsure}
+function votesText(fb) {
+  const v = fb || {};
+  return ["tp", "fp", "unsure"].map((k) => `${VERDICT_TH[k]} ${isNum(v[k]) ? v[k] : 0}`).join(" · ");
+}
+
+function showTrack() {
+  loadTrack();
+}
+
+let trackSeq = 0; // only the newest answer is drawn
+
+async function loadTrack() {
+  const seq = ++trackSeq;
+  let rec;
+  let tax;
+  try {
+    [rec, tax] = await Promise.all([api("/api/track-record"), loadTaxonomy()]);
+  } catch (e) {
+    if (seq !== trackSeq) return;
+    $("track-error").textContent = plainErrorText(e);
+    $("track-error").hidden = false;
+    return;
+  }
+  if (seq !== trackSeq || state.route !== "track") return;
+  $("track-error").hidden = true;
+  renderTrack(rec, tax);
+}
+
+function trackRow(it, tax) {
+  const done = it.status === "done";
+  const after = done
+    ? [fmtPrice(it.price_1h), el("span", { class: `track-change ${it.change_1h_pct < 0 ? "down" : "up"}` }, ` (${fmtPct(it.change_1h_pct)})`)]
+    : TRACK_STATUS_TEXT[it.status] || TRACK_STATUS_TEXT.pending;
+  return el(
+    "tr",
+    {},
+    el("td", { class: "when" }, fmtThaiDateTime(it.ts_event_us)),
+    el("td", {}, it.symbol || "–"),
+    el("td", {}, thaiTechniqueName(tax, it.technique_id) || "ความผิดปกติทางสถิติ"),
+    el("td", {}, PHASE_TH[it.phase] || "–"),
+    el("td", { class: "num" }, fmtPrice(it.price_at)),
+    el("td", { class: done ? "num" : "num muted" }, after),
+    el("td", { class: "small" }, votesText(it.feedback)),
+    el("td", {}, el("a", { href: alertHref(it.alert_id) }, "ดูรายละเอียด")),
+  );
+}
+
+function renderTrack(rec, tax) {
+  if (!rec || typeof rec !== "object") return;
+  const sum = rec.summary || {};
+  $("track-count").textContent = isNum(sum.n_alerts) ? String(sum.n_alerts) : "–";
+  $("track-count-sub").textContent = isNum(sum.since_us) ? `ตั้งแต่ ${fmtThaiDateTime(sum.since_us)}` : "ยังไม่มีการแจ้งเตือน";
+  const nDone = isNum(sum.n_done) ? sum.n_done : 0;
+  $("track-lower").textContent = isNum(sum.share_lower_1h) ? `${Math.round(sum.share_lower_1h * 100)}%` : "–";
+  $("track-lower-sub").textContent = `จาก ${nDone} ครั้งที่ครบ 1 ชม. แล้ว`;
+  $("track-median").textContent = fmtPct(sum.median_change_1h_pct);
+  $("track-median-sub").textContent = `ราคา 1 ชม. หลังเตือนเทียบตอนเตือน (${nDone} ครั้ง)`;
+  const tot = sum.feedback_totals || {};
+  $("track-votes").textContent = `${isNum(tot.tp) ? tot.tp : 0} / ${isNum(tot.fp) ? tot.fp : 0}`;
+  $("track-votes-sub").textContent = votesText(tot);
+
+  const items = Array.isArray(rec.items) ? rec.items : [];
+  const body = clear($("track-body"));
+  for (const it of items) if (it && typeof it.alert_id === "string") body.appendChild(trackRow(it, tax));
+  $("track-empty").hidden = items.length > 0;
+  const notes = clear($("track-notes"));
+  for (const line of Array.isArray(rec.note_th) ? rec.note_th : []) notes.appendChild(el("li", {}, line));
+}
+
 // ------------------------------------------------------------------ router
 
 const PAGES = {
@@ -3526,12 +3621,13 @@ const PAGES = {
   simulate: "page-simulate",
   results: "page-results",
   check: "page-check",
+  track: "page-track",
 };
 
 // old links keep working: the 6-tab names map onto the 4 pages; About and Taxonomy live in help
 const ROUTE_REDIRECTS = { "#/monitor": "#/home", "#/redteam": "#/simulate", "#/eval": "#/results" };
 const HELP_ROUTES = ["#/about", "#/taxonomy"];
-const KNOWN_ROUTES = ["#/home", "#/alerts", "#/check", "#/simulate", "#/results", "#/activity", "#/users"];
+const KNOWN_ROUTES = ["#/home", "#/alerts", "#/check", "#/track", "#/simulate", "#/results", "#/activity", "#/users"];
 
 // where a hash should land: { route, help }; anything unknown goes home
 function routeFor(hash) {
@@ -3614,6 +3710,8 @@ function route() {
     showEval();
   } else if (r.name === "check") {
     showCheck();
+  } else if (r.name === "track") {
+    showTrack();
   } else if (r.name === "activity") {
     showActivity();
   } else if (r.name === "users") {
@@ -4157,6 +4255,12 @@ async function enterApp() {
     }),
     CHECK_POLL_MS,
   );
+  setInterval(
+    safely(() => {
+      if (state.view === "app" && state.route === "track") loadTrack();
+    }),
+    TRACK_POLL_MS,
+  );
   maybeStartTour();
 }
 
@@ -4348,6 +4452,8 @@ if (typeof document !== "undefined") {
     setRoute: (r) => {
       state.route = r;
     },
+    loadTrack,
+    fmtThaiDateTime,
     getAlertIds: () => [...state.alerts.keys()],
     getAlertsWithFeedback: () => [...state.alerts.values()].map(withFeedback),
     fmtThaiTime,

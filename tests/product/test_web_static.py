@@ -27,8 +27,8 @@ from idsai.product.explainer import BANNED_TH
 
 VENDOR_JS = "vendor/lightweight-charts.standalone.production.js"
 PAGES = ("index.html", "app.js", "styles.css")
-ROUTES = ("#/home", "#/alerts", "#/check", "#/simulate", "#/results", "#/activity")
-NAV_TH = ("หน้าหลัก", "การแจ้งเตือน", "เช็กก่อนซื้อ", "ทดลองจำลอง", "ผลวัดระบบ")
+ROUTES = ("#/home", "#/alerts", "#/check", "#/track", "#/simulate", "#/results", "#/activity")
+NAV_TH = ("หน้าหลัก", "การแจ้งเตือน", "เช็กก่อนซื้อ", "ผลงานย้อนหลัง", "ทดลองจำลอง", "ผลวัดระบบ")
 # the only absolute links the page may carry: attribution and About anchors, never a script source
 ALLOWED_URLS = {
     "https://www.tradingview.com/",
@@ -217,7 +217,7 @@ def test_every_element_app_js_targets_exists():
     ids = set(re.findall(r'\bid="([\w-]+)"', html))
     targets = set(re.findall(r'\$\("([\w-]+)"\)', js)) | set(re.findall(r'"(page-[\w-]+)"', js))
     assert targets and targets - ids == set()
-    for name in ("home", "alerts", "check", "simulate", "results"):
+    for name in ("home", "alerts", "check", "track", "simulate", "results"):
         assert f'data-route="{name}"' in html and f'"page-{name}"' in js
     for page in ("home", "alerts", "alert", "simulate", "results", "activity", "login"):
         assert f'id="page-{page}"' in html, page
@@ -466,7 +466,17 @@ def test_hud_panel_system_css():
 
 def test_every_page_uses_hud():
     html = text("index.html")
-    pages = ("login", "home", "alerts", "check", "simulate", "results", "users", "activity")
+    pages = (
+        "login",
+        "home",
+        "alerts",
+        "check",
+        "track",
+        "simulate",
+        "results",
+        "users",
+        "activity",
+    )
     for pid in (f"page-{name}" for name in pages):
         sec = re.search(rf'<section id="{pid}".*?</section>', html, re.S).group(0)
         assert re.search(r'class="[^"]*\bhud\b', sec), pid

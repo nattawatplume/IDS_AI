@@ -393,6 +393,104 @@ def test_track_record_needs_sign_in(auth_client):  # noqa: F811
     assert auth_client("viewer").get("/api/track-record").status_code == 200
 
 
+def test_track_fields_read_by_app_js_exist(client, env):  # noqa: F811
+    from tests.product.test_web_static import reads
+
+    seed_record(env.store)
+    body = client.get("/api/track-record").json()
+    assert reads("rec") and reads("rec") <= set(body)
+    assert reads("sum") and reads("sum") <= set(body["summary"])
+    assert reads("it") and reads("it") <= ITEM_KEYS
+    assert reads("tot") <= set(body["summary"]["feedback_totals"])
+
+
+def test_track_page_markup_and_wording():
+    from tests.product.test_web_static import text
+
+    html, js, css = text("index.html"), text("app.js"), text("styles.css")
+    assert '<a href="#/track" data-route="track">' in html and "<span>ผลงานย้อนหลัง</span>" in html
+    page = html[html.index('id="page-track"') : html.index("<!-- Simulate")]
+    for want in (
+        "ความผิดปกติทางสถิติ",
+        "ข้อมูลนี้ไม่ใช่คำแนะนำการลงทุน",
+        "สัดส่วนที่ราคาต่ำกว่าตอนเตือนใน 1 ชม.",
+        "ไม่ใช่การพยากรณ์",
+        "เตือนผิด",  # false alarms are listed, never hidden
+        'id="track-body"',
+        'class="table-wrap"',  # a phone scrolls the table, not the page
+    ):
+        assert want in page, want
+    block = js[js.index("const TRACK_POLL_MS") : js.index("function renderTrack(")]
+    block += js[js.index("function renderTrack(") :].split("\n}\n")[0]
+    for want in (
+        '"รอครบ 1 ชม."',
+        '"ไม่มีข้อมูลราคา"',
+        'api("/api/track-record")',
+        "alertHref(it.alert_id)",
+    ):
+        assert want in block, want
+    assert "const TRACK_POLL_MS = 60000;" in js
+    assert 'state.route === "track") loadTrack();' in js  # polls only while the page is shown
+    assert 'track: "page-track"' in js and '"#/track"' in js
+    assert "fmtThaiDateTime(it.ts_event_us)" in block and "TH_OFFSET_US" in block
+    for word in TRACK_FORBIDDEN:
+        assert word not in page and word not in block, word
+    assert ".track-tiles { grid-template-columns: minmax(0, 1fr); }" in css
+
+
+def test_track_page_renders_rows_as_text(tmp_path):
+    """The page draws an API answer into the DOM with text nodes only (node + the dom shim)."""
+    from tests.product.test_web_static import _run_dom
+
+    _run_dom(tmp_path, "true", TRACK_DOM_BODY)
+
+
+TRACK_DOM_BODY = r"""
+(async () => {
+  const at = Date.UTC(2021, 0, 18, 16, 30) * 1000;  // 23:30 in Bangkok
+  const rec = {
+    items: [
+      { alert_id: "x<b>", symbol: "STEEMBTC", ts_event_us: at, technique_id: "MM-T001",
+        phase: "pump", severity: 2, price_at: 0.0005, price_1h: 0.00045, change_1h_pct: -10,
+        status: "done",
+        feedback: { tp: 0, fp: 2, unsure: 0 } },
+      { alert_id: "y", symbol: "STEEMBTC", ts_event_us: at - 3600e6, technique_id: "MM-T001",
+        phase: null, severity: 1, price_at: null, price_1h: null, change_1h_pct: null,
+        status: "unknown", feedback: { tp: 1, fp: 0, unsure: 0 } },
+      { alert_id: "z", symbol: "STEEMBTC", ts_event_us: at - 7200e6, technique_id: "MM-T001",
+        phase: "sell", severity: 1, price_at: 0.0005, price_1h: null, change_1h_pct: null,
+        status: "pending", feedback: { tp: 0, fp: 0, unsure: 0 } },
+    ],
+    summary: { n_alerts: 3, n_done: 1, share_lower_1h: 1, median_change_1h_pct: -10,
+      feedback_totals: { tp: 1, fp: 2, unsure: 0 }, since_us: at - 7200e6 },
+    note_th: ["<i>หมายเหตุ</i>"],
+    disclaimer_th: "ข้อมูลนี้ไม่ใช่คำแนะนำการลงทุน",
+  };
+  globalThis.fetch = async (path) => ({ ok: true, status: 200, json: async () =>
+    (path.startsWith("/api/track-record") ? rec : {}) });
+  m.setRoute("track");
+  await m.loadTrack();
+  const rows = walk(document.getElementById("track-body"), (n) => n.tagName === "TR");
+  assert.strictEqual(rows.length, 3);
+  const cells = (r) => r.children.map((c) => c.textContent);
+  assert.ok(cells(rows[0])[0].includes("18/01/2021 23:30 น."), cells(rows[0])[0]);
+  assert.ok(cells(rows[0])[5].includes("-10.00%"), cells(rows[0])[5]);
+  assert.strictEqual(cells(rows[0])[3], "กำลังพุ่ง");
+  assert.ok(cells(rows[0])[6].includes("เตือนผิด 2"), cells(rows[0])[6]);
+  assert.strictEqual(cells(rows[1])[5], "ไม่มีข้อมูลราคา");
+  assert.strictEqual(cells(rows[2])[5], "รอครบ 1 ชม.");
+  const link = walk(rows[0], (n) => n.tagName === "A")[0];
+  assert.strictEqual(link.getAttribute("href"), "#/alerts/x%3Cb%3E");
+  assert.strictEqual(document.getElementById("track-lower").textContent, "100%");
+  assert.ok(document.getElementById("track-lower-sub").textContent.includes("1 ครั้ง"));
+  const notes = walk(document.getElementById("track-notes"), (n) => n.tagName === "LI");
+  assert.strictEqual(notes[0].textContent, "<i>หมายเหตุ</i>");  // text, never markup
+  assert.strictEqual(document.getElementById("track-empty").hidden, true);
+  console.log("ok");
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
 def test_series_output_is_unchanged_by_the_track_record(client, env):  # noqa: F811
     env.pipe.points[SYM] = [point(i) for i in range(3)]
     before = client.get(f"/api/series?symbol={SYM}").content
