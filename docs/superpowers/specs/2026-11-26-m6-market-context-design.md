@@ -81,7 +81,7 @@ Using the pump label's `t_start` instead of the detection onset gives 78 / 160 (
 **Decision: STOP.** Step B is not built.
 
 **Reading:**
-- FA onsets are no closer to BTC moves than a random minute of the same days. At every k, the FA share (0.668 / 0.436 / 0.286) is at or below the like-for-like chance level "base near" (0.700 / 0.453 / 0.289).
+- FA onsets are no closer to BTC moves than a random minute of the same days. At every k, the FA share (0.668 / 0.436 / 0.286) is at or below the like-for-like chance level "base near" (0.700 / 0.453 / 0.289). base_near is a slight upper bound: base minutes sit on kline closes (21 closes in ±10 min), while onsets on the 10 s grid see about 20, so the true chance level is about 0.44. The decision is unchanged.
 - The first gate condition passes only because "base minute" compares a ±10 min window (21 klines) with a single minute.
 - Real pump detections sit near BTC moves at the same rate as false alarms, or a slightly higher one. Damping on BTC moves would cost recall about as much as it cuts FA.
 - On these pairs a BTC market-move context does not separate false alarms from pumps.
@@ -91,3 +91,5 @@ Using the pump label's `t_start` instead of the detection onset gives 78 / 160 (
 - ai.iforest scores its own train rows (in-sample). Only the AI layer is affected; the rules and stats are not fitted.
 - The research pairs are XXX/BTC, so their price is quoted in BTC, and a BTC/USDT move shows up in every pair's ret. That is exactly the effect tested here.
 - A z ≥ 3 on |r| holds for 6 % of minutes. |r| is skewed, so the MAD scale is small and "≥ 3" is not rare. That is why k = 4 was also reported, and the conclusion is the same at every k.
+- The result was measured on BTC-quoted research pairs only. Live coins are USDT pairs, where BTC moves arrive by correlation, so it is not verified for live.
+- Only the 60 s window (ret_60) was tested. Rules 100102 and 100501 use ret_1800 and ret_300.
