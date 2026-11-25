@@ -44,11 +44,13 @@ class HistoryBackend(Protocol):
         ...
 
     def insert_feedback(self, rows: list[dict]) -> None:
-        """Rows with the keys of `FEEDBACK_COLS`; an existing (alert_id, analyst, ts_us) is kept."""
+        """Rows with the keys of `FEEDBACK_COLS`; an existing (alert_id, analyst, ts_us) takes the
+        new verdict."""
         ...
 
     def upsert_outcomes(self, rows: list[dict]) -> None:
-        """Rows with the keys of `OUTCOME_COLS`; an existing alert_id is replaced."""
+        """Rows with the keys of `OUTCOME_COLS`; an existing alert_id is replaced only while its
+        stored row is `pending` (a done / unknown row is final)."""
         ...
 
     def load(self, since_us: int) -> tuple[list[dict], list[dict], list[dict]]:
@@ -84,15 +86,17 @@ class MemoryHistory:
         self._check()
         self.calls += 1
         for r in rows:
-            self.feedback.setdefault(
-                (r["alert_id"], r["analyst"], r["ts_us"]), {c: r[c] for c in FEEDBACK_COLS}
-            )
+            self.feedback[(r["alert_id"], r["analyst"], r["ts_us"])] = {
+                c: r[c] for c in FEEDBACK_COLS
+            }
 
     def upsert_outcomes(self, rows: list[dict]) -> None:
         self._check()
         self.calls += 1
         for r in rows:
-            self.outcomes[r["alert_id"]] = {c: r[c] for c in OUTCOME_COLS}
+            old = self.outcomes.get(r["alert_id"])
+            if old is None or old["status"] == "pending":  # a final row is never downgraded
+                self.outcomes[r["alert_id"]] = {c: r[c] for c in OUTCOME_COLS}
 
     def load(self, since_us: int) -> tuple[list[dict], list[dict], list[dict]]:
         self._check()
@@ -117,11 +121,12 @@ _DDL = (
 )
 
 
-def _upsert_sql(table: str, cols: tuple[str, ...], key: str) -> str:
-    sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != key)
+def _upsert_sql(table: str, cols: tuple[str, ...], key: str, where: str = "") -> str:
+    keys = [k.strip() for k in key.split(",")]
+    sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c not in keys)
     return (
         f"INSERT INTO {table}({', '.join(cols)}) VALUES ({', '.join('%s' for _ in cols)}) "
-        f"ON CONFLICT ({key}) DO UPDATE SET {sets}"
+        f"ON CONFLICT ({key}) DO UPDATE SET {sets}{where}"
     )
 
 
@@ -149,8 +154,7 @@ class PostgresHistory:
     def insert_feedback(self, rows: list[dict]) -> None:
         if rows:
             self._run(
-                f"INSERT INTO ids_feedback({', '.join(FEEDBACK_COLS)}) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT DO NOTHING",
+                _upsert_sql("ids_feedback", FEEDBACK_COLS, "alert_id, analyst, ts_us"),
                 [tuple(r[c] for c in FEEDBACK_COLS) for r in rows],
                 many=True,
             )
@@ -158,7 +162,13 @@ class PostgresHistory:
     def upsert_outcomes(self, rows: list[dict]) -> None:
         if rows:
             self._run(
-                _upsert_sql("ids_alert_outcomes", OUTCOME_COLS, "alert_id"),
+                # a final (done / unknown) row is never downgraded
+                _upsert_sql(
+                    "ids_alert_outcomes",
+                    OUTCOME_COLS,
+                    "alert_id",
+                    " WHERE ids_alert_outcomes.status = 'pending'",
+                ),
                 [tuple(r[c] for c in OUTCOME_COLS) for r in rows],
                 many=True,
             )

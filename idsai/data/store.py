@@ -737,7 +737,8 @@ class Store:
         return row is not None and row[0] == "live"
 
     def _bound_pending(self, queue: dict) -> None:
-        """Keep the newest `HISTORY_MAX_PENDING` entries; say so once per store."""
+        """Keep the newest `HISTORY_MAX_PENDING` entries (popping the oldest keys, O(1) each);
+        say so once per outage (a successful sync resets it)."""
         if len(queue) <= HISTORY_MAX_PENDING:
             return
         if not self._pending_overflow_logged:
@@ -746,8 +747,8 @@ class Store:
                 HISTORY_MAX_PENDING,
             )
             self._pending_overflow_logged = True
-        for k in list(queue)[: len(queue) - HISTORY_MAX_PENDING]:
-            del queue[k]
+        while len(queue) > HISTORY_MAX_PENDING:
+            del queue[next(iter(queue))]
 
     def _queue(self, queue: dict, key: str) -> None:
         queue.pop(key, None)  # queued again: now the newest
@@ -760,9 +761,10 @@ class Store:
 
     def attach_history(self, backend: HistoryBackend, since_us: int) -> None:
         """Restore from `backend` the history of the alerts with `ts_event_us >= since_us` in one
-        transaction (alerts already stored and exact duplicate feedback rows are skipped, outcome
-        rows replaced), then queue every new `live` write for `history_sync`. Restored rows are
-        not queued: the backend has them."""
+        transaction (alerts already stored and exact duplicate feedback rows are skipped; an
+        outcome row is taken only when there is none here or the one here is still `pending`, so
+        a final local row is never downgraded), then queue every new `live` write for
+        `history_sync`. Restored rows are not queued: the backend has them."""
         backend.ensure_schema()
         alerts, feedback, outcomes = backend.load(since_us)
         cols = ", ".join(_OUTCOME_COLS)
@@ -795,10 +797,17 @@ class Store:
                         "VALUES (?, ?, ?, ?)",
                         fb,
                     )
-                if outcomes:
+                final = {
+                    r[0]
+                    for r in con.execute(
+                        "SELECT alert_id FROM alert_outcomes WHERE status <> 'pending'"
+                    ).fetchall()
+                }
+                take = [o for o in outcomes if o["alert_id"] not in final]
+                if take:
                     con.executemany(
                         f"INSERT OR REPLACE INTO alert_outcomes({cols}) VALUES ({marks})",
-                        [[o[c] for c in _OUTCOME_COLS] for o in outcomes],
+                        [[o[c] for c in _OUTCOME_COLS] for o in take],
                     )
                 con.execute("COMMIT")
             except BaseException:
@@ -816,50 +825,58 @@ class Store:
                 len(self._pending_outcomes),
             )
 
-    def history_sync(self) -> bool:
+    def history_sync(self, wait: bool = True) -> bool:
         """Copy the queued alerts, feedback and outcomes to the history backend; True when there
         was nothing to do or it all arrived. Blocking network I/O: call it off the event loop.
 
         The queues are swapped out and the rows read under the lock, then written outside it. On
         failure the batch goes back into the queues (the next call retries) and the error is
-        re-raised.
+        re-raised. With `wait` False it returns False at once when another sync is running.
         """
         backend = self._history
         if backend is None:
             return True
-        with self._sync_lock:
-            with self._lock:
-                aids = list(self._pending_alerts)
-                fb = dict(self._pending_feedback)
-                oids = list(self._pending_outcomes)
-                if not (aids or fb or oids):
-                    return True
-                self._pending_alerts, self._pending_feedback = {}, {}
-                self._pending_outcomes = {}
-                try:
-                    alerts = self._rows_in(f"SELECT {', '.join(ALERT_COLS)} FROM alerts", aids)
-                    outcomes = self._rows_in(
-                        f"SELECT {', '.join(_OUTCOME_COLS)} FROM alert_outcomes", oids
-                    )
-                except BaseException:
-                    self._requeue(aids, fb, oids)
-                    raise
-            feedback = [
-                {"alert_id": k[0], "analyst": k[1], "ts_us": k[2], "verdict": v}
-                for k, v in fb.items()
-            ]
+        if not self._sync_lock.acquire(blocking=wait):
+            return False
+        try:
+            return self._history_sync(backend)
+        finally:
+            self._sync_lock.release()
+
+    def _history_sync(self, backend: HistoryBackend) -> bool:
+        with self._lock:
+            aids = list(self._pending_alerts)
+            fb = dict(self._pending_feedback)
+            oids = list(self._pending_outcomes)
+            if not (aids or fb or oids):
+                return True
+            self._pending_alerts, self._pending_feedback = {}, {}
+            self._pending_outcomes = {}
             try:
-                if alerts:
-                    backend.upsert_alerts(alerts)
-                if feedback:
-                    backend.insert_feedback(feedback)
-                if outcomes:
-                    backend.upsert_outcomes(outcomes)
+                alerts = self._rows_in(f"SELECT {', '.join(ALERT_COLS)} FROM alerts", aids)
+                outcomes = self._rows_in(
+                    f"SELECT {', '.join(_OUTCOME_COLS)} FROM alert_outcomes", oids
+                )
             except BaseException:
-                with self._lock:
-                    self._requeue(aids, fb, oids)
+                self._requeue(aids, fb, oids)
                 raise
-            return True
+        feedback = [
+            {"alert_id": k[0], "analyst": k[1], "ts_us": k[2], "verdict": v} for k, v in fb.items()
+        ]
+        try:
+            if alerts:
+                backend.upsert_alerts(alerts)
+            if feedback:
+                backend.insert_feedback(feedback)
+            if outcomes:
+                backend.upsert_outcomes(outcomes)
+        except BaseException:
+            with self._lock:
+                self._requeue(aids, fb, oids)
+            raise
+        with self._lock:
+            self._pending_overflow_logged = False  # the outage is over: a later one says so again
+        return True
 
     def _rows_in(self, select: str, ids: list[str]) -> list[dict]:
         """`select` restricted to `alert_id IN ids`, in chunks."""

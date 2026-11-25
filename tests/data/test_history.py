@@ -257,7 +257,11 @@ def test_postgres_history_batches_and_maps_rows(monkeypatch):
     kinds = [k for k, *_ in con.log]
     assert kinds == ["many", "many", "many"]
     assert "ON CONFLICT (alert_id) DO UPDATE" in con.log[0][1] and len(con.log[0][2]) == 3
-    assert "ON CONFLICT DO NOTHING" in con.log[1][1]
+    assert (
+        "ON CONFLICT (alert_id, analyst, ts_us) DO UPDATE SET verdict = EXCLUDED.verdict"
+        in (con.log[1][1])
+    )
+    assert con.log[2][1].endswith("WHERE ids_alert_outcomes.status = 'pending'")
     con.log.clear()
     con.results = [
         [("a", 1, SYM, "{}")],
@@ -307,3 +311,107 @@ def test_postgres_history_retries_once_after_a_dropped_connection(monkeypatch):
     monkeypatch.setattr(psycopg, "connect", connect)
     PostgresHistory("postgresql://x").upsert_outcomes([out_row("a")])
     assert len(cons) == 2 and cons[0].closed
+
+
+# ---- reviewer fixes: final outcomes, feedback updates, in-flight writes, the bound ----
+
+
+def test_backend_never_downgrades_a_final_outcome():
+    mem = MemoryHistory()
+    mem.upsert_outcomes([out_row("a")])
+    mem.upsert_outcomes([out_row("a", status="done", p1=90.0)])
+    mem.upsert_outcomes([out_row("a")])  # a stale pending copy arrives late
+    assert mem.outcomes["a"]["status"] == "done" and mem.outcomes["a"]["price_1h"] == 90.0
+    mem.upsert_outcomes([out_row("b", status="unknown"), out_row("b", status="done", p1=1.0)])
+    assert mem.outcomes["b"]["status"] == "unknown"
+
+
+def test_backend_feedback_takes_the_new_verdict():
+    mem = MemoryHistory()
+    row = {"alert_id": "a", "analyst": "ann", "ts_us": 5, "verdict": "tp"}
+    mem.insert_feedback([row])
+    mem.insert_feedback([{**row, "verdict": "fp"}])
+    assert [f["verdict"] for f in mem.feedback.values()] == ["fp"]
+
+
+def test_restore_never_replaces_a_final_local_outcome(store):
+    mem = MemoryHistory()
+    for aid in ("done_here", "pending_here", "absent_here"):
+        a = make_alert(aid, ts=T0, prov="live")
+        mem.upsert_alerts(
+            [
+                dict(
+                    zip(
+                        ("alert_id", "ts_event_us", "symbol", "json"),
+                        Store._alert_row(a),
+                        strict=True,
+                    )
+                )
+            ]
+        )
+    mem.upsert_outcomes(
+        [
+            out_row("done_here"),
+            out_row("pending_here", status="done", p1=80.0),
+            out_row("absent_here", status="done", p1=70.0),
+        ]
+    )
+    store.upsert_outcome(out_row("done_here", status="done", p1=90.0))
+    store.upsert_outcome(out_row("pending_here"))
+    store.attach_history(mem, since_us=0)
+    got = store.get_outcomes(["done_here", "pending_here", "absent_here"])
+    assert (got["done_here"]["status"], got["done_here"]["price_1h"]) == ("done", 90.0)
+    assert (got["pending_here"]["status"], got["pending_here"]["price_1h"]) == ("done", 80.0)
+    assert got["absent_here"]["price_1h"] == 70.0
+
+
+def test_a_write_during_a_sync_goes_out_with_the_next_one(store, monkeypatch):
+    mem = MemoryHistory()
+    store.attach_history(mem, since_us=0)
+    store.upsert_alert(make_alert("first", prov="live"))
+    real = mem.upsert_alerts
+    sent = []
+
+    def slow(rows):
+        sent.append([r["alert_id"] for r in rows])
+        if len(sent) == 1:  # while the first batch is on the wire
+            store.upsert_alert(make_alert("during", prov="live"))
+            store.upsert_alert(make_alert("first", ts=T0 + S, prov="live"))  # updated again
+        real(rows)
+
+    monkeypatch.setattr(mem, "upsert_alerts", slow)
+    assert store.history_sync() is True
+    assert store.history_pending()[0] == 2
+    assert store.history_sync() is True
+    assert [sorted(b) for b in sent] == [["first"], ["during", "first"]]
+    assert mem.alerts["first"]["ts_event_us"] == T0 + S
+    assert store.history_pending() == (0, 0, 0)
+
+
+def test_sync_without_wait_skips_when_one_is_running(store):
+    store.attach_history(MemoryHistory(), since_us=0)
+    store.upsert_alert(make_alert("a", prov="live"))
+    with store._sync_lock:
+        assert store.history_sync(wait=False) is False
+    assert store.history_pending()[0] == 1
+    assert store.history_sync(wait=False) is True
+
+
+def test_overflow_is_said_again_after_a_recovery(store, monkeypatch, caplog):
+    monkeypatch.setattr(store_mod, "HISTORY_MAX_PENDING", 2)
+    mem = MemoryHistory(fail=True)
+    store.attach_history(MemoryHistory(), since_us=0)
+    store._history = mem
+
+    def overflow(tag):
+        for i in range(3):
+            store.upsert_alert(make_alert(f"{tag}{i}", prov="live"))
+
+    overflow("a")
+    overflow("b")  # the same outage: not said twice
+    mem.fail = False
+    store.history_sync()
+    mem.fail = True
+    overflow("c")
+    warned = [r for r in caplog.records if "history queue" in r.getMessage()]
+    assert len(warned) == 2
