@@ -71,6 +71,11 @@ def _finite_or_none(x: Any) -> Any:
     return None if isinstance(x, float) and not math.isfinite(x) else x
 
 
+def _public(point: dict[str, Any]) -> dict[str, Any]:
+    """A ring point as `series` and the `scores` bus message give it: without `quote_vol`."""
+    return {k: v for k, v in point.items() if k != "quote_vol"}
+
+
 class StreamPipeline:
     """One run of the stream path. `mode` becomes the provenance of every alert."""
 
@@ -112,11 +117,22 @@ class StreamPipeline:
         self._latest_us: int | None = None  # the last tick or gap end, for what is in the baseline
         self._late_before_gaps = 0
         self._ring.clear()
+        self._qv_recent: dict[str, deque[float]] = {}  # per symbol: the last stride's bar volumes
 
     def series(self, symbol: str) -> list[dict[str, Any]]:
         """Up to the last 24 h of `{t_end_us, close, F, lane_rule, lane_stat, lane_ai}`, oldest
         first; non-finite values are None, so the result is strict JSON."""
-        return list(self._ring.get(symbol, ()))
+        return [_public(p) for p in self._ring.get(symbol, ())]
+
+    def quote_vols(self, symbol: str) -> list[float]:
+        """The quote volume of each `series` point's stride (the `stride_s` bars ending at its
+        `t_end_us`), aligned with `series(symbol)`: the check page's liquidity reads it."""
+        return [p["quote_vol"] for p in self._ring.get(symbol, ())]
+
+    @property
+    def latest_us(self) -> int | None:
+        """The pipeline's clock: the last tick or gap end (the replay clock in replay), or None."""
+        return self._latest_us
 
     def baseline_samples(self, symbol: str) -> int:
         """Baseline samples of `symbol` in the window ending at the last tick (0 when unknown), for
@@ -209,6 +225,7 @@ class StreamPipeline:
         self._late_before_gaps = self.late_trades()
         self._builders.clear()
         self._windows.clear()
+        self._qv_recent.clear()
         self._origin_us = span[1] // S_US * S_US
         self._last_tick_us = None
         self._latest_us = span[1]
@@ -243,6 +260,10 @@ class StreamPipeline:
 
     def _on_bar(self, bar: dict[str, Any], received: float) -> None:
         row = self._windows[bar["symbol"]].push_bar(bar)
+        recent = self._qv_recent.get(bar["symbol"])
+        if recent is None:
+            recent = self._qv_recent[bar["symbol"]] = deque(maxlen=self.cfg.features.stride_s)
+        recent.append(bar["quote_vol"])
         t_close = bar["t_us"] + S_US
         if self._publish_from_us is None or t_close < self._publish_from_us:
             return
@@ -257,22 +278,27 @@ class StreamPipeline:
         alerts = self._stream.step(scored.to_dicts()[0])
         self.latency_ms.append((time.monotonic() - received) * 1000.0)
 
-        point = self._point(scored, row["t_end_us"], bar["close"])
         symbol = bar["symbol"]
+        point = self._point(scored, row["t_end_us"], bar["close"], sum(recent))
         ring = self._ring.get(symbol)
         if ring is None:
             ring = self._ring[symbol] = deque(maxlen=self._ring_maxlen)
         ring.append(point)
-        self.bus.publish("scores", {"symbol": symbol, **point})
+        self.bus.publish("scores", {"symbol": symbol, **_public(point)})
         self._emit(alerts)
 
-    def _point(self, scored: pl.DataFrame, t_end_us: int, close: float) -> dict[str, Any]:
+    def _point(
+        self, scored: pl.DataFrame, t_end_us: int, close: float, quote_vol: float
+    ) -> dict[str, Any]:
+        """A ring point; its `quote_vol` (the stride's quote volume) stays internal: `series` and
+        the `scores` bus message leave it out, so `/api/series` and the WebSocket are unchanged."""
         fused = self.chief.fuse(scored)
         point: dict[str, Any] = {"t_end_us": t_end_us, "close": close, "F": fused["F"][0]}
         for layer, cols in self._lanes:
             # the same -log10 p the Chief reads from its table; + 0.0 turns -0.0 (p = 1) into 0.0
             nlp = -np.log10(np.array([fused[c][0] for c in cols])) if cols else None
             point[f"lane_{layer}"] = None if nlp is None else float(nlp.max()) + 0.0
+        point["quote_vol"] = float(quote_vol)
         return {k: _finite_or_none(v) for k, v in point.items()}
 
     def _emit(self, alerts: list[Alert]) -> None:
