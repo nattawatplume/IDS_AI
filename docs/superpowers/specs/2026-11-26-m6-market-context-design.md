@@ -38,3 +38,56 @@ The research archive has a median of 3 symbols per day: 1,331 days, of which onl
 
 ## Run
 Step A runs locally: downloads plus a short diagnosis script. Step B's eval runs overnight on the head's call: `idsai --config configs/eval_prev_live.yaml eval --experiment m6_market`.
+
+## Results: step A (2026-11-25), gate result STOP
+
+**Run:** `scripts/diagnose_market.py` on branch feat/m6 (wall time 1,140 s).
+- Config: `configs/default.yaml` (config_hash 9aff5e3482f2), the live stack. It runs rule.100101, 100102, 100501, 100104 and 100601, plus stat.robust_z, stat.cusum and ai.iforest with `AiFusion("shift", 1.0)`.
+- Split sha 7fb702a841c5, seed 0.
+- ai.iforest was fit on the masked, grid-thinned train-normal rows (512,640 rows).
+- The Chief was calibrated on cal_normal (347 days, 2,998,080 rows). τ = 2.904 at budget 2 (not saturated).
+- The train range was scored: 356 train-normal days and 174 train event days, 4,579,200 rows in all, with 0 days skipped.
+
+**Market data:** BTCUSDT 1m klines from data.binance.vision, every file CHECKSUM verified.
+- 1,358 days were downloaded, none missing. That is every date of `research_symdays`, D−1 included. They take 69 MB under `data/market/BTCUSDT-1m/`.
+- The train diagnosis read 693,822 klines, of which 682,260 have a finite z.
+
+**Feature:** `mkt_absret_z` is |BTC 1m log-return| as a robust z.
+- Window: 60 s. This is the window of `ret_60`, the return condition of the pump-burst rule 100101 and of the sell rules 100104 and 100601.
+- Scale: median and 1.4826·MAD over the 1,440 minutes strictly before, with at least 360 samples required.
+- Each value is known at its kline's close.
+
+**Definitions:**
+- *Near:* a kline closing within ±10 min of the episode onset has z ≥ k.
+- *Base minute:* the share of train-normal symbol-day minutes with z ≥ k. This is the spec's base rate.
+- *Base near:* the share of those minutes that are themselves within ±10 min of a z ≥ k minute. This is the like-for-like chance level for "near".
+- *Pump:* the onset of the first matched episode of a detected train REAL pump.
+
+Train results: 385 FA episodes on 356 normal days (1.08 per symbol-day), and 160 of 183 train REAL pumps detected.
+
+| k | FA near / FA | FA share | base minute | base near | pumps near / detected | pump share |
+|---|---|---|---|---|---|---|
+| 2 | 257 / 385 | 0.668 | 0.1153 (58,823 / 510,231) | 0.700 | 122 / 160 | 0.762 |
+| **3** | **168 / 385** | **0.436** | **0.0601 (30,666 / 510,231)** | **0.453** | **76 / 160** | **0.475** |
+| 4 | 110 / 385 | 0.286 | 0.0340 (17,351 / 510,231) | 0.289 | 44 / 160 | 0.275 |
+
+Using the pump label's `t_start` instead of the detection onset gives 78 / 160 (0.488) at k = 3.
+
+**Gate (k = 3, as written):**
+- FA share ≥ 2× base rate: 0.436 ≥ 0.120 holds.
+- FA share ≥ 0.10: holds.
+- Pump share < half the FA share: 0.475 is not below 0.218, so this condition **fails**.
+
+**Decision: STOP.** Step B is not built.
+
+**Reading:**
+- FA onsets are no closer to BTC moves than a random minute of the same days. At every k, the FA share (0.668 / 0.436 / 0.286) is at or below the like-for-like chance level "base near" (0.700 / 0.453 / 0.289).
+- The first gate condition passes only because "base minute" compares a ±10 min window (21 klines) with a single minute.
+- Real pump detections sit near BTC moves at the same rate as false alarms, or a slightly higher one. Damping on BTC moves would cost recall about as much as it cuts FA.
+- On these pairs a BTC market-move context does not separate false alarms from pumps.
+
+**Method notes:**
+- Seed 0 only.
+- ai.iforest scores its own train rows (in-sample). Only the AI layer is affected; the rules and stats are not fitted.
+- The research pairs are XXX/BTC, so their price is quoted in BTC, and a BTC/USDT move shows up in every pair's ret. That is exactly the effect tested here.
+- A z ≥ 3 on |r| holds for 6 % of minutes. |r| is skewed, so the MAD scale is small and "≥ 3" is not rare. That is why k = 4 was also reported, and the conclusion is the same at every k.
