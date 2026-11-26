@@ -148,6 +148,48 @@ def attach_accounts_from_env(
     raise CliError("เชื่อมต่อฐานข้อมูลบัญชีไม่ได้ (DATABASE_URL)")
 
 
+HISTORY_SYNC_S = 30.0  # live alerts, feedback and outcomes are copied to the database this often
+HISTORY_FINAL_SYNC_S = 5.0  # the last copy at shutdown waits at most this long
+HISTORY_WARN_EVERY_S = 300.0  # a failing copy is reported at most this often
+HISTORY_WARN_TH = (
+    "เชื่อมต่อฐานข้อมูลประวัติการแจ้งเตือนไม่ได้ (DATABASE_URL) "
+    "ทำงานต่อโดยไม่เก็บประวัติถาวร: ผลงานย้อนหลังจะเริ่มนับใหม่เมื่อเซิร์ฟเวอร์เริ่มใหม่"
+)
+
+
+def attach_history_from_env(
+    store: "Store",
+    backend_factory: Callable[[str], Any] | None = None,
+    now_us: int | None = None,
+) -> bool:
+    """With DATABASE_URL set, restore the last `HISTORY_DAYS` of live alerts, feedback and
+    outcomes from that Postgres and keep copying new ones to it (`with_history_sync`).
+
+    Retries like `attach_accounts_from_env`, but a final failure only warns (in Thai, never with
+    the URL or the exception text): the server runs on without history. True when attached.
+    """
+    from idsai.data.history import HISTORY_DAYS
+    from idsai.data.history import build_backend as build_history
+
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return False
+    factory = backend_factory or build_history
+    since_us = (_now_us() if now_us is None else now_us) - HISTORY_DAYS * DAY_US
+    for attempt in range(ATTACH_TRIES):
+        try:
+            backend = factory(url)
+            if backend is None:
+                return False
+            store.attach_history(backend, since_us)
+            return True
+        except Exception:  # noqa: BLE001 - psycopg/ImportError text may contain the URL
+            if attempt < ATTACH_TRIES - 1:
+                time.sleep(ATTACH_WAIT_S)
+    _warn(HISTORY_WARN_TH)
+    return False
+
+
 # ------------------------------------------------------------------ downloads
 
 
@@ -1309,6 +1351,55 @@ def with_outcomes(
     return run
 
 
+def with_history_sync(
+    store: "Store", background: Callable[[], Coroutine[Any, Any, None]]
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """`background` plus a task that copies the store's queued live history to its database every
+    `HISTORY_SYNC_S` (`Store.history_sync`, in a thread), and once more at shutdown for at most
+    `HISTORY_FINAL_SYNC_S` (none if a sync is still running). `background` itself when no history
+    database is attached (`serve --mode live` with DATABASE_URL attaches one).
+
+    A failed copy keeps its rows queued for the next one; failures are logged at most once per
+    `HISTORY_WARN_EVERY_S`, by error type only (never the URL)."""
+    import asyncio
+    import contextlib
+    import logging
+
+    if not store.history_attached:
+        return background
+    log = logging.getLogger(__name__)
+    last_warn = [-math.inf]
+
+    async def sync_once(wait: bool = True) -> None:
+        try:
+            await asyncio.to_thread(store.history_sync, wait)
+        except Exception as e:  # noqa: BLE001 - one failed copy must not end the task
+            now = time.monotonic()
+            if now - last_warn[0] >= HISTORY_WARN_EVERY_S:
+                last_warn[0] = now
+                log.warning("คัดลอกประวัติการแจ้งเตือนไปฐานข้อมูลไม่สำเร็จ (%s) จะลองใหม่", type(e).__name__)
+
+    async def loop() -> None:
+        while True:
+            await asyncio.sleep(HISTORY_SYNC_S)
+            await sync_once()
+
+    async def run() -> None:
+        task = asyncio.create_task(loop())
+        try:
+            await background()
+            await task
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            # skipped at once if a sync is still running (its thread outlived a cancel)
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(sync_once(wait=False), HISTORY_FINAL_SYNC_S)
+
+    return run
+
+
 def with_telegram(
     state: Any, background: Callable[[], Coroutine[Any, Any, None]]
 ) -> Callable[[], Coroutine[Any, Any, None]]:
@@ -1348,6 +1439,9 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
                 f"{', '.join(allowed_hosts(host, args.public_host))} "
                 "ถ้าให้เครื่องอื่นเรียก ให้เปิดด้วย --host <IP ของเครื่องนี้> แล้วเรียกผ่าน IP นั้น"
             )
+        if args.mode == "live":  # only live alerts are kept; a replay stays local
+            # before the pipeline and the outcome tracker are built, so they see the restored rows
+            attach_history_from_env(store)
         if args.mode == "live":
             state, background = prepare_live(args, cfg, store)
         else:
@@ -1372,7 +1466,10 @@ def cmd_serve(args: argparse.Namespace, cfg: Settings) -> int:
             app,
             host,
             port,
-            with_telegram(state, with_outcomes(state, with_session_purge(store, background))),
+            with_history_sync(
+                store,
+                with_telegram(state, with_outcomes(state, with_session_purge(store, background))),
+            ),
         )
     return 0
 

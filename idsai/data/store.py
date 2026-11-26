@@ -20,6 +20,7 @@ from idsai.config import file_sha
 from idsai.contracts.alert import Alert
 from idsai.contracts.frames import LABELS, TRADES, conform, empty
 from idsai.data.accounts import AccountBackend
+from idsai.data.history import ALERT_COLS, HistoryBackend
 
 log = logging.getLogger(__name__)
 # the Telegram chat a user is linked to (idsai.product.notify): a disabled account loses it
@@ -48,6 +49,8 @@ _OUTCOME_COLS = (
     "status",
     "updated_us",
 )
+# a long history-backend outage keeps at most this many ids (and feedback rows) per queue, newest
+HISTORY_MAX_PENDING = 10_000
 
 
 def _now_us() -> int:
@@ -78,6 +81,15 @@ class Store:
         self._index_path = self._trades_dir / "_index.parquet"
         self._lock = threading.RLock()
         self._accounts: AccountBackend | None = None
+        # history (idsai.data.history): only while a backend is attached are writes of `live`
+        # alerts queued (ordered dicts used as sets, oldest first); `history_sync` copies them out
+        self._history: HistoryBackend | None = None
+        self._history_since_us: int | None = None
+        self._pending_alerts: dict[str, None] = {}
+        self._pending_feedback: dict[tuple[str, str, int], str] = {}
+        self._pending_outcomes: dict[str, None] = {}
+        self._pending_overflow_logged = False
+        self._sync_lock = threading.Lock()  # one history_sync at a time
         self._trades_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._con: duckdb.DuckDBPyConnection | None = duckdb.connect(str(self.db_path))
@@ -408,6 +420,7 @@ class Store:
                 "INSERT INTO alerts(alert_id, ts_event_us, symbol, json) VALUES (?, ?, ?, ?)",
                 self._alert_row(a),
             )
+            self._mark_alert(a)
 
     def upsert_alert(self, a: Alert) -> None:
         with self._lock:
@@ -416,6 +429,7 @@ class Store:
                 "VALUES (?, ?, ?, ?)",
                 self._alert_row(a),
             )
+            self._mark_alert(a)
 
     @staticmethod
     def _check_deletable(provenance: str) -> None:
@@ -519,11 +533,17 @@ class Store:
     def insert_feedback(self, alert_id: str, verdict: Verdict, analyst: str) -> None:
         if verdict not in _VERDICTS:
             raise ValueError(f"verdict must be one of {_VERDICTS}, got {verdict!r}")
+        ts_us = _now_us()
         with self._lock:
             self._db().execute(
                 "INSERT INTO feedback(alert_id, verdict, analyst, ts_us) VALUES (?, ?, ?, ?)",
-                [alert_id, verdict, analyst, _now_us()],
+                [alert_id, verdict, analyst, ts_us],
             )
+            if self._history is not None and self._is_live(alert_id):
+                key = (alert_id, analyst, ts_us)
+                self._pending_feedback.pop(key, None)
+                self._pending_feedback[key] = verdict
+                self._bound_pending(self._pending_feedback)
 
     def list_feedback(self, alert_id: str | None = None) -> list[dict]:
         """Verdicts on `alert_id`, oldest first; every alert's when `alert_id` is None."""
@@ -594,6 +614,8 @@ class Store:
                 f"INSERT OR REPLACE INTO alert_outcomes({cols}) VALUES ({marks})",
                 [row[c] for c in _OUTCOME_COLS],
             )
+            if self._history is not None and self._is_live(row["alert_id"]):
+                self._queue(self._pending_outcomes, row["alert_id"])
 
     def get_outcomes(self, alert_ids: list[str]) -> dict[str, dict]:
         """The outcome rows of `alert_ids` that exist, keyed by alert_id."""
@@ -691,6 +713,191 @@ class Store:
             if verdict in out:
                 out[verdict] = int(n)
         return out
+
+    # ---- history: a durable copy of the live alerts (idsai.data.history) ----
+
+    @property
+    def history_attached(self) -> bool:
+        return self._history is not None
+
+    @property
+    def history_since_us(self) -> int | None:
+        """The start-up cut of the restored history (None without a backend)."""
+        return self._history_since_us
+
+    def _is_live(self, alert_id: str) -> bool:
+        row = (
+            self._db()
+            .execute(
+                "SELECT json_extract_string(json, '$.provenance') FROM alerts WHERE alert_id = ?",
+                [alert_id],
+            )
+            .fetchone()
+        )
+        return row is not None and row[0] == "live"
+
+    def _bound_pending(self, queue: dict) -> None:
+        """Keep the newest `HISTORY_MAX_PENDING` entries (popping the oldest keys, O(1) each);
+        say so once per outage (a successful sync resets it)."""
+        if len(queue) <= HISTORY_MAX_PENDING:
+            return
+        if not self._pending_overflow_logged:
+            log.warning(
+                "history queue over %d entries: dropping the oldest until the database is back",
+                HISTORY_MAX_PENDING,
+            )
+            self._pending_overflow_logged = True
+        while len(queue) > HISTORY_MAX_PENDING:
+            del queue[next(iter(queue))]
+
+    def _queue(self, queue: dict, key: str) -> None:
+        queue.pop(key, None)  # queued again: now the newest
+        queue[key] = None
+        self._bound_pending(queue)
+
+    def _mark_alert(self, a: Alert) -> None:
+        if self._history is not None and a.provenance == "live":
+            self._queue(self._pending_alerts, a.alert_id)
+
+    def attach_history(self, backend: HistoryBackend, since_us: int) -> None:
+        """Restore from `backend` the history of the alerts with `ts_event_us >= since_us` in one
+        transaction (alerts already stored and exact duplicate feedback rows are skipped; an
+        outcome row is taken only when there is none here or the one here is still `pending`, so
+        a final local row is never downgraded), then queue every new `live` write for
+        `history_sync`. Restored rows are not queued: the backend has them."""
+        backend.ensure_schema()
+        alerts, feedback, outcomes = backend.load(since_us)
+        cols = ", ".join(_OUTCOME_COLS)
+        marks = ", ".join("?" for _ in _OUTCOME_COLS)
+        with self._lock:
+            con = self._db()
+            con.execute("BEGIN")
+            try:
+                have = {r[0] for r in con.execute("SELECT alert_id FROM alerts").fetchall()}
+                new = [a for a in alerts if a["alert_id"] not in have]
+                if new:
+                    con.executemany(
+                        "INSERT INTO alerts(alert_id, ts_event_us, symbol, json) "
+                        "VALUES (?, ?, ?, ?)",
+                        [tuple(a[c] for c in ALERT_COLS) for a in new],
+                    )
+                seen = {
+                    tuple(r)
+                    for r in con.execute("SELECT alert_id, analyst, ts_us FROM feedback").fetchall()
+                }
+                fb = []
+                for f in feedback:
+                    key = (f["alert_id"], f["analyst"], f["ts_us"])
+                    if key not in seen:
+                        seen.add(key)
+                        fb.append((f["alert_id"], f["verdict"], f["analyst"], f["ts_us"]))
+                if fb:
+                    con.executemany(
+                        "INSERT INTO feedback(alert_id, verdict, analyst, ts_us) "
+                        "VALUES (?, ?, ?, ?)",
+                        fb,
+                    )
+                final = {
+                    r[0]
+                    for r in con.execute(
+                        "SELECT alert_id FROM alert_outcomes WHERE status <> 'pending'"
+                    ).fetchall()
+                }
+                take = [o for o in outcomes if o["alert_id"] not in final]
+                if take:
+                    con.executemany(
+                        f"INSERT OR REPLACE INTO alert_outcomes({cols}) VALUES ({marks})",
+                        [[o[c] for c in _OUTCOME_COLS] for o in take],
+                    )
+                con.execute("COMMIT")
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            self._history = backend
+            self._history_since_us = since_us
+
+    def history_pending(self) -> tuple[int, int, int]:
+        """How many (alerts, feedback rows, outcomes) wait for `history_sync`."""
+        with self._lock:
+            return (
+                len(self._pending_alerts),
+                len(self._pending_feedback),
+                len(self._pending_outcomes),
+            )
+
+    def history_sync(self, wait: bool = True) -> bool:
+        """Copy the queued alerts, feedback and outcomes to the history backend; True when there
+        was nothing to do or it all arrived. Blocking network I/O: call it off the event loop.
+
+        The queues are swapped out and the rows read under the lock, then written outside it. On
+        failure the batch goes back into the queues (the next call retries) and the error is
+        re-raised. With `wait` False it returns False at once when another sync is running.
+        """
+        backend = self._history
+        if backend is None:
+            return True
+        if not self._sync_lock.acquire(blocking=wait):
+            return False
+        try:
+            return self._history_sync(backend)
+        finally:
+            self._sync_lock.release()
+
+    def _history_sync(self, backend: HistoryBackend) -> bool:
+        with self._lock:
+            aids = list(self._pending_alerts)
+            fb = dict(self._pending_feedback)
+            oids = list(self._pending_outcomes)
+            if not (aids or fb or oids):
+                return True
+            self._pending_alerts, self._pending_feedback = {}, {}
+            self._pending_outcomes = {}
+            try:
+                alerts = self._rows_in(f"SELECT {', '.join(ALERT_COLS)} FROM alerts", aids)
+                outcomes = self._rows_in(
+                    f"SELECT {', '.join(_OUTCOME_COLS)} FROM alert_outcomes", oids
+                )
+            except BaseException:
+                self._requeue(aids, fb, oids)
+                raise
+        feedback = [
+            {"alert_id": k[0], "analyst": k[1], "ts_us": k[2], "verdict": v} for k, v in fb.items()
+        ]
+        try:
+            if alerts:
+                backend.upsert_alerts(alerts)
+            if feedback:
+                backend.insert_feedback(feedback)
+            if outcomes:
+                backend.upsert_outcomes(outcomes)
+        except BaseException:
+            with self._lock:
+                self._requeue(aids, fb, oids)
+            raise
+        with self._lock:
+            self._pending_overflow_logged = False  # the outage is over: a later one says so again
+        return True
+
+    def _rows_in(self, select: str, ids: list[str]) -> list[dict]:
+        """`select` restricted to `alert_id IN ids`, in chunks."""
+        out: list[dict] = []
+        for i in range(0, len(ids), 1000):
+            part = ids[i : i + 1000]
+            out += self._rows(f"{select} WHERE alert_id IN ({', '.join('?' for _ in part)})", part)
+        return out
+
+    def _requeue(self, aids: list[str], fb: dict, oids: list[str]) -> None:
+        """Put a failed batch back before what was queued since (which stays the newest)."""
+
+        def merge(old: dict, cur: dict) -> dict:
+            out = {k: v for k, v in old.items() if k not in cur}
+            out.update(cur)
+            self._bound_pending(out)
+            return out
+
+        self._pending_alerts = merge(dict.fromkeys(aids), self._pending_alerts)
+        self._pending_feedback = merge(fb, self._pending_feedback)
+        self._pending_outcomes = merge(dict.fromkeys(oids), self._pending_outcomes)
 
     # ---- runs ----
 

@@ -17,9 +17,11 @@ score of the system: nothing here is advice to buy or sell.
 import asyncio
 import logging
 import statistics
+from datetime import UTC, datetime
 from typing import Any
 
 from idsai.contracts.alert import Alert
+from idsai.data.history import HISTORY_DAYS
 from idsai.data.store import COUNTED_PROVENANCE, Store, _day_of
 from idsai.product.check import DISCLAIMER_TH, now_us_of
 
@@ -45,6 +47,27 @@ NOTE_TH = [
     "«เตือนผิด» คือผู้ใช้ตัดสินว่าการแจ้งเตือนนั้นเป็นการเตือนผิด "
     "«ผิดปกติจริง» คือผู้ใช้ตัดสินว่าผิดปกติจริง",
 ]
+# NOTE_TH[0] when the store keeps its live alerts in a database (idsai.data.history)
+PERSISTENT_NOTE_TH = (
+    "นับเฉพาะการแจ้งเตือนที่บริการนี้เก็บไว้ การแจ้งเตือนสด (live) ถูกบันทึกลงฐานข้อมูลของบริการ "
+    "ราวทุก 30 วินาที เมื่อเซิร์ฟเวอร์เริ่มใหม่ ข้อมูลไม่กี่วินาทีถึงราวหนึ่งนาทีล่าสุดอาจหายได้ "
+    "ทุกครั้งที่เริ่มใหม่จะโหลดกลับมาเฉพาะ {days} วันล่าสุด (ครั้งนี้ตั้งแต่ {since} UTC)"
+)
+
+
+def note_th(store: Store) -> list[str]:
+    """`NOTE_TH`, its first line saying how long the counts are kept: with a history database
+    since its start-up cut, without one only until the next restart."""
+    since = store.history_since_us if store.history_attached else None
+    if since is None:
+        return list(NOTE_TH)
+    return [PERSISTENT_NOTE_TH.format(days=HISTORY_DAYS, since=_utc_minute(since)), *NOTE_TH[1:]]
+
+
+def _utc_minute(t_us: int) -> str:
+    """`YYYY-MM-DD HH:MM` (UTC) of `t_us` rounded up to the minute: never earlier than it."""
+    up = -(-t_us // MIN_US) * MIN_US
+    return datetime.fromtimestamp(up / S_US, UTC).strftime("%Y-%m-%d %H:%M")
 
 
 # ---- price lookups: the ring first, then the trade archive ----
@@ -308,6 +331,6 @@ def track_record(store: Store, limit: int = TRACK_LIMIT) -> dict[str, Any]:
             "feedback_totals": store.feedback_totals(),
             "since_us": since_us,
         },
-        "note_th": NOTE_TH,
+        "note_th": note_th(store),
         "disclaimer_th": DISCLAIMER_TH,
     }
