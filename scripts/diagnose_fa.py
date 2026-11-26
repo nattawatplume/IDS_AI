@@ -37,6 +37,7 @@ import numpy as np
 import polars as pl
 from diagnose_market import Stack, fit_stack, on_db_copy
 
+from idsai.ai.chief import Chief, score_column
 from idsai.config import load_settings
 from idsai.data.store import DAY_US
 from idsai.eval.experiments import _episodes, _fa_by_day, _normal_rows, _unmatched, m1_hard_k
@@ -64,6 +65,7 @@ KEEP = tuple(dict.fromkeys((*FEATURES, DIR_COL)))
 LAYERS = ("rules", "robust_z", "cusum", "iforest")
 AUC_FLAG = 0.15  # |AUC - 0.5| >= 0.15, i.e. AUC >= 0.65 or <= 0.35
 TOP_SYMBOLS = 5
+CF_SID = 100102  # the counterfactual drops this rule from F (train only, same calibration and tau)
 
 
 # ------------------------------------------------------------------ pure helpers
@@ -223,12 +225,16 @@ def profile(rows: Rows, recs: list[dict], tau: float) -> dict:
             by_min_p.append(None)
             by_F.append(None)
             continue
+        n_over.append(int((rows.nlp[i] >= tau).sum()))
+        f_tau.append(rows.F[i] / tau)
+        if not rows.F[i] > 0:  # every p = 1: no layer drives anything
+            by_min_p.append(None)
+            by_F.append(None)
+            continue
         by_min_p.append(LAYERS[int(np.argmin(rows.p[i]))])  # ties -> Chief detector order
         by_F.append(LAYERS[int(np.argmax(rows.nlp[i]))])
         if by_F[-1] == "rules":
             rule_F.append(rows.rule[i])
-        n_over.append(int((rows.nlp[i] >= tau).sum()))
-        f_tau.append(rows.F[i] / tau)
     feats = {}
     for k, c in enumerate(FEATURES):
         feats[c] = med_iqr(rows.feat[r["onset_row"], k] for r in recs if r["onset_row"] is not None)
@@ -266,6 +272,84 @@ def auc_table(rows: Rows, a: list[int], b: list[int]) -> dict:
             "flag": bool(math.isfinite(auc) and abs(auc - 0.5) >= AUC_FLAG),
         }
     return out
+
+
+def unique_rows(xs) -> tuple[list[int], int]:
+    """Distinct non-None rows in first-seen order, and how many duplicates were dropped (labels
+    that share an episode onset or a start row count once in an AUC)."""
+    known = [i for i in xs if i is not None]
+    out = list(dict.fromkeys(known))
+    return out, len(known) - len(out)
+
+
+def overlaps(windows: dict, symbol: str, lo: int, hi: int) -> bool:
+    return any(a <= hi and b >= lo for a, b in windows.get(symbol, ()))
+
+
+def first_matches(alerts: list, labels: pl.DataFrame, before: int, after: int) -> dict:
+    """Per label_id: `(first_us, last_us, technique_id)` of its first matched episode, or None."""
+    by_sym: dict[str, list] = {}
+    for al in alerts:
+        by_sym.setdefault(al.symbol, []).append((al.window[0], al.window[1], al.technique_id))
+    out = {}
+    for lid, sym, ls, le in labels.select(
+        "label_id", "symbol", "t_start_us", "t_end_us"
+    ).iter_rows():
+        lo, hi = ls - before, le + after
+        hits = [w for w in by_sym.get(sym, ()) if w[0] <= hi and w[1] >= lo]
+        out[lid] = min(hits, key=lambda w: w[0]) if hits else None
+    return out
+
+
+def counterfactual(st: Stack, cfg, fa_alerts: list, fa_hard: list, hard_of, every_old) -> dict:
+    """F without rule `CF_SID` (same calibration of the other detectors, same tau): which train
+    FA episodes vanish and which detected pumps are lost or change their first matched episode."""
+    train, tau = st.train, st.tau
+    b_s, a_s = cfg.eval.before_s, cfg.eval.after_s
+    before, after = int(b_s * S_US), int(a_s * S_US)
+    dets = [d for d in st.dets if getattr(d, "signature_id", None) != CF_SID]
+    assert len(dets) == len(st.dets) - 1, f"rule {CF_SID} not in the stack"
+    chief = Chief(dets, cfg.chief, st.ctx.config_hash, st.chief.model_versions, ai=st.ai)
+    cols = ["symbol", "t_end_us", *[score_column(d.name) for d in chief.score_detectors]]
+    chief.calibrate(st.cal.frame.select(cols))
+    fused = chief.fuse(train.frame.select(cols))
+    normal = _episodes(chief, _normal_rows(fused, train.fa_days), tau)
+    every = _episodes(chief, fused, tau)
+    del fused
+    fa_on = unmatched_onsets(normal, train.labels, b_s, a_s)
+    win: dict[str, list] = {}
+    for al in normal:
+        win.setdefault(al.symbol, []).append(al.window)
+    gone = [not overlaps(win, al.symbol, *al.window) for al in fa_alerts]
+    gone_hard = [g for g, h in zip(gone, fa_hard, strict=True) if h]
+    old = first_matches(every_old, train.labels, before, after)
+    new = first_matches(every, train.labels, before, after)
+    mr_old = match_events(every_old, train.labels, b_s, a_s)
+    mr_new = match_events(every, train.labels, b_s, a_s)
+    det = [lid for lid, w in old.items() if w is not None]
+    lost = [lid for lid in det if new[lid] is None]
+    kept = [lid for lid in det if new[lid] is not None]
+    return {
+        "dropped_rule": CF_SID,
+        "note": "same tau and calibration (tau not refit); naming rules are not in this stack",
+        "n_fa_before": len(fa_alerts),
+        "n_fa_after": len(fa_on),
+        "fa_vanished": int(sum(gone)),
+        "fa_vanished_share": sum(gone) / len(gone) if gone else None,
+        "n_fa_hard_before": len(gone_hard),
+        "n_fa_hard_after": sum(1 for sym, t in fa_on if hard_of(sym, t)),
+        "fa_hard_vanished": int(sum(gone_hard)),
+        "fa_hard_vanished_share": sum(gone_hard) / len(gone_hard) if gone_hard else None,
+        "fa_per_symbol_day_after": len(fa_on) / len(train.fa_days) if train.fa_days else None,
+        "n_det_before": len(det),
+        "n_det_after": int(sum(mr_new.detected_any.values())),
+        "det_lost": lost,
+        "det_first_episode_changed": sum(1 for lid in kept if new[lid][:2] != old[lid][:2]),
+        "det_onset_changed": sum(1 for lid in kept if new[lid][0] != old[lid][0]),
+        "det_technique_changed": sum(1 for lid in kept if new[lid][2] != old[lid][2]),
+        "n_correct_before": int(sum(mr_old.detected_correct.values())),
+        "n_correct_after": int(sum(mr_new.detected_correct.values())),
+    }
 
 
 # ------------------------------------------------------------------ run
@@ -331,6 +415,14 @@ def run(cfg, store, budget: float, seed: int) -> dict:
     # DET / MISS
     every = _episodes(chief, st.fused, tau)
     mr = match_events(every, train.labels, b_s, a_s)
+
+    def hard_of(sym: str, t_us: int) -> bool:
+        return fa_day(sym, t_us, listed) in hard
+
+    st.fused = None  # free the full fused frame before the counterfactual re-fuse
+    t0 = time.time()
+    cf = counterfactual(st, cfg, fa_alerts, [r["hard"] for r in fa_recs], hard_of, every)
+    print(f"counterfactual without {CF_SID} in {time.time() - t0:.0f} s", flush=True)
     by_sym: dict[str, list] = {}
     for al in every:
         by_sym.setdefault(al.symbol, []).append(al.window)
@@ -357,12 +449,16 @@ def run(cfg, store, budget: float, seed: int) -> dict:
             miss_start.append(start_row)
             miss_wpeak.append(wpeak)
 
-    def idx(xs):
-        return [i for i in xs if i is not None]
+    fa_rows, _ = unique_rows(r["onset_row"] for r in fa_recs)
+    fa_hard_rows, _ = unique_rows(r["onset_row"] for r in fa_hard_recs)
+    det_rows, dup_det = unique_rows(r["onset_row"] for r in det_recs)
+    det_s, dup_ds = unique_rows(det_start)
+    miss_s, dup_ms = unique_rows(miss_start)
+    det_p, dup_dp = unique_rows(det_wpeak)
+    miss_p, dup_mp = unique_rows(miss_wpeak)
 
-    fa_rows = idx(r["onset_row"] for r in fa_recs)
-    fa_hard_rows = idx(r["onset_row"] for r in fa_hard_recs)
-    det_rows = idx(r["onset_row"] for r in det_recs)
+    def feats_at(ix: list) -> dict:
+        return {c: med_iqr(rows.feat[ix, k]) for k, c in enumerate(FEATURES)}
 
     # concentration
     per_sym = Counter(r["symbol"] for r in fa_recs)
@@ -371,6 +467,21 @@ def run(cfg, store, budget: float, seed: int) -> dict:
     per_day = _fa_by_day(fa_on, train.fa_days)
     day_counts = np.array(list(per_day.values()), dtype=np.float64)
     top_syms = sorted(per_sym.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_SYMBOLS]
+    n_days_sym = Counter(s for s, _ in normal_keys)
+    hard_sym = Counter(s for s, _ in hard)
+    fa_hard_sym = Counter(r["symbol"] for r in fa_hard_recs)
+    top_names = {s for s, _ in top_syms}
+    top_detail = [
+        {
+            "symbol": s,
+            "n": n,
+            "normal_days": n_days_sym[s],
+            "fa_per_normal_day": n / n_days_sym[s],
+            "hard_days": hard_sym[s],
+            "fa_on_hard_days": fa_hard_sym[s],
+        }
+        for s, n in top_syms
+    ]
     n_rest = len(train.fa_days) - len(hard)
     return {
         "config_hash": st.ctx.config_hash,
@@ -405,8 +516,13 @@ def run(cfg, store, budget: float, seed: int) -> dict:
         "concentration": {
             "n_symbols": len(syms),
             "n_symbols_with_fa": sum(1 for c in counts if c),
-            "top5": [{"symbol": s, "n": n} for s, n in top_syms],
+            "top5": top_detail,
             "top5_share": top_share(counts, TOP_SYMBOLS),
+            "top10pct_symbols": max(1, len(syms) // 10),
+            "top10pct_symbols_share": top_share(counts, max(1, len(syms) // 10)),
+            "fa_per_normal_day_all": len(fa_recs) / len(normal_keys) if normal_keys else None,
+            "hard_days_of_top5": sum(hard_sym[s] for s in top_names),
+            "top5_fa_on_hard_days": sum(fa_hard_sym[s] for s in top_names),
             "gini_symbols": gini(counts),
             "fa_per_day": {
                 "days": int(day_counts.size),
@@ -422,9 +538,23 @@ def run(cfg, store, budget: float, seed: int) -> dict:
         "auc": {
             "FA_vs_DET_onset": auc_table(rows, fa_rows, det_rows),
             "FA_hard_vs_DET_onset": auc_table(rows, fa_hard_rows, det_rows),
-            "MISS_vs_DET_label_start": auc_table(rows, idx(miss_start), idx(det_start)),
-            "MISS_vs_DET_window_peak": auc_table(rows, idx(miss_wpeak), idx(det_wpeak)),
+            "MISS_vs_DET_label_start": auc_table(rows, miss_s, det_s),
+            "MISS_vs_DET_window_peak": auc_table(rows, miss_p, det_p),
         },
+        "auc_duplicates_dropped": {
+            "DET_onset": dup_det,
+            "DET_label_start": dup_ds,
+            "MISS_label_start": dup_ms,
+            "DET_window_peak": dup_dp,
+            "MISS_window_peak": dup_mp,
+        },
+        "features_label_anchor": {
+            "MISS_label_start": feats_at(miss_s),
+            "DET_label_start": feats_at(det_s),
+            "MISS_window_peak": feats_at(miss_p),
+            "DET_window_peak": feats_at(det_p),
+        },
+        "counterfactual": cf,
         "notes": {
             "auc": "AUC = P(a > b) + 0.5 P(a = b) on finite values; flag at >= 0.65 or <= 0.35",
             "miss": "MISS peak = highest-F row in [t_start - before_s, t_end + after_s]; onset = "
@@ -433,6 +563,8 @@ def run(cfg, store, budget: float, seed: int) -> dict:
             "vol_rank": "mid-rank percentile of the day's realized_vol_1m among train-normal "
             "days; event days include the pump itself",
             "length": "last - first exceedance row of the episode (0 = one 10 s row)",
+            "peak_F_ceiling": "F is capped at -log10(1 / (n_cal + 1)); DET peaks sit at that "
+            "ceiling, so the FA vs DET peak F/tau gap is understated",
         },
         "skipped": {k: dict(v) for k, v in (("train", train.skipped), ("cal", st.cal.skipped))},
     }
@@ -498,6 +630,20 @@ def print_table(res: dict) -> None:
         f"max {fd['max']}/day; FA/day hard {res['hard']['fa_per_day_hard']:.2f} vs rest "
         f"{res['hard']['fa_per_day_rest']:.2f}"
     )
+    print("label-anchored features (median) | " + " | ".join(res["features_label_anchor"]))
+    for f in res["features"]:
+        cells = [_fmt(v[f]) for v in res["features_label_anchor"].values()]
+        print(f"{f} | " + " | ".join(cells))
+    cf = res["counterfactual"]
+    print(
+        f"without {cf['dropped_rule']}: FA {cf['n_fa_before']} -> {cf['n_fa_after']} "
+        f"(vanished {cf['fa_vanished']}), FA_hard {cf['n_fa_hard_before']} -> "
+        f"{cf['n_fa_hard_after']} (vanished {cf['fa_hard_vanished']}); DET {cf['n_det_before']} "
+        f"-> {cf['n_det_after']} (lost {len(cf['det_lost'])}, first episode changed "
+        f"{cf['det_first_episode_changed']}, technique changed {cf['det_technique_changed']}); "
+        f"correct {cf['n_correct_before']} -> {cf['n_correct_after']}"
+    )
+    print(f"AUC duplicates dropped: {res['auc_duplicates_dropped']}")
     print("AUC | " + " | ".join(res["auc"]))
     for f in res["features"]:
         cells = []
