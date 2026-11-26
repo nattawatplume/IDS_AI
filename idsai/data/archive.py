@@ -80,7 +80,14 @@ def download_day(
     An existing file whose sha256 matches is reused. A mismatching download is discarded and
     retried once; a second mismatch raises ChecksumError. Unverified data never stays on disk.
     """
-    url = archive_url(symbol, day, kind)
+    return download_verified(archive_url(symbol, day, kind), dest_dir, client)
+
+
+def download_verified(url: str, dest_dir: Path, client: httpx.Client) -> Path | None:
+    """`download_day` for any data.binance.vision file URL that publishes a `.CHECKSUM`
+    (e.g. the 1-minute klines of `idsai.data.market`); None on a 404."""
+    if not url.startswith(BASE_URL + "/"):
+        raise ValueError(f"not a data.binance.vision spot daily URL: {url}")
     dest_dir = Path(dest_dir)
     dest = dest_dir / url.rsplit("/", 1)[1]
 

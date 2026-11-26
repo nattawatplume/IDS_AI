@@ -478,7 +478,37 @@ def _ingest_last_days(store: "Store", dl: Any, symbols: list[str], n: int) -> Co
     return c
 
 
+def make_market_client() -> Any:
+    """The HTTP client of `download --market` (tests inject a mock transport here)."""
+    import httpx
+
+    return httpx.Client(timeout=120.0, follow_redirects=False)
+
+
+def _download_market(cfg: Settings) -> int:
+    """BTCUSDT 1m klines for every date of the research split (M6 market reference)."""
+    from idsai.data.market import download_klines, market_dir, research_market_days
+
+    with _app_store(cfg) as store:
+        labels = store.read_labels().filter(pl.col("provenance") == "REAL")
+    if labels.height == 0:
+        raise CliError("ยังไม่มีป้ายเหตุการณ์ในเครื่อง ให้รัน `uv run idsai labels` ก่อน")
+    days = research_market_days(research_symdays(cfg, labels))
+    _say(f"แท่งเทียนตลาดอ้างอิงต้องใช้ {len(days)} วัน")
+    client = make_market_client()
+    try:
+        c = download_klines(days, market_dir(cfg.paths.data_dir), client)
+    finally:
+        client.close()
+    _say(c.text())
+    for d in c.missing_days[:20]:
+        _say(f"  ไม่มี: {d}")
+    return 0
+
+
 def cmd_download(args: argparse.Namespace, cfg: Settings) -> int:
+    if getattr(args, "market", False):
+        return _download_market(cfg)
     dl = make_downloader(cfg)
     try:
         with _app_store(cfg) as store:
@@ -1544,6 +1574,8 @@ DOWNLOAD_HELP = """\
 --split live: live.symbols x live.train_days วันล่าสุดที่เผยแพร่แล้ว และ D-1 ของวันแรก
 --symbols S --days N: N วันล่าสุดที่เผยแพร่แล้ว (ถึงเมื่อวาน UTC) และ D-1 ของวันแรก
 --symbols S --day D: วัน D และ D-1
+--market: แท่งเทียน 1 นาทีของ BTCUSDT ทุกวันที่ --split research ใช้ (รวม D-1) เก็บใน
+  data/market/BTCUSDT-1m/ ใช้เป็นตลาดอ้างอิง (M6) ไม่ดาวน์โหลดรายการซื้อขายของ BTCUSDT
 วันที่คลังข้อมูลไม่มี (เช่นเหรียญยังไม่เข้าตลาด) นับว่า "ไม่มี" ไม่ใช่ข้อผิดพลาด
 ดาวน์โหลดจาก data.binance.vision เท่านั้น และตรวจ CHECKSUM ทุกไฟล์
 """
@@ -1582,6 +1614,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="research: ทุกวันที่ชุดข้อมูลวิจัยต้องใช้; live: live.train_days วันล่าสุดของ live.symbols",
     )
     g.add_argument("--symbols", nargs="+", metavar="S", help="สัญลักษณ์ เช่น BTCUSDT ETHUSDT")
+    g.add_argument(
+        "--market",
+        action="store_true",
+        help="แท่งเทียน 1 นาทีของ BTCUSDT (ตลาดอ้างอิง) ทุกวันของชุดข้อมูลวิจัย -> data/market/",
+    )
     w = s.add_mutually_exclusive_group()
     w.add_argument("--days", type=_positive, metavar="N", help="จำนวนวันล่าสุด (ใช้กับ --symbols)")
     w.add_argument("--day", type=_day_arg, metavar="D", help="วันเดียว YYYY-MM-DD (ใช้กับ --symbols)")
@@ -1709,8 +1746,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "download" and args.symbols and args.days is None and args.day is None:
         _warn("ใช้คำสั่งไม่ถูกต้อง: --symbols ต้องมี --days N หรือ --day D")
         return 1
-    if args.command == "download" and args.split and (args.days or args.day):
-        _warn("ใช้คำสั่งไม่ถูกต้อง: --split ไม่ใช้ --days / --day")
+    if args.command == "download" and (args.split or args.market) and (args.days or args.day):
+        _warn("ใช้คำสั่งไม่ถูกต้อง: --split / --market ไม่ใช้ --days / --day")
         return 1
     try:
         cfg = load_settings(args.config)
