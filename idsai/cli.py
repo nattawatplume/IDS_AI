@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 import polars as pl
 
-from idsai.config import Settings, config_hash, load_settings
+from idsai.config import Settings, config_hash, file_sha, load_settings
 from idsai.data.accounts import build_backend
 from idsai.product.auth import RESERVED_USERNAMES
 
@@ -79,6 +79,7 @@ EXPERIMENT_NAMES = (
     "m3_attr",
     "m4_sell",
     "m5_rules",
+    "m8_stealth",
 )
 LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1", "[::1]")
 WILDCARD_BINDS = ("0.0.0.0", "::", "[::]")
@@ -609,6 +610,10 @@ def train_and_save(
         "info": fitted.info,
         **(extra or {}),
     }
+    if cfg.chief.stealth == "act":  # M8: rev 3 of rule 100102 is in this bundle's F
+        from idsai.detection.rules import R3_SIGNATURES_PATH
+
+        meta["signatures_r3_sha"] = file_sha(R3_SIGNATURES_PATH)
     doc = save_bundle(out_dir, list(cfg.detectors), fitted.detectors, fitted.chief, meta)
     _say(
         f"บันทึกชุดโมเดลที่ {out_dir} (tau = {fitted.chief.tau:.3f}, "

@@ -90,6 +90,17 @@ variants whose paired recall_any gain over `base` is significant (CI low > 0 and
 the largest gain wins (ties: `base` < `r101` < `r101_25` < `r102` < `r101+r102`); with none,
 `base`. Test and SEMI-SYN are reported once, never used to choose.
 
+M8 (`m8_stealth`, budget 2): the same tables as M5 for `base`, `stealth_attr` (rule 100102 names
+only, never in F) and `stealth_act` (100102 rev 3: rev 1 + `z_n_trades_60 >= 3`), plus the paired
+FA-hard difference `X - base` (`_fa_pair`: per accept-hard symbol-day the mean over the common
+seeds of each arm, days resampled with the same indices for both arms) and the confusion per
+variant. Chosen on accept only, by a rule fixed in advance (`m8_select`): eligible are the variants
+whose paired recall_any difference is at least -`M8_RECALL_DROP` (0.01) with CI low above
+-`M8_CI_FLOOR` (0.03) and whose paired recall_correct CI low is above -0.03; among them, of the
+variants whose paired FA-hard difference has CI high < 0 and cuts base's FA-hard by at least
+`M8_FA_CUT` (10 %), the largest cut wins (ties: `base` < `stealth_attr` < `stealth_act`); with
+none, `base`. Test and SEMI-SYN are report-only.
+
 Technique confusion (`confusion`, budget 2, `real_t001 full` and every `semisyn` family): per
 label family, the share of events whose matched episodes carry each parent technique (or none),
 averaged over seeds; an event with several techniques counts once in each column. Needs
@@ -122,6 +133,8 @@ from idsai.eval.experiments import (
     M3_VARIANTS,
     M5,
     M5_VARIANTS,
+    M8,
+    M8_VARIANTS,
 )
 from idsai.eval.metrics import (
     EFFECT_TOL,
@@ -1379,6 +1392,40 @@ def _m5(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | No
     return _vs_base(runs, n_boot, min_effect, M5, list(M5_VARIANTS), m5_select, M5_RULE_TH)
 
 
+def _m8(runs: list[dict], n_boot: int, min_effect: float) -> dict[str, Any] | None:
+    """M8 tables per split (as M5, plus the paired FA-hard difference), the accept-only
+    `m8_select` and the confusion per variant."""
+    return _vs_base(
+        runs, n_boot, min_effect, M8, list(M8_VARIANTS), m8_select, M8_RULE_TH, fa_pair=True
+    )
+
+
+def _fa_pair(
+    arm: dict[int, dict], ref: dict[int, dict], which: str, n_boot: int
+) -> dict[str, Any] | None:
+    """Paired FA difference `arm - ref` from `fa_by_day[which]` (M8), or None when a common seed
+    lacks it or the two arms list different symbol-days: per symbol-day the mean over the common
+    seeds of each arm, then days resampled with the same indices for both (`paired_bootstrap`).
+    `rel` is the difference over `ref`'s rate (None when that is 0)."""
+    seeds = sorted(set(arm) & set(ref))
+    days = [[(r[s].get("fa_by_day") or {}).get(which) for s in seeds] for r in (arm, ref)]
+    if not seeds or not all(d for ds in days for d in ds):
+        return None
+    keys = sorted(days[0][0])
+    if any(sorted(d) != keys for ds in days for d in ds):
+        return None
+    a, b = (np.array([[float(d[k]) for k in keys] for d in ds]) for ds in days)
+    diff, (lo, hi) = paired_bootstrap(a, b, n_boot, CI_SEED)
+    base = float(b.mean())
+    return {
+        "diff_mean": diff,
+        "ci": [lo, hi],
+        "rel": diff / base if base > 0 else None,
+        "n_days": len(keys),
+        "n_seeds": len(seeds),
+    }
+
+
 def _vs_base(
     runs: list[dict],
     n_boot: int,
@@ -1387,9 +1434,11 @@ def _vs_base(
     order: list[str],
     select: Any,
     rule_th: str,
+    fa_pair: bool = False,
 ) -> dict[str, Any] | None:
-    """Shared body of `_m3` / `_m5`: rows per split (variant order `order`), both paired gains
-    vs `base` (recall_correct: `gain_correct`, recall_any: `gain_any`), `select` on accept."""
+    """Shared body of `_m3` / `_m5` / `_m8`: rows per split (variant order `order`), both paired
+    gains vs `base` (recall_correct: `gain_correct`, recall_any: `gain_any`), `select` on accept.
+    With `fa_pair` (M8) every row also gets `vs_ref_fa_hard` (`_fa_pair` on the hard days)."""
     recs, config_note = _latest_config(
         [r for r in runs if r["experiment"] == experiment and float(r["budget"]) == PAIRED_BUDGET]
     )
@@ -1439,6 +1488,7 @@ def _vs_base(
                 "gain_correct_significant": False,
                 "gain_any_significant": False,
                 "below_ref": False,
+                **({"vs_ref_fa_hard": None} if fa_pair else {}),
             }
             if v in failed:
                 rows.append(row)
@@ -1486,6 +1536,8 @@ def _vs_base(
                     row["reason_any_th"] = why_a
                     if row["reason_th"] is None:
                         row["reason_th"] = why_a
+                if fa_pair:
+                    row["vs_ref_fa_hard"] = _fa_pair(arms[v], arms[M3_REF], "hard", n_boot)
             rows.append(row)
         splits[split] = {"provenance": provenance, "rows": rows}
     selection = None
@@ -1681,6 +1733,186 @@ def _m5_md(m5: dict[str, Any] | None, min_effect: float) -> list[str]:
         for v, block in blocks.items():
             lines += _confusion_block_md(f"#### confusion {split}:{v}", block)
     lines += [f"- {n}" for n in [*M5_NOTES_TH, *m5["notes"]]]
+    return lines
+
+
+M8_RECALL_DROP = 0.01
+M8_CI_FLOOR = 0.03
+M8_FA_CUT = 0.10
+M8_RULE_TH = (
+    "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัวอ้างอิงคือ base (ชุดตรวจจับของระบบจริง: "
+    "กฎ rev 1 + กฎฝั่งขาย + สถิติ + ai.iforest แบบ shift 1 + กฎระบุเทคนิค); ตัวแปรที่มีสิทธิ์ต้องมีผลต่าง "
+    f"recall_any (X − base) ≥ −{M8_RECALL_DROP:g} และ CI ล่าง > −{M8_CI_FLOOR:g} และ CI ล่างของผลต่าง "
+    f"recall_correct > −{M8_CI_FLOOR:g} (paired bootstrap ข้ามเหตุการณ์) ที่งบ 2; ในกลุ่มนี้ เฉพาะตัวที่ "
+    "FA ของวันผันผวนสูง (accept-hard) ลดลงจาก base อย่างมีนัย (paired bootstrap ข้ามวัน: CI บนของ "
+    f"(X − base) < 0 และลดลงอย่างน้อย {M8_FA_CUT:.0%} ของ base) เลือกตัวที่ลดลงมากที่สุด "
+    "ถ้าไม่มีเลยเลือก base; ถ้าลดลงเท่ากันเลือกตัวที่ง่ายกว่า: " + " < ".join(M8_VARIANTS)
+)
+M8_NOTES_TH = [
+    "ผล test และ semisyn รายงานครั้งเดียวไว้ดูเท่านั้น ไม่ได้ใช้เลือกตัวแปร",
+    "stealth_attr: กฎ 100102 ออกจาก F แล้วเป็นกฎระบุเทคนิค (attr.100102 ต่อท้ายกฎของ "
+    "configs/signatures_attr.yaml) ตั้งชื่อได้เฉพาะ episode ที่ยังเป็น MM-T000 แต่ไม่เพิ่ม F; "
+    "stealth_act: กฎ 100102 rev 3 = เงื่อนไข rev 1 + z_n_trades_60 ≥ 3 (configs/signatures_r3.yaml) "
+    "เกณฑ์ 3 กำหนดจากช่วง train เท่านั้นก่อนการประเมินนี้ อัตราการทำงานบน train อยู่ในหมายเหตุของไฟล์นั้น",
+    "ตัวแปรเปลี่ยนชุดกฎใน F จึงสอบเทียบและหา τ ใหม่ทุกตัวแปรบนชุด cal: FA ที่งบเดียวกันจึงยังถูกคุม แต่ขยับได้",
+    "ผลต่าง FA-hard แบบจับคู่: ต่อ symbol-day ของ accept-hard เฉลี่ยข้าม seed ของแต่ละฝั่ง แล้ว bootstrap "
+    "ข้ามวันด้วยดัชนีเดียวกันทั้งสองฝั่ง (มีเพียงราว 20 วัน CI จึงกว้าง)",
+    "สัดส่วน FA ที่มีชื่อ = episode ที่ไม่ตรงกับเหตุการณ์ใดในวันปกติ ที่ระบุเทคนิคอื่นที่ไม่ใช่ MM-T000 "
+    "(รวมข้ามทุก seed); การตั้งชื่อให้การแจ้งเตือนผิดพลาดเป็นต้นทุน",
+    "F คือ −log10 ของ anomaly p-value ซึ่งบอกระดับความผิดปกติทางสถิติเทียบตลาดปกติ "
+    "ไม่ใช่ความน่าจะเป็นว่ามีการปั่นราคา และไม่ใช่ข้อกล่าวหาผู้ใด",
+    "การเปิด chief.stealth ใน configs/default.yaml เป็นขั้นตอนแยกหลังดูผลนี้ และต้องฝึก bundle ใหม่ "
+    "(config_hash เปลี่ยน); กับ act ระบบเก็บ sha ของ configs/signatures_r3.yaml ใน meta ของ bundle",
+]
+NO_M8_TH = "ยังไม่มีผล m8_stealth"
+
+
+def _m8_rank(variant: str) -> tuple[int, str]:
+    return _rank(list(M8_VARIANTS), variant)
+
+
+def m8_select(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The M8 selection rule on accept rows (`variant`, `vs_ref_any` / `vs_ref_correct` /
+    `vs_ref_fa_hard` = paired `X - base` with `diff_mean` and `ci` (FA-hard also `rel`) or None,
+    optional `seeds`, `error` and the Thai `reason_any_th` / `reason_th` of a recall pair that
+    cannot decide, e.g. too few events, which excludes the variant); see the module docstring.
+    Returns `chosen` (`base` when nothing wins; None without a usable `base` row), `top` (the
+    eligible variant with the largest FA-hard cut, significant or not), `eligible` (base
+    included) and `excluded` (Thai reason per variant)."""
+    ref = next((r for r in rows if r["variant"] == M3_REF), None)
+    if ref is None or ref.get("error"):
+        return {"chosen": None, "top": None, "eligible": [], "excluded": {}}
+    excluded: dict[str, str] = {}
+    eligible = []
+    for r in rows:
+        v = r["variant"]
+        if v == M3_REF:
+            continue
+        va, vc, vf = r.get("vs_ref_any"), r.get("vs_ref_correct"), r.get("vs_ref_fa_hard")
+        if r.get("error"):
+            excluded[v] = f"ประเมินไม่ได้ (error: {_error_th(r['error'], 200)})"
+        elif (
+            r.get("seeds") is not None
+            and ref.get("seeds") is not None
+            and list(r["seeds"]) != list(ref["seeds"])
+        ):
+            excluded[v] = f"seed ไม่ครบชุดเดียวกับ base ({list(r['seeds'])} เทียบ {list(ref['seeds'])})"
+        elif va is None or vc is None:
+            excluded[v] = "ไม่มีผลเทียบ recall แบบจับคู่กับ base"
+        elif r.get("reason_any_th") or r.get("reason_th"):  # e.g. too few events to decide
+            excluded[v] = r.get("reason_any_th") or r["reason_th"]
+        elif va["diff_mean"] < -M8_RECALL_DROP - M3_TOL:
+            excluded[v] = f"recall_any ลดลง {-va['diff_mean']:.3g} เกิน {M8_RECALL_DROP:g}"
+        elif va["ci"][0] <= -M8_CI_FLOOR:
+            excluded[v] = f"CI ล่างของผลต่าง recall_any {va['ci'][0]:.3g} ไม่สูงกว่า −{M8_CI_FLOOR:g}"
+        elif vc["ci"][0] <= -M8_CI_FLOOR:
+            excluded[v] = (
+                f"CI ล่างของผลต่าง recall_correct {vc['ci'][0]:.3g} ไม่สูงกว่า −{M8_CI_FLOOR:g}"
+            )
+        elif vf is None:
+            excluded[v] = "ไม่มีผลเทียบ FA-hard แบบจับคู่กับ base"
+        else:
+            eligible.append(r)
+
+    def cut(r: dict[str, Any]) -> float:
+        return -r["vs_ref_fa_hard"]["diff_mean"]
+
+    def significant_cut(r: dict[str, Any]) -> bool:
+        vf = r["vs_ref_fa_hard"]
+        return vf["ci"][1] < 0 and vf["rel"] is not None and vf["rel"] <= -M8_FA_CUT + M3_TOL
+
+    def best_of(cands: list[dict[str, Any]]) -> str | None:
+        if not cands:
+            return None
+        best = max(cut(r) for r in cands)
+        tied = [r for r in cands if cut(r) >= best - M3_TOL]
+        return min(tied, key=lambda r: _m8_rank(r["variant"]))["variant"]
+
+    return {
+        "chosen": best_of([r for r in eligible if significant_cut(r)]) or M3_REF,
+        "top": best_of(eligible),
+        "eligible": sorted([M3_REF, *(r["variant"] for r in eligible)], key=_m8_rank),
+        "excluded": excluded,
+    }
+
+
+def _fmt_fa_pair(vf: dict[str, Any] | None) -> str:
+    if vf is None:
+        return "–"
+    rel = "" if vf["rel"] is None else f" ({vf['rel']:+.0%})"
+    return f"{_fmt_diff_ci(vf['diff_mean'], vf['ci'])}{rel}"
+
+
+def _m8_md(m8: dict[str, Any] | None, min_effect: float) -> list[str]:
+    lines = [
+        "",
+        "### m8_stealth: กฎ 100102 (stealth) ตั้งชื่ออย่างเดียว หรือเพิ่มเงื่อนไขการซื้อขาย เทียบ base "
+        f"(budget {PAIRED_BUDGET:g})",
+    ]
+    if m8 is None:
+        return [*lines, "", f"- {NO_M8_TH}"]
+    for split, block in m8["splits"].items():
+        lines += [
+            "",
+            f"#### {split} ({block['provenance']})",
+            "",
+            "| ตัวแปร | seeds | events | recall_any [95% CI] | recall_correct [95% CI] | "
+            "FA/symbol-day [95% CI] | FA hard [95% CI] | FA ที่มีชื่อ (จากกฎระบุเทคนิค) | "
+            "ผลต่าง recall_any (X − base) [95% CI] | ผลต่าง recall_correct (X − base) [95% CI] | "
+            "ผลต่าง FA hard (X − base) [95% CI] (เทียบ base) | อ่านว่า |",
+            "|" + "---|" * 12,
+        ]
+        for r in block["rows"]:
+            d_f = "–"
+            if r.get("error"):
+                d_c = d_a = "–"
+                verdict = f"ประเมินไม่ได้: {_error_th(r['error'])}"
+            elif r["variant"] == M3_REF:
+                d_c = d_a = "–"
+                verdict = "ตัวอ้างอิง"
+            else:
+                vc, va = r["vs_ref_correct"], r["vs_ref_any"]
+                d_c = "–" if vc is None else _fmt_diff_ci(vc["diff_mean"], vc["ci"])
+                d_a = "–" if va is None else _fmt_diff_ci(va["diff_mean"], va["ci"])
+                d_f = _fmt_fa_pair(r.get("vs_ref_fa_hard"))
+                if r["reason_any_th"]:
+                    verdict = r["reason_any_th"]
+                elif r["below_ref"]:
+                    verdict = "recall_any ต่ำกว่า base อย่างมีนัย"
+                else:
+                    verdict = _nonsig_th(va, min_effect, "base", "recall_any")
+            named = (
+                "–"
+                if r["fa_named"] is None
+                else f"{_fmt(r['fa_named'])} ({_fmt(r['fa_named_by_rule'])}) "
+                f"จาก {r['n_fa_episodes']} episode"
+            )
+            lines.append(
+                f"| {r['variant']} | {r['n_seeds']} | "
+                f"{'–' if r['n_events'] is None else r['n_events']} | "
+                f"{_fmt_ci(r['recall_any'], r['recall_any_ci'])} | "
+                f"{_fmt_ci(r['recall_correct'], r['recall_correct_ci'])} | "
+                f"{_fmt_ci(r['fa'], r['fa_ci'])} | {_fmt_ci(r['fa_hard'], r['fa_hard_ci'])} | "
+                f"{named} | {d_a} | {d_c} | {d_f} | {verdict} |"
+            )
+    lines += ["", f"- {m8['rule_th']}"]
+    sel = m8["selection"]
+    if sel is not None:
+        for v, why in sorted(sel["excluded"].items(), key=lambda kv: _m8_rank(kv[0])):
+            lines.append(f"- ตัดออก {v}: {why}")
+        if sel["chosen"] is None:
+            lines.append("- **ผลการเลือก (accept):** เลือกไม่ได้ (ไม่มีผล base ที่ใช้ได้)")
+        else:
+            if sel["top"] is not None and sel["chosen"] == M3_REF:
+                lines.append(
+                    f"- ตัวที่ FA-hard ลดลงมากที่สุดในกลุ่มที่มีสิทธิ์คือ {sel['top']} "
+                    f"แต่ไม่มีตัวใดที่ลดลงอย่างมีนัยและอย่างน้อย {M8_FA_CUT:.0%} จึงคง base"
+                )
+            lines.append(f"- **ผลการเลือก (accept):** {sel['chosen']}")
+    for split, blocks in m8["confusion"].items():
+        for v, block in blocks.items():
+            lines += _confusion_block_md(f"#### confusion {split}:{v}", block)
+    lines += [f"- {n}" for n in [*M8_NOTES_TH, *m8["notes"]]]
     return lines
 
 
@@ -2231,6 +2463,7 @@ def build_report(
     m3 = _m3(runs, n_boot, cfg.eval.min_effect)
     m4 = _m4(runs, n_boot, cfg.eval.min_effect)
     m5 = _m5(runs, n_boot, cfg.eval.min_effect)
+    m8 = _m8(runs, n_boot, cfg.eval.min_effect)
     confusion = _confusion(runs)
     data = {
         "header": header,
@@ -2247,6 +2480,7 @@ def build_report(
         "m3_attr": m3,
         "m4_sell": m4,
         "m5_rules": m5,
+        "m8_stealth": m8,
         "confusion": confusion,
         "labels": _labels_summary(runs),
         "notes": NOTES_TH,
@@ -2299,6 +2533,8 @@ def build_report(
             lines += _m4_md(m4, cfg.eval.min_effect)
         if exp == M5:
             lines += _m5_md(m5, cfg.eval.min_effect)
+        if exp == M8:
+            lines += _m8_md(m8, cfg.eval.min_effect)
     lines += [
         "",
         f"## AE vs baselines (paired bootstrap, budget {PAIRED_BUDGET:g}, real_t001 events)",
