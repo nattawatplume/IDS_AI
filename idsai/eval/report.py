@@ -1743,7 +1743,8 @@ M8_RULE_TH = (
     "กฎเลือก (กำหนดไว้ก่อนดูผล test และใช้ split accept เท่านั้น): ตัวอ้างอิงคือ base (ชุดตรวจจับของระบบจริง: "
     "กฎ rev 1 + กฎฝั่งขาย + สถิติ + ai.iforest แบบ shift 1 + กฎระบุเทคนิค); ตัวแปรที่มีสิทธิ์ต้องมีผลต่าง "
     f"recall_any (X − base) ≥ −{M8_RECALL_DROP:g} และ CI ล่าง > −{M8_CI_FLOOR:g} และ CI ล่างของผลต่าง "
-    f"recall_correct > −{M8_CI_FLOOR:g} (paired bootstrap ข้ามเหตุการณ์) ที่งบ 2; ในกลุ่มนี้ เฉพาะตัวที่ "
+    f"recall_correct > −{M8_CI_FLOOR:g} (paired bootstrap ข้ามเหตุการณ์) ที่งบ 2; ตัวแปรที่ตัดสิน recall "
+    f"เทียบ base ไม่ได้ (เหตุการณ์น้อยกว่า {MIN_EVENTS}) ถูกตัดออก; ในกลุ่มนี้ เฉพาะตัวที่ "
     "FA ของวันผันผวนสูง (accept-hard) ลดลงจาก base อย่างมีนัย (paired bootstrap ข้ามวัน: CI บนของ "
     f"(X − base) < 0 และลดลงอย่างน้อย {M8_FA_CUT:.0%} ของ base) เลือกตัวที่ลดลงมากที่สุด "
     "ถ้าไม่มีเลยเลือก base; ถ้าลดลงเท่ากันเลือกตัวที่ง่ายกว่า: " + " < ".join(M8_VARIANTS)

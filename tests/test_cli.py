@@ -592,6 +592,45 @@ def test_stealth_bundle_round_trip_and_r3_sha_in_meta(demo, tmp_path, mode):
         load_bundle(tmp_path / "b", load_settings(demo.cfg_path, overrides={**over, "chief": {}}))
 
 
+def test_stealth_act_bundle_refuses_a_changed_or_missing_r3_sha(demo, tmp_path, monkeypatch):
+    """M8 review: signatures_r3.yaml is not in config_hash, so an "act" bundle checks the file's
+    sha on load: an edited file, a changed sha or no sha in bundle.json is refused."""
+    from idsai.detection import rules
+
+    over = {"detectors": ["rules", "stat.robust_z", "stat.cusum"], "chief": {"stealth": "act"}}
+    cfg = load_settings(demo.cfg_path, overrides=over)
+    with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
+        cli.train_and_save(
+            cfg, store, tmp_path / "b", "demo", 0, demo.seen["train"], demo.seen["cal"], 10.0
+        )
+    load_bundle(tmp_path / "b", cfg)  # unchanged file: loads
+    edited = tmp_path / "signatures_r3.yaml"
+    edited.write_bytes(rules.R3_SIGNATURES_PATH.read_bytes() + b"\n# edited\n")
+    with monkeypatch.context() as mp:
+        mp.setattr(rules, "R3_SIGNATURES_PATH", edited)
+        with pytest.raises(BundleError, match="เปลี่ยนไปหลังสร้างชุดโมเดล"):
+            load_bundle(tmp_path / "b", cfg)
+    path = tmp_path / "b" / "bundle.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**doc, "signatures_r3_sha": "000000000000"}), encoding="utf-8")
+    with pytest.raises(BundleError, match="000000000000"):
+        load_bundle(tmp_path / "b", cfg)
+    del doc["signatures_r3_sha"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(BundleError, match="signatures_r3_sha"):
+        load_bundle(tmp_path / "b", cfg)
+
+
+def test_bundle_without_stealth_ignores_the_r3_file(demo, tmp_path, monkeypatch):
+    """Stealth off: the r3 file plays no part, so editing it never blocks a bundle."""
+    from idsai.detection import rules
+
+    edited = tmp_path / "signatures_r3.yaml"
+    edited.write_bytes(rules.R3_SIGNATURES_PATH.read_bytes() + b"\n# edited\n")
+    monkeypatch.setattr(rules, "R3_SIGNATURES_PATH", edited)
+    load_bundle(demo.dir, demo.cfg)
+
+
 def _scored_day(cfg, dets) -> pl.DataFrame:
     from idsai.detection.features.bars import trades_to_bars
     from idsai.detection.features.windows import compute_windows

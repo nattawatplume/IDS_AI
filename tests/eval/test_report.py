@@ -1460,6 +1460,16 @@ def test_m8_select_missing_pairs_errors_and_no_base():
     few = _m8_row("stealth_act", fa_hard=cut, reason_any_th="ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 1 ครั้ง")
     sel = m8_select([M8_BASE, few])
     assert sel["chosen"] == "base" and "ยังตัดสินไม่ได้" in sel["excluded"]["stealth_act"]
+    few = _m8_row("stealth_act", fa_hard=cut, reason_th="ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 9 ครั้ง")
+    sel = m8_select([M8_BASE, few])  # the recall_correct pair too
+    assert sel["chosen"] == "base" and "เพียง 9 ครั้ง" in sel["excluded"]["stealth_act"]
+
+
+def test_m8_rule_text_states_the_few_events_exclusion():
+    from idsai.eval.metrics import MIN_EVENTS
+    from idsai.eval.report import M8_RULE_TH
+
+    assert f"เหตุการณ์น้อยกว่า {MIN_EVENTS}) ถูกตัดออก" in M8_RULE_TH
 
 
 def test_fa_pair_is_a_day_paired_bootstrap_of_hard_counts():
