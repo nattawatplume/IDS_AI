@@ -74,3 +74,25 @@ Train range 2018-01-01..2019-06-30, feature cache read only, the same day and ev
 - `m8_stealth`: the variants `base`, `stealth_attr` and `stealth_act`, with one fit and one scoring pass per seed. The variants only re-fuse those scores, and each one gets its own calibration and τ.
 - Paired FA-hard: per accept-hard symbol-day, the mean over the common seeds, then a day bootstrap with the same indices for both arms.
 - `m8_select` also excludes a variant whose paired recall comparison cannot decide (too few events).
+
+## ผล / Results (28 Nov 2026, `m8_stealth`, 5 seeds, budget 2)
+Command as in "Run". Full tables with CIs and the confusion tables: `data/report.md` section `m8_stealth` (REPORT §16).
+
+| split | variant | recall_any | Δ recall_any [95% CI] | Δ recall_correct [95% CI] | FA/symbol-day | FA hard | Δ FA hard [95% CI] (rel) | named FA (by naming rule) |
+|---|---|---|---|---|---|---|---|---|
+| accept (94 events) | base | 0.806 | – | – (0.787) | 2.517 | 7.700 | – | 0.347 (0.016) |
+| | stealth_attr | 0.749 | −0.057 [−0.111, −0.019] | −0.057 [−0.111, −0.019] | 2.037 | 6.150 | −1.550 [−2.550, −0.649] (−20 %) | 0.181 (0.086) |
+| | stealth_act | 0.774 | −0.032 [−0.074, 0.000] | −0.043 [−0.096, −0.011] | 2.190 | 6.450 | −1.250 [−2.250, −0.400] (−16 %) | 0.217 (0.019) |
+| test (200 events, report only) | base | 0.789 | – | – (0.783) | 1.806 | 5.850 | – | 0.582 (0.026) |
+| | stealth_attr | 0.756 | −0.033 [−0.058, −0.010] | −0.033 [−0.058, −0.010] | 1.136 | 4.050 | −1.800 [−3.250, −0.700] (−31 %) | 0.327 (0.167) |
+| | stealth_act | 0.779 | −0.010 [−0.025, 0.000] | −0.008 [−0.025, 0.010] | 1.233 | 4.250 | −1.600 [−3.100, −0.499] (−27 %) | 0.348 (0.043) |
+| semisyn (report only) | base | 0.730 | – | – (0.535) | 1.581 | – | – | 0.625 (0.027) |
+| | stealth_attr | 0.590 | −0.140 [−0.150, −0.131] | −0.139 [−0.148, −0.130] | 0.936 | – | – | 0.359 (0.177) |
+| | stealth_act | 0.732 | +0.002 [−0.005, 0.008] | −0.132 [−0.145, −0.120] | 1.020 | – | – | 0.379 (0.048) |
+
+- **Selection (accept): base.** Excluded: stealth_attr (recall_any −0.057, beyond −0.01) and stealth_act (recall_any −0.032, beyond −0.01). Both also fail the CI-low gates (recall_any CI low −0.111 / −0.074, recall_correct CI low −0.111 / −0.096, all ≤ −0.03). Both cut FA hard significantly and by more than 10 %, but neither is eligible. The live config is unchanged (no `chief.stealth` in `configs/default.yaml`; default hash 9aff5e3482f2, `eval_prev_live.yaml` 53e3b662ab96).
+- Test (looked at once, report only): stealth_act would look eligible on test alone (recall_any −0.010, recall_correct −0.008, FA hard −27 %). It does not change the choice: selecting on test would make test a selection split. The accept and test differences overlap within their CIs.
+- SEMI-SYN (report only): stealth_attr loses pump_burst detection (missed 0.348 → 0.759), so 100102 in F also helps fast pumps reach τ on the simulator. stealth_act keeps recall_any, but pump_stealth naming drops (MM-T000 0.524 → 0.925, MM-T001 0.480 → 0.060): the simulator's stealth pumps have no trade-count burst, so rev 3 never fires on them. pump_burst is about unchanged (missed 0.348 → 0.331).
+- Reading: both variants cut accept FA hard by 16–20 %, at a cost of about 3–6 points of recall_any (about 3 and 5 of 94 events). So 100102 also lets some real pumps reach τ. This differs from the M7 train counterfactual (160 → 160), which kept τ, used one seed and had no naming rules. That explanation is not tested.
+- Review follow-ups: `load_bundle` now checks `signatures_r3_sha` against `configs/signatures_r3.yaml` when `chief.stealth` is "act" (a changed file, a changed sha or a missing sha is a `BundleError`; nothing changes with stealth off). `M8_RULE_TH` now states that a variant whose recall comparison cannot decide (fewer than 10 events) is excluded, as `m8_select` already did.
+- Next (hypothesis, not implemented): on train only, look at the real pumps that are lost when 100102 is dropped with τ refit at the same budget, and at how they differ from this rule's FA. Accept stays untouched as the selection split. Only then pre-register a single new condition and test it with the same discipline.
