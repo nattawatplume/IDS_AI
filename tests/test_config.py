@@ -320,3 +320,40 @@ def test_chief_rule_rev2_is_order_independent():
     assert config_hash(a) == config_hash(b)
     with pytest.raises(ValueError, match="twice"):  # repeats are still an error, not merged
         load_settings(overrides={"chief": {"rule_rev2": [100102, 100101, 100102]}})
+
+
+# ---------------------------------------------------------------- M8 stealth flag
+
+
+def test_chief_stealth_off_is_absent_and_keeps_the_pinned_hashes():
+    for cfg in (load_settings(), load_settings(overrides={"chief": {"stealth": None}})):
+        assert cfg.chief.stealth is None
+        assert "stealth" not in cfg.model_dump(mode="json")["chief"]
+        assert config_hash(cfg) == "9aff5e3482f2"  # the live default
+    prev = load_settings(REPO_ROOT / "configs/eval_prev_live.yaml")
+    assert prev.chief.stealth is None and config_hash(prev) == "53e3b662ab96"
+    assert config_hash(load_settings(overrides=OLD_DEFAULT)) == "6da45ffe7efd"
+
+
+def test_chief_stealth_on_is_dumped_and_changes_the_hash():
+    attr = load_settings(overrides={"chief": {"stealth": "attr"}})
+    act = load_settings(overrides={"chief": {"stealth": "act"}})
+    assert attr.model_dump(mode="json")["chief"]["stealth"] == "attr"
+    assert act.model_dump(mode="json")["chief"]["stealth"] == "act"
+    assert len({config_hash(attr), config_hash(act), "9aff5e3482f2"}) == 3
+    with pytest.raises(ValueError):
+        load_settings(overrides={"chief": {"stealth": "off"}})
+
+
+def test_chief_stealth_conflicts_are_errors():
+    for mode in ("attr", "act"):
+        with pytest.raises(ValueError, match="rule_rev2"):
+            load_settings(overrides={"chief": {"stealth": mode, "rule_rev2": [100102]}})
+        # rev 2 of the other pump rule is fine with either mode
+        ok = load_settings(overrides={"chief": {"stealth": mode, "rule_rev2": [100101]}})
+        assert ok.chief.stealth == mode
+    # "attr" turns 100102 into a naming rule, which needs the naming layer
+    with pytest.raises(ValueError, match="attr_rules"):
+        load_settings(overrides={"chief": {"stealth": "attr", "attr_rules": False}})
+    act = load_settings(overrides={"chief": {"stealth": "act", "attr_rules": False}})
+    assert act.chief.stealth == "act"  # "act" keeps 100102 in F and does not need it

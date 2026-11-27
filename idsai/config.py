@@ -100,6 +100,8 @@ class FeatureCfg(_Cfg):
 
 
 _AI_DEFAULTS = {"ai_mode": "fuse", "ai_shift": 0.0, "ai_regime_feature": None}
+STEALTH_SID = 100102  # M8: the stealth pump rule that `chief.stealth` moves or gates
+StealthMode = Literal["attr", "act"]
 
 
 class ChiefCfg(_Cfg):
@@ -120,6 +122,12 @@ class ChiefCfg(_Cfg):
     # layer (e.g. [100101, 100102]); rev 2 keeps the detector name `rule.<sid>`. Empty (default)
     # leaves every output bit-identical and is absent from every dump (like `attr_rules`).
     rule_rev2: list[int] = []
+    # M8: the stealth pump rule 100102. "attr": it leaves the F rule layer and becomes a
+    # naming-only rule (`attr.100102`, appended after `signatures_attr.yaml`; needs `attr_rules`).
+    # "act": its rev 3 (`configs/signatures_r3.yaml`: rev 1 + `z_n_trades_60 >= 3`) replaces rev 1
+    # under the same name `rule.100102`. None (default) leaves every output bit-identical and is
+    # absent from every dump (like `rule_rev2`).
+    stealth: StealthMode | None = None
 
     @field_validator("rule_rev2", mode="after")
     @classmethod
@@ -133,6 +141,16 @@ class ChiefCfg(_Cfg):
         check_ai_fusion(self.ai_mode, self.ai_shift, self.ai_regime_feature)
         if len(set(self.rule_rev2)) != len(self.rule_rev2):
             raise ValueError(f"chief.rule_rev2 lists a rule twice: {self.rule_rev2}")
+        if self.stealth is not None and STEALTH_SID in self.rule_rev2:
+            raise ValueError(
+                f"chief.stealth {self.stealth!r} and chief.rule_rev2 both change rule "
+                f"{STEALTH_SID}: use one"
+            )
+        if self.stealth == "attr" and not self.attr_rules:
+            raise ValueError(
+                "chief.stealth 'attr' makes rule 100102 a naming rule, which needs "
+                "chief.attr_rules: true"
+            )
         return self
 
     @model_serializer(mode="wrap")
@@ -147,6 +165,8 @@ class ChiefCfg(_Cfg):
             out.pop("attr_rules", None)
         if not self.rule_rev2:
             out.pop("rule_rev2", None)
+        if self.stealth is None:
+            out.pop("stealth", None)
         return out
 
 
