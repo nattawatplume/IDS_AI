@@ -33,10 +33,13 @@ import sys
 import tempfile
 import time
 import warnings
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 
 from idsai.ai.chief import AiFusion, Chief
 from idsai.config import load_settings
@@ -47,6 +50,7 @@ from idsai.eval.experiments import (
     _Ctx,
     _episodes,
     _normal_rows,
+    _Part,
 )
 from idsai.eval.metrics import match_events, unmatched_onsets
 from idsai.eval.splits import day_start_us
@@ -90,21 +94,42 @@ def main() -> int:
         print("--out must be outside data/", file=sys.stderr)
         return 1
     t_start = time.time()
-    tmp = Path(tempfile.mkdtemp(prefix="m6diag_"))
-    db = tmp / "app.duckdb"
-    shutil.copy2(cfg.paths.app_db, db)  # read a copy: the real database is never opened
-    try:
-        with Store(cfg.paths.data_dir, db) as store:
-            res = run(cfg, store, args.budget, args.seed)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    res = on_db_copy(cfg, "m6diag_", lambda store: run(cfg, store, args.budget, args.seed))
     res["wall_s"] = round(time.time() - t_start, 1)
     out_path.write_text(json.dumps(res, indent=2, default=str), encoding="utf-8")
     print_table(res)
     return 0
 
 
-def run(cfg, store: Store, budget: float, seed: int) -> dict:
+def on_db_copy(cfg, prefix: str, fn: Callable[[Store], dict]) -> dict:
+    """`fn(store)` on a temp copy of the app DuckDB (the real database is never opened)."""
+    tmp = Path(tempfile.mkdtemp(prefix=prefix))
+    db = tmp / "app.duckdb"
+    shutil.copy2(cfg.paths.app_db, db)
+    try:
+        with Store(cfg.paths.data_dir, db) as store:
+            return fn(store)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@dataclass
+class Stack:
+    """The live stack fit, calibrated and scored on the TRAIN range (shared by the diagnoses)."""
+
+    ctx: _Ctx
+    dets: list
+    ai: AiFusion
+    chief: Chief
+    tau: float
+    cal: _Part
+    train: _Part
+    fused: pl.DataFrame  # train rows: symbol, t_end_us, `keep` columns, scores, p__*, F, ...
+
+
+def fit_stack(cfg, store: Store, budget: float, seed: int, keep: tuple[str, ...] = ()) -> Stack:
+    """Split, fit the iforest on train-normal, calibrate the Chief on cal-normal, tau at `budget`,
+    then score and fuse every train row (events + normal), keeping the feature columns `keep`."""
     ctx = _Ctx(cfg, store, seed)
     sp = ctx.split
     print(f"split {sp.counts()}", flush=True)
@@ -112,7 +137,7 @@ def run(cfg, store: Store, budget: float, seed: int) -> dict:
     mv, info = ctx.fit(dets, sp.train_normal)
     print(f"fit {sorted(mv)} on {info.get('train_rows')} rows", flush=True)
     cal = ctx.clean(sp.cal_normal, dets)
-    train = ctx.real_parts(sp.train_events, sp.train_normal, dets)
+    train = ctx.real_parts(sp.train_events, sp.train_normal, dets, keep=keep)
     print(f"scored cal {cal.frame.height} rows, train {train.frame.height} rows", flush=True)
 
     ai = AiFusion.from_cfg(cfg.chief)
@@ -122,7 +147,14 @@ def run(cfg, store: Store, budget: float, seed: int) -> dict:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=SATURATION_WARNING, category=RuntimeWarning)
         tau = chief.fit_threshold(chief.fuse(cal.frame.select(cols)), budget)
-    fused = chief.fuse(train.frame.select(cols))
+    fused = chief.fuse(train.frame.select(*cols, *keep))
+    return Stack(ctx, dets, ai, chief, tau, cal, train, fused)
+
+
+def run(cfg, store: Store, budget: float, seed: int) -> dict:
+    st = fit_stack(cfg, store, budget, seed)
+    ctx, sp, dets, ai, chief = st.ctx, st.ctx.split, st.dets, st.ai, st.chief
+    tau, cal, train, fused = st.tau, st.cal, st.train, st.fused
     b, a = cfg.eval.before_s, cfg.eval.after_s
 
     normal = _episodes(chief, _normal_rows(fused, train.fa_days), tau)
