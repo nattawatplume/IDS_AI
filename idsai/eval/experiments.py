@@ -81,6 +81,17 @@ Rules enter F, so every variant gets its own calibration and tau and its FA can 
 injected test-normal days); they add `rule_rev2` (the sids at rev 2), `sell_side`, `attr_rules`,
 `ai_fusion`, the shas of the two rev 2 files and the M3 FA-naming counts.
 
+`m8_stealth` (M8: the stealth pump rule 100102) runs the same live stack as `m5_rules`
+(`m8_cfg`: `m5_cfg` with `chief.stealth` off; every rule at rev 1, naming rules on in every
+variant), fits `ai.iforest` once per seed and scores every set once with the live detectors, rev 3
+of 100102 (`configs/signatures_r3.yaml`: rev 1 + `z_n_trades_60 >= 3`, scored as
+`rule.100102.rev3`) and the naming rules plus 100102 as a naming rule (`attr.100102`). Variants
+re-fuse those scores: `base`; `stealth_attr` (`chief.stealth: attr`: 100102 leaves F and names
+only, after the M3 naming rules); `stealth_act` (`chief.stealth: act`: rev 3 in rev 1's place).
+Each gets its own calibration and tau. Records are `<split>:<variant>` for accept (accept-hard as
+in m1_fusion), test (REAL) and semisyn; they add `stealth`, `sell_side`, `attr_rules`,
+`ai_fusion`, the sha of `signatures_r3.yaml` and the M3 FA-naming counts.
+
 `retrain_drift` records the full stack with AE v1 / v2 (`v1`, `v2`) and the AE alone through
 its own Chief on the same scores (`v1:ai`, `v2:ai`). Records carry `classifies`: whether the
 detector set can name a technique at all (a rule or `stat.cusum`), so recall_correct of
@@ -118,13 +129,20 @@ from idsai.contracts.detector import Detector, Evidence, feature_matrix
 from idsai.contracts.frames import LABELS, conform, empty
 from idsai.data.store import DAY_US, Store
 from idsai.detection.features.registry import model_features
-from idsai.detection.registry import build_detectors, sell_rule_detectors
+from idsai.detection.registry import (
+    build_detectors,
+    sell_rule_detectors,
+    stealth_naming_signature,
+    stealth_rev3_signature,
+)
 from idsai.detection.rules import (
     NAMING_SIGNATURES_PATH,
     R2_ALT_SIGNATURES_PATH,
     R2_SIGNATURES_PATH,
+    R3_SIGNATURES_PATH,
     SELL_SIGNATURES_PATH,
     SIGNATURES_PATH,
+    STEALTH_SID,
     WASH2_SIGNATURES_PATH,
     SignatureDetector,
     load_signatures,
@@ -260,6 +278,15 @@ M5_VARIANTS: dict[str, tuple[str, ...]] = {
     "r101_25": ("r101_25",),
     "r102": ("r102",),
     "r101+r102": ("r101", "r102"),
+}
+M8 = "m8_stealth"
+M8_SPLITS = ("accept", "test", "semisyn")
+STEALTH_REV3_NAME = "rule.100102.rev3"
+# variant -> what happens to rule 100102 (the `chief.stealth` value); the tie order is this order
+M8_VARIANTS: dict[str, str | None] = {
+    "base": None,
+    "stealth_attr": "attr",
+    "stealth_act": "act",
 }
 
 
@@ -1575,6 +1602,121 @@ def _exp_m5_rules(ctx: _Ctx) -> list[dict]:
     return out
 
 
+def m8_cfg(cfg: Settings) -> Settings:
+    """`m5_cfg` (live feature set, every rule at rev 1) with `chief.stealth` off, whatever the
+    invoking config says (the variants choose)."""
+    cfg = m5_cfg(cfg)
+    return cfg.model_copy(update={"chief": cfg.chief.model_copy(update={"stealth": None})})
+
+
+def m8_detectors(
+    cfg: Settings, seed: int
+) -> tuple[list[Detector], Detector, list[Detector], Detector]:
+    """`(live, rev3, naming, stealth_naming)`: the unfitted live stack (`M3_LIVE` under `m8_cfg`),
+    rule 100102 rev 3 under its own name (`STEALTH_REV3_NAME`), the M3 naming rules in priority
+    order and rule 100102 on the naming layer (`attr.100102`, `stealth_naming_signature`)."""
+    cfg = m8_cfg(cfg)
+    live = build_detectors(list(M3_LIVE), cfg, seed)
+    if not any(d.name == f"rule.{STEALTH_SID}" for d in live):
+        raise ValueError(f"the live rules lack rule.{STEALTH_SID}")
+    rev3 = SignatureDetector(stealth_rev3_signature())
+    rev3.name = STEALTH_REV3_NAME
+    naming: list[Detector] = [SignatureDetector(s) for s in load_signatures(NAMING_SIGNATURES_PATH)]
+    return live, rev3, naming, SignatureDetector(stealth_naming_signature())
+
+
+def m8_variant_detectors(
+    live: list[Detector],
+    rev3: Detector,
+    naming: list[Detector],
+    stealth_naming: Detector,
+    variant: str,
+) -> tuple[list[Detector], list[Detector]]:
+    """`(detectors, naming)` of a variant, as `chief.stealth` builds them (`rule_signatures`,
+    `naming_detectors`): "attr" drops rule 100102 and appends it to the naming rules, "act" puts
+    rev 3 in rev 1's place."""
+    mode = M8_VARIANTS[variant]
+    rule = f"rule.{STEALTH_SID}"
+    if mode is None:
+        return list(live), list(naming)
+    if mode == "attr":
+        return [d for d in live if d.name != rule], [*naming, stealth_naming]
+    return [rev3 if d.name == rule else d for d in live], list(naming)
+
+
+def _exp_m8_stealth(ctx: _Ctx) -> list[dict]:
+    sp = ctx.split
+    live, rev3, naming, stealth_naming = m8_detectors(ctx.cfg, ctx.seed)
+    ctx.cfg = m8_cfg(ctx.cfg)  # every load computes the live (sell-side) feature set
+    for key, path in (
+        ("signatures_r3_sha", R3_SIGNATURES_PATH),
+        ("signatures_sell_sha", SELL_SIGNATURES_PATH),
+        ("signatures_attr_sha", NAMING_SIGNATURES_PATH),
+    ):
+        ctx.meta[key] = file_sha(path)
+
+    def fields(v: str) -> dict[str, Any]:
+        return {
+            "stealth": M8_VARIANTS[v],
+            "sell_side": True,
+            "attr_rules": True,
+            "ai_fusion": M3_FUSION.as_dict(),
+        }
+
+    try:
+        mv, info = ctx.fit(live, sp.train_normal)
+    except _VariantError as err:
+        return [
+            r
+            for v in M8_VARIANTS
+            for split in M8_SPLITS
+            for r in _error_records(
+                ctx,
+                M8,
+                f"{split}:{v}",
+                SEMI if split == "semisyn" else REAL,
+                err,
+                m8_variant_detectors(live, rev3, naming, stealth_naming, v)[0],
+                **fields(v),
+            )
+        ]
+    # every set is scored once with every detector; the variants only re-fuse these scores
+    every = [*live, rev3, *naming, stealth_naming]
+    cal = ctx.clean(sp.cal_normal, every)
+    acc = ctx.real_parts(sp.accept_events, sp.accept_normal, every)
+    hard_days = _most_volatile(ctx, sp.accept_normal, m1_hard_k(ctx.cfg, len(sp.accept_normal)))
+    acc_hard = _subpart(acc, hard_days)
+    test = ctx.real_parts(sp.test_events, sp.test_normal, every)
+    test_hard = ctx.clean(sp.test_hard_negative, every)
+    semi = ctx.semisyn_parts(every)
+    hard_keys = [_day_key(sd.symbol, sd.day) for sd in acc_hard.days]
+    sets = (
+        ("accept", REAL, [acc], acc_hard, {"accept_hard_days": hard_keys}),
+        ("test", REAL, [test], test_hard, {}),
+        ("semisyn", SEMI, semi, None, {"n_skipped_tick": sum(p.skipped_tick for p in semi)}),
+    )
+    out = []
+    for v in M8_VARIANTS:
+        dets, vnaming = m8_variant_detectors(live, rev3, naming, stealth_naming, v)
+        for split, prov, parts, hard, more in sets:
+            out += _variant(
+                ctx,
+                M8,
+                f"{split}:{v}",
+                prov,
+                dets,
+                dict(mv),
+                cal,
+                parts,
+                hard,
+                {**info, **fields(v), **more},
+                ai=M3_FUSION,
+                naming=vnaming,
+                fa_names=True,
+            )
+    return out
+
+
 _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     "real_t001": _exp_real_t001,
     "semisyn": _exp_semisyn,
@@ -1587,9 +1729,11 @@ _RUNNERS: dict[str, Callable[[_Ctx], list[dict]]] = {
     M3: _exp_m3_attr,
     M4: _exp_m4_sell,
     M5: _exp_m5_rules,
+    M8: _exp_m8_stealth,
 }
 EXPERIMENTS = tuple(_RUNNERS)
-INJECTING = ("semisyn", "ablation", M1, M2, M3, M4, M5)  # experiments that run Red-Team injection
+# experiments that run Red-Team injection
+INJECTING = ("semisyn", "ablation", M1, M2, M3, M4, M5, M8)
 
 
 def run_experiment(

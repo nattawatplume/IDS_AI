@@ -511,6 +511,34 @@ def test_rule_rev2_stream_alerts_equal_batch_episodes(world):
     ]
 
 
+def test_stealth_act_stream_alerts_equal_batch_episodes(world):
+    """M8: with `chief.stealth: act` rule 100102 rev 3 (same detector name) runs in the stream
+    path exactly as in the batch path: same fused F, same alerts."""
+    on = load_settings(overrides={"chief": {"stealth": "act"}})
+    rules = {d.name: d for d in build_detectors(["rules"], on)}
+    dets = [rules.get(d.name, d) for d in world["dets"]]
+    assert {d.signature_id: d.rev for d in dets if d.layer == "rule"}[100102] == 3
+    clean = load_day_windows(world["store"], SYM, D, world["cfg"])
+    plain = world["chief"]
+    chief = Chief(dets, plain.cfg, plain.config_hash, plain.model_versions, ai=plain.ai)
+    chief.calibrate(score_windows(clean.windows, dets))
+    chief.fit_threshold(chief.fuse(score_windows(clean.windows, dets)), budget_per_symbol_day=10.0)
+    bus = Bus(maxsize=100_000)
+    qa = bus.subscribe("alerts")
+    prev = world["trades"].filter(pl.col("ts_us") < D_US)
+    r = Replayer(world["trades"], speed=0, start_us=D_US, preroll_from_us=D_US - 86_400 * S)
+    r.inject(burst(), base_quote_rate(prev), "replay")
+    asyncio.run(StreamPipeline(world["cfg"], world["store"], dets, chief, bus, "replay").run(r))
+    closed = [a for a in drain(qa) if a.status == "closed"]
+    inj = load_day_windows(world["store"], SYM, D, world["cfg"], scenario=burst())
+    want = chief.episodes(chief.fuse(score_windows(inj.windows, dets)), provenance="replay")
+    assert want
+    key = lambda a: (a.symbol, a.ts_event_us)  # noqa: E731
+    assert [a.model_dump_json() for a in sorted(closed, key=key)] == [
+        a.model_dump_json() for a in sorted(want, key=key)
+    ]
+
+
 def test_ring_point_carries_quote_vol_but_series_and_scores_do_not(small, store):
     """Phase 2.2: each ring point keeps its stride's quote volume for the check page, while
     `series` (hence `/api/series`) and the `scores` bus message keep their old keys."""

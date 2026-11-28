@@ -15,7 +15,7 @@ import polars as pl
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from idsai.config import REPO_ROOT
+from idsai.config import REPO_ROOT, STEALTH_SID  # noqa: F401  (re-exported)
 from idsai.contracts.detector import Detector, Evidence, feature_matrix
 
 SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures.yaml"
@@ -31,6 +31,9 @@ WASH2_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_wash2.yaml"
 # replaces its rev 1) and by the `m5_rules` eval; the alt file holds the eval-only 100101 at 2.5
 R2_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_r2.yaml"
 R2_ALT_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_r2_alt.yaml"
+# M8 rev 3 of the stealth pump rule 100102 (rev 1 + a trading-activity gate), read only with
+# `chief.stealth: act` (it replaces rev 1 under the same detector name) and by the `m8_stealth` eval
+R3_SIGNATURES_PATH = REPO_ROOT / "configs" / "signatures_r3.yaml"
 THR_FLOOR = 1e-9
 KK_SID = 100103  # Kamps-Kleinberg baseline signature
 

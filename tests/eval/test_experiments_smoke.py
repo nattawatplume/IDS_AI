@@ -696,3 +696,88 @@ def test_m5_rules_fits_once_and_swaps_only_the_pump_rules(world, monkeypatch):
     # one accept event: no paired gain can be significant, so the pick stays base
     assert m5["selection"]["chosen"] == "base"
     assert m5["confusion"]["semisyn"]["base"]["rows"]
+
+
+def test_m8_stealth_fits_once_and_changes_only_rule_100102(world, monkeypatch):
+    """m8_stealth: the live stack is built inside the experiment (the eval config keeps its hash),
+    ai.iforest is fit once per seed, every (symbol-day, scenario) is scored once; stealth_attr
+    drops rule.100102 from the fused detectors and adds attr.100102 to the naming rules,
+    stealth_act puts rule.100102.rev3 in its place."""
+    from idsai.ai.baselines import IsolationForestDetector
+    from idsai.eval import experiments as ex
+
+    cfg, app, research, tmp = world
+    fits, loads, namings = [], [], {}
+    real_fit, real_load, real_chief = IsolationForestDetector.fit, ex._Ctx.load, ex.Chief
+
+    def if_fit(self, normal):
+        fits.append(self.name)
+        return real_fit(self, normal)
+
+    def load(self, items, detectors, **kw):
+        items = list(items)
+        if detectors:
+            loads.extend((sd, None if sc is None else sc.family) for sd, sc in items)
+        return real_load(self, items, detectors, **kw)
+
+    def chief(detectors, *a, naming=None, **kw):
+        key = tuple(d.name for d in detectors)
+        namings.setdefault(key, set()).add(tuple(d.name for d in naming or []))
+        return real_chief(detectors, *a, naming=naming, **kw)
+
+    monkeypatch.setattr(IsolationForestDetector, "fit", if_fit)
+    monkeypatch.setattr(ex._Ctx, "load", load)
+    monkeypatch.setattr(ex, "Chief", chief)
+    recs = run_experiment("m8_stealth", cfg, app, seed=0, research=research)
+    assert fits == ["ai.iforest"]
+    assert len(loads) == len(set(loads))  # no symbol-day (or injected day) scored twice
+    assert {r["variant"] for r in recs} == {
+        f"{s}:{v}" for s in ex.M8_SPLITS for v in ex.M8_VARIANTS
+    }
+    by = {(r["variant"], r["budget"]): r for r in recs}
+    m3_naming = ("attr.100191", "attr.100591")
+    for r in recs:
+        assert RECORD_KEYS <= set(r)
+        assert r["experiment"] == "m8_stealth" and r["config_hash"] == config_hash(cfg)
+        split, v = r["variant"].split(":")
+        assert r["stealth"] == ex.M8_VARIANTS[v]
+        assert (r["sell_side"], r["attr_rules"]) == (True, True)
+        assert r["ai_fusion"] == AiFusion("shift", 1.0).as_dict()
+        for k in ("signatures_r3_sha", "signatures_sell_sha", "signatures_attr_sha"):
+            assert len(r[k]) == 12
+        names = r["detectors"]
+        base = by[(f"{split}:base", r["budget"])]["detectors"]
+        if v == "base":
+            want, naming = base, m3_naming
+        elif v == "stealth_attr":
+            want, naming = [n for n in base if n != "rule.100102"], (*m3_naming, "attr.100102")
+        else:
+            want = ["rule.100102.rev3" if n == "rule.100102" else n for n in base]
+            naming = m3_naming
+        assert names == want
+        assert namings[tuple(names)] == {naming}
+        assert "ai.iforest" in names and "rule.100104" in names and "rule.100601" in names
+        assert not any(n.startswith("attr.") for n in names)  # naming rules never fused
+        if r["budget"] == 10.0:
+            assert r["error"] is None, (r["variant"], r["error"])
+            assert {"n_fa_episodes", "n_fa_named", "n_fa_named_by_rule"} <= set(r["metrics"])
+    assert "rule.100102" in by[("test:base", 10.0)]["detectors"]
+
+    from idsai.eval import report
+
+    monkeypatch.setattr(report, "PAIRED_BUDGET", 10.0)
+    md, js = tmp / "m8.md", tmp / "m8.json"
+    data = build_report(research, md, js, cfg=cfg)
+    text = md.read_text(encoding="utf-8")
+    assert "### m8_stealth" in text and "accuracy" not in text.lower()
+    assert "#### confusion semisyn:stealth_act" in text
+    m8 = data["m8_stealth"]
+    assert set(m8["splits"]) == set(ex.M8_SPLITS)
+    assert [r["variant"] for r in m8["splits"]["accept"]["rows"]] == list(ex.M8_VARIANTS)
+    for r in m8["splits"]["accept"]["rows"]:
+        if r["variant"] != "base":
+            assert r["vs_ref_fa_hard"] is not None and r["vs_ref_fa_hard"]["n_seeds"] == 1
+    # one accept event: no paired recall comparison is decidable, so the pick stays base
+    assert m8["selection"]["chosen"] == "base"
+    assert set(m8["selection"]["excluded"]) == {"stealth_attr", "stealth_act"}
+    assert m8["confusion"]["semisyn"]["base"]["rows"]

@@ -21,7 +21,7 @@ import numpy as np
 import polars as pl
 
 from idsai.ai.chief import AiFusion, Chief
-from idsai.config import Settings, config_hash
+from idsai.config import Settings, config_hash, file_sha
 from idsai.contracts.detector import Detector
 from idsai.eval.metrics import MIN_EVENTS, few_events_th, paired_bootstrap, significant
 
@@ -247,13 +247,33 @@ def _ai_th(d: dict[str, Any]) -> str:
     return text
 
 
+def _check_r3_sha(root: Path, doc: dict[str, Any]) -> None:
+    """M8: a `chief.stealth` "act" bundle was calibrated with rule 100102's rev 3 as read from
+    `configs/signatures_r3.yaml` then. The file is not in `config_hash`, so its sha recorded in
+    `bundle.json` must match the file now, or F would use a rule the Chief never saw."""
+    from idsai.detection import rules  # lazy: keeps detectors off import
+
+    want = file_sha(rules.R3_SIGNATURES_PATH)
+    got = doc.get("signatures_r3_sha")
+    if got is None:
+        raise BundleError(
+            f"ชุดโมเดลที่ {root} ไม่ได้บันทึก sha ของ {rules.R3_SIGNATURES_PATH.name} "
+            f"(signatures_r3_sha) แต่ค่าตั้งใช้ chief.stealth act ต้อง train ใหม่"
+        )
+    if got != want:
+        raise BundleError(
+            f"{rules.R3_SIGNATURES_PATH.name} เปลี่ยนไปหลังสร้างชุดโมเดลที่ {root} "
+            f"(sha {got} ไม่ตรงกับไฟล์ตอนนี้ {want}) ต้อง train ใหม่"
+        )
+
+
 def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief, dict[str, Any]]:
     """`(detectors, chief, bundle.json)` of the bundle in `root`, ready for `StreamPipeline`.
 
     The Chief runs the configured AI fusion (`AiFusion.from_cfg(cfg.chief)`). Raises `BundleError`
     (Thai) when the bundle is missing or incomplete, a stored model or the Chief state changed on
-    disk, it was made with another config (`config_hash`), or its Chief was calibrated with another
-    AI fusion.
+    disk, it was made with another config (`config_hash`), its Chief was calibrated with another
+    AI fusion, or (`chief.stealth` "act") `configs/signatures_r3.yaml` changed since training.
     """
     # lazy: keeps detectors off import
     from idsai.detection.registry import build_detectors, naming_detectors
@@ -274,6 +294,8 @@ def load_bundle(root: str | Path, cfg: Settings) -> tuple[list[Detector], Chief,
             f"ชุดโมเดลที่ {root} สร้างด้วยค่าตั้งอื่น (config_hash {doc.get('config_hash')} "
             f"ไม่ตรงกับค่าตั้งตอนนี้ {want}) ต้อง train ใหม่ด้วยค่าตั้งปัจจุบัน"
         )
+    if cfg.chief.stealth == "act":
+        _check_r3_sha(root, doc)
     try:
         dets = build_detectors(list(doc["build"]), cfg, int(doc["seed"]))
         names = [d.name for d in dets]

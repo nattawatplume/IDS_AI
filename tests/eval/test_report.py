@@ -1382,6 +1382,119 @@ def test_m5_select_nothing_significant_or_no_base():
     assert sel["chosen"] == "r101" and "r102" in sel["excluded"]
 
 
+# ---------------------------------------------------------------- M8 selection
+def _pair(diff, lo, hi, rel=None):
+    return {"diff_mean": diff, "ci": [lo, hi], **({} if rel is None else {"rel": rel})}
+
+
+def _m8_row(variant, any_=(0.0, -0.02, 0.02), correct=(0.0, -0.02, 0.02), fa_hard=None, **kw):
+    return {"variant": variant, "vs_ref_any": _pair(*any_), "vs_ref_correct": _pair(*correct),
+            "vs_ref_fa_hard": fa_hard, **kw}  # fmt: skip
+
+
+M8_BASE = {"variant": "base", "vs_ref_any": None, "vs_ref_correct": None, "vs_ref_fa_hard": None}
+
+
+def test_m8_select_largest_significant_fa_hard_cut_wins():
+    from idsai.eval.report import m8_select
+
+    rows = [
+        M8_BASE,
+        _m8_row("stealth_attr", fa_hard=_pair(-1.5, -2.5, -0.5, rel=-0.30)),
+        _m8_row("stealth_act", fa_hard=_pair(-1.0, -1.8, -0.2, rel=-0.20)),
+    ]
+    sel = m8_select(rows)
+    assert sel["chosen"] == "stealth_attr" and sel["top"] == "stealth_attr"
+    assert sel["eligible"] == ["base", "stealth_attr", "stealth_act"]
+    # a bigger cut whose CI reaches 0 is not significant: the smaller significant one wins
+    rows[1] = _m8_row("stealth_attr", fa_hard=_pair(-3.0, -6.0, 0.1, rel=-0.60))
+    sel = m8_select(rows)
+    assert sel["chosen"] == "stealth_act" and sel["top"] == "stealth_attr"
+    # significant but under the 10 % relative cut
+    rows[2] = _m8_row("stealth_act", fa_hard=_pair(-0.3, -0.5, -0.1, rel=-0.09))
+    assert m8_select(rows)["chosen"] == "base"
+    # equal cuts: the simpler variant
+    same = _pair(-1.0, -2.0, -0.5, rel=-0.2)
+    tie = [M8_BASE, _m8_row("stealth_act", fa_hard=same), _m8_row("stealth_attr", fa_hard=same)]
+    assert m8_select(tie)["chosen"] == "stealth_attr"
+
+
+def test_m8_select_recall_gates():
+    from idsai.eval.report import m8_select
+
+    cut = _pair(-2.0, -3.0, -1.0, rel=-0.5)
+    rows = [
+        M8_BASE,
+        _m8_row("stealth_attr", any_=(-0.011, -0.02, 0.0), fa_hard=cut),  # drop > 0.01
+        _m8_row("stealth_act", any_=(-0.005, -0.031, 0.02), fa_hard=cut),  # CI low <= -0.03
+    ]
+    sel = m8_select(rows)
+    assert sel["chosen"] == "base" and set(sel["excluded"]) == {"stealth_attr", "stealth_act"}
+    assert "recall_any" in sel["excluded"]["stealth_attr"]
+    assert "CI" in sel["excluded"]["stealth_act"]
+    # at the bounds: eligible
+    rows[1] = _m8_row("stealth_attr", any_=(-0.01, -0.029, 0.0), fa_hard=cut)
+    assert m8_select(rows)["chosen"] == "stealth_attr"
+    # recall_correct CI low <= -0.03 excludes, whatever recall_any and the FA cut say
+    rows[1] = _m8_row("stealth_attr", correct=(-0.01, -0.03, 0.01), fa_hard=cut)
+    sel = m8_select(rows)
+    assert sel["chosen"] == "base" and "recall_correct" in sel["excluded"]["stealth_attr"]
+
+
+def test_m8_select_missing_pairs_errors_and_no_base():
+    from idsai.eval.report import m8_select
+
+    cut = _pair(-2.0, -3.0, -1.0, rel=-0.5)
+    assert m8_select([_m8_row("stealth_attr", fa_hard=cut)])["chosen"] is None
+    rows = [
+        M8_BASE,
+        {**_m8_row("stealth_attr", fa_hard=cut), "vs_ref_any": None},
+        _m8_row("stealth_act", fa_hard=None),
+    ]
+    sel = m8_select(rows)
+    assert sel["chosen"] == "base" and set(sel["excluded"]) == {"stealth_attr", "stealth_act"}
+    rows = [M8_BASE, _m8_row("stealth_attr", error="boom"), _m8_row("stealth_act", fa_hard=cut)]
+    sel = m8_select(rows)
+    assert sel["chosen"] == "stealth_act" and "stealth_attr" in sel["excluded"]
+    # a recall pair that cannot decide (too few events) excludes the variant
+    few = _m8_row("stealth_act", fa_hard=cut, reason_any_th="ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 1 ครั้ง")
+    sel = m8_select([M8_BASE, few])
+    assert sel["chosen"] == "base" and "ยังตัดสินไม่ได้" in sel["excluded"]["stealth_act"]
+    few = _m8_row("stealth_act", fa_hard=cut, reason_th="ยังตัดสินไม่ได้ มีเหตุการณ์เพียง 9 ครั้ง")
+    sel = m8_select([M8_BASE, few])  # the recall_correct pair too
+    assert sel["chosen"] == "base" and "เพียง 9 ครั้ง" in sel["excluded"]["stealth_act"]
+
+
+def test_m8_rule_text_states_the_few_events_exclusion():
+    from idsai.eval.metrics import MIN_EVENTS
+    from idsai.eval.report import M8_RULE_TH
+
+    assert f"เหตุการณ์น้อยกว่า {MIN_EVENTS}) ถูกตัดออก" in M8_RULE_TH
+
+
+def test_fa_pair_is_a_day_paired_bootstrap_of_hard_counts():
+    from idsai.eval.metrics import paired_bootstrap
+    from idsai.eval.report import CI_SEED, _fa_pair
+
+    days = ["A|2025-01-01", "A|2025-01-02", "B|2025-01-01"]
+    arm = {s: {"fa_by_day": {"hard": dict(zip(days, c, strict=True))}}
+           for s, c in ((0, [1, 0, 2]), (1, [0, 0, 1]))}  # fmt: skip
+    ref = {s: {"fa_by_day": {"hard": dict(zip(days, c, strict=True))}}
+           for s, c in ((0, [3, 1, 2]), (1, [2, 2, 2]), (2, [9, 9, 9]))}  # fmt: skip
+    got = _fa_pair(arm, ref, "hard", 200)
+    a = np.array([[1, 0, 2], [0, 0, 1]], dtype=float)
+    b = np.array([[3, 1, 2], [2, 2, 2]], dtype=float)  # seed 2 is not common: left out
+    diff, (lo, hi) = paired_bootstrap(a, b, 200, CI_SEED)
+    assert got["diff_mean"] == pytest.approx(diff) == pytest.approx(4 / 6 - 12 / 6)
+    assert got["ci"] == [lo, hi]
+    assert got["rel"] == pytest.approx(diff / (12 / 6))
+    assert (got["n_days"], got["n_seeds"]) == (3, 2)
+    # different day sets, or a record without fa_by_day: no pair
+    odd = {0: {"fa_by_day": {"hard": {"A|2025-01-01": 1}}}, 1: arm[1]}
+    assert _fa_pair(odd, ref, "hard", 200) is None
+    assert _fa_pair({0: {}, 1: arm[1]}, ref, "hard", 200) is None
+
+
 # ---------------------------------------------------------------- reading of non-selected pairs
 def _vs_row(variant, diff=None, ci=None, sig=False, below=False):
     vs = None if diff is None else {"diff_mean": diff, "ci": list(ci), "ci_unit": "event"}

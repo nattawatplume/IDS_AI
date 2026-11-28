@@ -563,6 +563,74 @@ def shift_bundle(demo, tmp_path_factory):
     return SimpleNamespace(cfg=cfg, dir=out, fitted=seen["fitted"], cal=seen["cal"])
 
 
+@pytest.mark.parametrize("mode", ["act", "attr"])
+def test_stealth_bundle_round_trip_and_r3_sha_in_meta(demo, tmp_path, mode):
+    """M8: `chief.stealth` reaches the bundle through the registry; with "act" (rev 3 of rule
+    100102 in F) bundle.json records the sha of configs/signatures_r3.yaml."""
+    from idsai.config import file_sha
+    from idsai.detection.rules import R3_SIGNATURES_PATH
+
+    over = {"detectors": ["rules", "stat.robust_z", "stat.cusum"],
+            "chief": {"stealth": mode, "attr_rules": True}}  # fmt: skip
+    cfg = load_settings(demo.cfg_path, overrides=over)
+    with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
+        doc = cli.train_and_save(
+            cfg, store, tmp_path / "b", "demo", 0, demo.seen["train"], demo.seen["cal"], 10.0
+        )
+    dets, chief, stored = load_bundle(tmp_path / "b", cfg)
+    assert stored == doc
+    rules = {d.name: d.rev for d in dets if d.layer == "rule"}
+    if mode == "act":
+        assert doc["signatures_r3_sha"] == file_sha(R3_SIGNATURES_PATH)
+        assert rules["rule.100102"] == 3
+        assert "attr.100102" not in [d.name for d in chief.naming]
+    else:
+        assert "signatures_r3_sha" not in doc
+        assert "rule.100102" not in rules
+        assert [d.name for d in chief.naming][-1] == "attr.100102"
+    with pytest.raises(BundleError):  # the flag is in config_hash: no load without it
+        load_bundle(tmp_path / "b", load_settings(demo.cfg_path, overrides={**over, "chief": {}}))
+
+
+def test_stealth_act_bundle_refuses_a_changed_or_missing_r3_sha(demo, tmp_path, monkeypatch):
+    """M8 review: signatures_r3.yaml is not in config_hash, so an "act" bundle checks the file's
+    sha on load: an edited file, a changed sha or no sha in bundle.json is refused."""
+    from idsai.detection import rules
+
+    over = {"detectors": ["rules", "stat.robust_z", "stat.cusum"], "chief": {"stealth": "act"}}
+    cfg = load_settings(demo.cfg_path, overrides=over)
+    with Store(cfg.paths.data_dir, cfg.paths.app_db) as store:
+        cli.train_and_save(
+            cfg, store, tmp_path / "b", "demo", 0, demo.seen["train"], demo.seen["cal"], 10.0
+        )
+    load_bundle(tmp_path / "b", cfg)  # unchanged file: loads
+    edited = tmp_path / "signatures_r3.yaml"
+    edited.write_bytes(rules.R3_SIGNATURES_PATH.read_bytes() + b"\n# edited\n")
+    with monkeypatch.context() as mp:
+        mp.setattr(rules, "R3_SIGNATURES_PATH", edited)
+        with pytest.raises(BundleError, match="เปลี่ยนไปหลังสร้างชุดโมเดล"):
+            load_bundle(tmp_path / "b", cfg)
+    path = tmp_path / "b" / "bundle.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**doc, "signatures_r3_sha": "000000000000"}), encoding="utf-8")
+    with pytest.raises(BundleError, match="000000000000"):
+        load_bundle(tmp_path / "b", cfg)
+    del doc["signatures_r3_sha"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(BundleError, match="signatures_r3_sha"):
+        load_bundle(tmp_path / "b", cfg)
+
+
+def test_bundle_without_stealth_ignores_the_r3_file(demo, tmp_path, monkeypatch):
+    """Stealth off: the r3 file plays no part, so editing it never blocks a bundle."""
+    from idsai.detection import rules
+
+    edited = tmp_path / "signatures_r3.yaml"
+    edited.write_bytes(rules.R3_SIGNATURES_PATH.read_bytes() + b"\n# edited\n")
+    monkeypatch.setattr(rules, "R3_SIGNATURES_PATH", edited)
+    load_bundle(demo.dir, demo.cfg)
+
+
 def _scored_day(cfg, dets) -> pl.DataFrame:
     from idsai.detection.features.bars import trades_to_bars
     from idsai.detection.features.windows import compute_windows

@@ -1,0 +1,33 @@
+# M8 candidate: rev 3 of the stealth pump rule 100102 (configs/signatures.yaml keeps rev 1 and its
+# sha). Read only with `chief.stealth: act` (live/replay: rev 3 replaces rev 1 under the same
+# detector name `rule.100102`) and by the `m8_stealth` eval variant `stealth_act` (scored as
+# `rule.100102.rev3`). Turning it on in live is a separate step after the eval
+# (docs/superpowers/specs/2026-11-27-m8-stealth-rule-design.md).
+# Why: on train, 100102 is the rule behind F at the peak of 0.49 of the false alarms, 0.78 of the
+# hard-day false alarms and 0 of the 160 detected pumps (docs/REPORT.md section 15). Rev 3 = rev 1 conditions plus
+# `z_n_trades_60 >= 3`; the threshold 3 was frozen from train only before this check (M7 FA onset
+# median 2.40, DET onset Q1 3.53), not tuned on it.
+# Train check (M8, train range 2018-01-01..2019-06-30 only, feature cache read only, same selection
+# as the M5 check in signatures_r2.yaml): row fire rate on 3,075,840 rows of 356 train-normal
+# symbol-days (cached train-range days at least min_gap_days = 2 from every label of the symbol),
+# and per-event fire on 183 train REAL pumps (Sapienza + Hu, rows in [t_start - 120 s,
+# t_start + 300 s]); "fire episodes" = runs of firing rows split by gaps > 300 s.
+# Rev history of 100102 (stealth):
+#   rev 1: cusum_imb >= 8, ret_1800 >= 0.03, buy_imb_1800 >= 0.2. Train: 5,862 rows (1.91e-3;
+#          302 fire episodes = 0.848 per symbol-day), 42/183 pumps.
+#   rev 2: cusum_imb >= 6 (signatures_r2.yaml, M5; not used here).
+#   rev 3: rev 1 + z_n_trades_60 >= 3. Train: 691 rows (2.25e-4; 92 fire episodes = 0.258 per
+#          symbol-day), 38/183 pumps: 88 % fewer rows and 70 % fewer fire episodes for 4 fewer
+#          pumps fired (rev 3 fires on a subset of rev 1's rows by construction).
+# ops: ">=" (x >= thr), "<=" (x <= thr), "abs<=" (|x| <= thr)
+signatures:
+  - sid: 100102
+    technique: MM-T001.002
+    layer: rule
+    rev: 3
+    name: pump-and-dump แบบค่อยเป็นค่อยไป (stealth)
+    conditions:
+      - {feature: cusum_imb, op: ">=", thr: 8}
+      - {feature: ret_1800, op: ">=", thr: 0.03}
+      - {feature: buy_imb_1800, op: ">=", thr: 0.2}
+      - {feature: z_n_trades_60, op: ">=", thr: 3}
